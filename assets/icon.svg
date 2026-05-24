@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="96" y1="64" x2="416" y2="448" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2d2d2d"/>
+      <stop offset="1" stop-color="#1e1e1e"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="256" y1="120" x2="256" y2="392" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#007AFF" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#007AFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- App icon background -->
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect x="8" y="8" width="496" height="496" rx="104" stroke="#3e3e42" stroke-width="4"/>
+
+  <!-- Soft accent glow -->
+  <ellipse cx="320" cy="300" rx="140" ry="120" fill="url(#glow)"/>
+
+  <!-- Human-side bubble -->
+  <path
+    d="M112 168c0-26.5 21.5-48 48-48h112c26.5 0 48 21.5 48 48v88c0 26.5-21.5 48-48 48h-56l-36 36v-36h-20c-26.5 0-48-21.5-48-48v-88z"
+    fill="#2d2d2d"
+    stroke="#858585"
+    stroke-width="8"
+    stroke-linejoin="round"
+  />
+  <circle cx="176" cy="216" r="10" fill="#858585"/>
+  <circle cx="216" cy="216" r="10" fill="#858585"/>
+  <circle cx="256" cy="216" r="10" fill="#858585"/>
+
+  <!-- AI companion bubble -->
+  <path
+    d="M192 248c0-26.5 21.5-48 48-48h112c26.5 0 48 21.5 48 48v88c0 26.5-21.5 48-48 48h-56l-36 36v-36h-20c-26.5 0-48-21.5-48-48v-88z"
+    fill="#007AFF"
+  />
+
+  <!-- Spark / AI mark -->
+  <path
+    d="M320 276l12 24 26 4-19 18 5 26-24-13-24 13 5-26-19-18 26-4z"
+    fill="#ffffff"
+    opacity="0.95"
+  />
+</svg>

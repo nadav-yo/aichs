@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Secrets / credentials (user settings live in ~/.aicc/, outside this repo)
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+settings.local.json
+
+# IDE / tooling
+.claude/
+.idea/
+.vscode/
+*.swp
+
+# macOS
+.DS_Store
+
+# App user data (if accidentally created inside the repo)
+.aicc/settings.json
+.aicc/conversations/
+.aicc/avatars/

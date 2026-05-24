@@ -1,0 +1,104 @@
+import json
+from dataclasses import dataclass
+
+from config import MODEL_PROVIDER
+from services.compaction import CONTEXT_WINDOWS, RESERVE_TOKENS, _estimate_tokens
+from services.content import content_preview
+from services.skills import Skill
+from services.tools import TOOLS_ANTHROPIC, TOOLS_OPENAI
+from services.workspace import system_parts
+
+
+@dataclass
+class ContextSegment:
+    label: str
+    text: str
+    detail: str = ""
+
+    @property
+    def byte_count(self) -> int:
+        return len(self.text.encode("utf-8"))
+
+    @property
+    def token_count(self) -> int:
+        return max(1, self.byte_count // 4) if self.text else 0
+
+
+@dataclass
+class ContextBudget:
+    segments: list[ContextSegment]
+    window_tokens: int
+    reserve_tokens: int = RESERVE_TOKENS
+
+    @property
+    def used_tokens(self) -> int:
+        return sum(s.token_count for s in self.segments)
+
+    @property
+    def used_bytes(self) -> int:
+        return sum(s.byte_count for s in self.segments)
+
+    @property
+    def pct(self) -> float:
+        if self.window_tokens <= 0:
+            return 0.0
+        return min(100.0, self.used_tokens / self.window_tokens * 100)
+
+    @property
+    def compaction_limit_tokens(self) -> int:
+        from ui.theme import compaction_threshold_pct
+        pct = compaction_threshold_pct()
+        return int(self.window_tokens * pct / 100) - self.reserve_tokens
+
+
+def format_bytes(n: int) -> str:
+    if n >= 1024 * 1024:
+        return f"{n / (1024 * 1024):.1f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n} B"
+
+
+def analyze_context(
+    model: str,
+    cwd: str,
+    history: list[dict],
+    custom_system: str = "",
+    active_skill: Skill | None = None,
+) -> ContextBudget:
+    provider = MODEL_PROVIDER.get(model, "openai")
+    window = CONTEXT_WINDOWS.get(provider, 100_000)
+
+    base, agents, workspace = system_parts(cwd, custom_system or None)
+    tools_json = json.dumps(
+        TOOLS_ANTHROPIC if provider == "claude" else TOOLS_OPENAI,
+        ensure_ascii=False,
+    )
+
+    segments = [
+        ContextSegment("System prompt", base),
+    ]
+    if agents:
+        segments.append(ContextSegment("Rules", agents, "AGENTS.md"))
+    segments.append(ContextSegment("Workspace", workspace, "File tree & git status"))
+    segments.append(ContextSegment("Tool definitions", tools_json))
+
+    if active_skill:
+        segments.append(ContextSegment(
+            "Skills",
+            active_skill.prompt,
+            f"/{active_skill.name}",
+        ))
+
+    msg_text = _history_text(history)
+    segments.append(ContextSegment(
+        "Messages",
+        msg_text,
+        f"{len(history)} message{'s' if len(history) != 1 else ''}",
+    ))
+
+    return ContextBudget(segments=segments, window_tokens=window)
+
+
+def _history_text(history: list[dict]) -> str:
+    return "\n\n".join(content_preview(m.get("content", "")) for m in history)

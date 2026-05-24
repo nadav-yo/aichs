@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 160" fill="none">
+  <defs>
+    <linearGradient id="icon-bg" x1="12" y1="8" x2="116" y2="120" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2d2d2d"/>
+      <stop offset="1" stop-color="#1e1e1e"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Compact icon mark -->
+  <rect x="8" y="24" width="112" height="112" rx="24" fill="url(#icon-bg)" stroke="#3e3e42" stroke-width="2"/>
+
+  <path
+    d="M28 58c0-8.8 7.2-16 16-16h36c8.8 0 16 7.2 16 16v28c0 8.8-7.2 16-16 16h-18l-12 12v-12h-6c-8.8 0-16-7.2-16-16V58z"
+    fill="#2d2d2d"
+    stroke="#858585"
+    stroke-width="2.5"
+    stroke-linejoin="round"
+  />
+  <circle cx="48" cy="72" r="3.5" fill="#858585"/>
+  <circle cx="60" cy="72" r="3.5" fill="#858585"/>
+  <circle cx="72" cy="72" r="3.5" fill="#858585"/>
+
+  <path
+    d="M52 78c0-8.8 7.2-16 16-16h36c8.8 0 16 7.2 16 16v28c0 8.8-7.2 16-16 16h-18l-12 12v-12h-6c-8.8 0-16-7.2-16-16V78z"
+    fill="#007AFF"
+  />
+  <path
+    d="M92 88l4 8 9 1.5-6.5 6 1.5 9-8-4.5-8 4.5 1.5-9-6.5-6 9-1.5z"
+    fill="#ffffff"
+  />
+
+  <!-- Wordmark: AI + CC -->
+  <text
+    x="144"
+    y="88"
+    font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+    font-size="56"
+    font-weight="700"
+    letter-spacing="3"
+    fill="#d4d4d4"
+  >AI</text>
+  <text
+    x="204"
+    y="88"
+    font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+    font-size="56"
+    font-weight="700"
+    letter-spacing="3"
+    fill="#007AFF"
+  >CC</text>
+
+  <!-- Tagline -->
+  <text
+    x="146"
+    y="122"
+    font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+    font-size="22"
+    font-weight="400"
+    letter-spacing="0.5"
+    fill="#858585"
+  >(AI Chat Companion)</text>
+</svg>
