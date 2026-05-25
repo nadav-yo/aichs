@@ -3,14 +3,26 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from uuid import uuid4
 
 import anthropic
 from openai import OpenAI
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from services.crew import (
+    ASK_CREW_TOOL_NAME,
+    ask_crew_tool_anthropic,
+    ask_crew_tool_openai,
+    crew_model_choice,
+    crew_enabled,
+    crew_metadata,
+    crew_prompt,
+    crew_system_prompt,
+    get_crew_member,
+)
 from services.model_registry import get_model_config, resolve_api_key
 from services.content import prepare_for_anthropic, prepare_for_openai
-from services.tool_policy import ConversationToolPolicy, ToolApprovalBus
+from services.tool_policy import ConversationToolPolicy, ToolApprovalBus, resolve_path
 from services.tools import tools_anthropic, tools_openai, execute, is_parallel_safe, tool_approval
 from services.tool_registry import HookContext, run_extension_hooks
 
@@ -24,13 +36,21 @@ class ChatThread(QThread):
     tool_called = pyqtSignal(str, dict)
     bash_line   = pyqtSignal(str)
     tool_result = pyqtSignal(str, str)
+    crew_started = pyqtSignal(dict)
+    crew_chunk   = pyqtSignal(dict, str)
+    crew_done    = pyqtSignal(dict, str)
+    crew_error   = pyqtSignal(dict, str)
     done        = pyqtSignal(str)
     error       = pyqtSignal(str)
 
     def __init__(self, model: str, history: list, system: str, cwd: str,
                  allowed_tools: list[str] | None = None,
                  tool_policy: ConversationToolPolicy | None = None,
-                 approval_bus: ToolApprovalBus | None = None):
+                 approval_bus: ToolApprovalBus | None = None,
+                 write_roots: list[str] | tuple[str, ...] | None = None,
+                 enable_crew_tool: bool = True,
+                 crew_settings: dict | None = None,
+                 configured_providers: set[str] | None = None):
         super().__init__()
         self.model          = model
         self._model_cfg     = get_model_config(model)
@@ -42,6 +62,10 @@ class ChatThread(QThread):
         self._allowed_tools = allowed_tools
         self._tool_policy   = tool_policy or ConversationToolPolicy()
         self._approval_bus  = approval_bus
+        self._write_roots   = tuple(write_roots) if write_roots is not None else None
+        self._enable_crew_tool = enable_crew_tool
+        self._crew_settings = dict(crew_settings or {})
+        self._configured_providers = set(configured_providers or set())
         self._chunk_buffer: list[str] = []
         self._last_chunk_emit = 0.0
 
@@ -53,14 +77,22 @@ class ChatThread(QThread):
     def _tools_anthropic(self) -> list:
         tools = tools_anthropic(self.cwd)
         if self._allowed_tools is None:
-            return tools
-        return [t for t in tools if t["name"] in self._allowed_tools]
+            selected = tools
+        else:
+            selected = [t for t in tools if t["name"] in self._allowed_tools]
+        if self._enable_crew_tool and (self._allowed_tools is None or ASK_CREW_TOOL_NAME in self._allowed_tools):
+            selected = selected + [ask_crew_tool_anthropic()]
+        return selected
 
     def _tools_openai(self) -> list:
         tools = tools_openai(self.cwd)
         if self._allowed_tools is None:
-            return tools
-        return [t for t in tools if t["function"]["name"] in self._allowed_tools]
+            selected = tools
+        else:
+            selected = [t for t in tools if t["function"]["name"] in self._allowed_tools]
+        if self._enable_crew_tool and (self._allowed_tools is None or ASK_CREW_TOOL_NAME in self._allowed_tools):
+            selected = selected + [ask_crew_tool_openai()]
+        return selected
 
     def run(self):
         try:
@@ -331,6 +363,12 @@ class ChatThread(QThread):
             blocked = hook_ctx.output or hook_ctx.error or "[tool error] Tool blocked by extension hook."
             self.tool_result.emit(name, blocked)
             return tool_id, name, blocked
+        if name == ASK_CREW_TOOL_NAME:
+            return tool_id, name, self._execute_ask_crew(inputs)
+        scoped = self._check_tool_scope(name, inputs)
+        if scoped:
+            self.tool_result.emit(name, scoped)
+            return tool_id, name, scoped
         blocked = self._check_tool_gate(name, inputs)
         if blocked:
             self.tool_result.emit(name, blocked)
@@ -375,6 +413,11 @@ class ChatThread(QThread):
             if hook_ctx.status == "error":
                 blocked = hook_ctx.output or hook_ctx.error or "[tool error] Tool blocked by extension hook."
                 return idx, tool_id, name, blocked
+            if name == ASK_CREW_TOOL_NAME:
+                return idx, tool_id, name, self._execute_ask_crew(inputs)
+            scoped = self._check_tool_scope(name, inputs)
+            if scoped:
+                return idx, tool_id, name, scoped
             blocked = self._check_tool_gate(name, inputs)
             if blocked:
                 return idx, tool_id, name, blocked
@@ -420,6 +463,93 @@ class ChatThread(QThread):
             name, inputs, self.cwd, self._tool_policy, self._cancel.is_set,
         )
 
+    def _execute_ask_crew(self, inputs: dict) -> str:
+        member_id = str(inputs.get("member") or "").strip().casefold()
+        task = str(inputs.get("task") or "").strip()
+        reason = str(inputs.get("reason") or "").strip()
+        member = get_crew_member(member_id)
+        if member is None:
+            return "[tool error] Unknown crew member. Use one of: scout, critic, tester, designer, archivist."
+        if not crew_enabled(self._crew_settings, member):
+            return f"[tool error] {member.name} is disabled in Crew settings."
+        if not task:
+            return "[tool error] ask_crew requires a focused task."
+
+        meta = crew_metadata(member, self._crew_settings)
+        meta["reason"] = reason
+        meta["invocation_id"] = uuid4().hex
+        self.crew_started.emit(meta)
+        model = str(meta.get("model") or "")
+        model = crew_model_choice(
+            member,
+            self.model,
+            {member.id: model},
+            self._configured_providers,
+        )
+        crew_history = list(self.history)
+        crew_history.append({
+            "role": "user",
+            "content": _crew_task_content(member.name, task, reason),
+        })
+        crew = ChatThread(
+            model,
+            crew_history,
+            crew_system_prompt(member, self.system, crew_prompt(member, self._crew_settings)),
+            self.cwd,
+            allowed_tools=list(member.tools),
+            tool_policy=self._tool_policy,
+            approval_bus=self._approval_bus,
+            write_roots=list(member.write_roots),
+            enable_crew_tool=False,
+            crew_settings=self._crew_settings,
+            configured_providers=self._configured_providers,
+        )
+        crew.chunk.connect(lambda text, m=meta: self.crew_chunk.emit(m, text))
+        crew.tool_called.connect(self.tool_called.emit)
+        crew.bash_line.connect(self.bash_line.emit)
+        crew.tool_result.connect(self.tool_result.emit)
+        try:
+            if crew.provider == "anthropic":
+                text = crew._loop_anthropic()
+            else:
+                text = crew._loop_openai()
+            crew._flush_chunk_buffer()
+            if self._cancel.is_set():
+                text = text or "[cancelled]"
+            self.crew_done.emit(meta, text)
+            return f"{member.name}: {text}"
+        except Exception as exc:
+            message = f"[tool error] {member.name} failed: {exc}"
+            if not self._cancel.is_set():
+                self.crew_error.emit(meta, message)
+            return message
+
+    def _check_tool_scope(self, name: str, inputs: dict) -> str | None:
+        if self._write_roots is None or name != "edit_file":
+            return None
+        if not self._write_roots:
+            return "[tool error] edit_file is not available in this crew scope."
+        path = inputs.get("path")
+        if not path:
+            return "[tool error] Missing edit_file path."
+        try:
+            target = resolve_path(str(path), self.cwd)
+            root = resolve_path(".", self.cwd)
+            rel = target.relative_to(root)
+        except Exception:
+            return "[tool error] edit_file path must stay inside the workspace."
+        allowed = []
+        for write_root in self._write_roots:
+            try:
+                root_rel = resolve_path(write_root, self.cwd).relative_to(root)
+            except Exception:
+                continue
+            allowed.append(root_rel)
+            if rel == root_rel or root_rel in rel.parents:
+                return None
+        roots = ", ".join(str(p).replace("\\", "/") for p in allowed) or "(none)"
+        return f"[tool error] edit_file is limited to: {roots}."
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -433,3 +563,16 @@ def _serialize_anthropic(content) -> list:
             out.append({"type": "tool_use", "id": block.id,
                         "name": block.name, "input": dict(block.input)})
     return out
+
+
+def _crew_task_content(name: str, task: str, reason: str = "") -> str:
+    parts = [
+        f"{name}, answer this focused crew request for the lead assistant.",
+        "",
+        f"Task: {task}",
+    ]
+    if reason:
+        parts.append(f"Reason: {reason}")
+    parts.append("")
+    parts.append("Keep the answer concise and actionable. The lead will synthesize it for the user.")
+    return "\n".join(parts)

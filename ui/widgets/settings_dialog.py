@@ -7,12 +7,14 @@ from PyQt6.QtWidgets import (
     QTextEdit, QComboBox, QWidget, QFileDialog, QScrollArea, QSlider,
     QListWidget, QListWidgetItem, QStackedWidget, QFrame, QTableWidget,
     QTableWidgetItem, QHeaderView, QMessageBox, QToolButton, QStyle, QCheckBox,
+    QColorDialog, QTabWidget, QAbstractItemView,
 )
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import Qt, QSize, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 
 from config import MODELS, SYSTEM_PROMPT
 from services import model_registry
+from services.crew import all_crew, crew_settings
 from services.model_registry import (
     api_key_env_var, get_model_config, get_provider_config, load_user_providers,
     save_user_providers,
@@ -21,13 +23,13 @@ from storage.settings import SettingsStore
 from ui.avatars import avatar_pixmap, clear_cache, persist_portrait
 from ui.theme import (
     ACCENT, palette, DEFAULT_COMPACTION_THRESHOLD_PCT, DEFAULT_FONT_SIZE, DEFAULT_THEME,
+    crew_tone,
 )
 
 _NAV = [
     ("general", "General"),
     ("models", "Models"),
-    ("chat", "Chat"),
-    ("agent", "Agent"),
+    ("crew", "Crew"),
 ]
 
 _BUILTIN_IDS = {"claude", "openai"}
@@ -75,12 +77,59 @@ def _parse_models(text: str) -> list[dict]:
     return models
 
 
+def _model_ids(models: list[dict]) -> list[str]:
+    return [str(model.get("id", "")) for model in models if model.get("id")]
+
+
+def _drag_handle_icon() -> QIcon:
+    p = palette()
+    pix = QPixmap(16, 16)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(QColor(p["TEXT_DIM"]), 1.6))
+    for y in (5, 8, 11):
+        painter.drawLine(4, y, 12, y)
+    painter.end()
+    return QIcon(pix)
+
+
+class _ModelOrderList(QListWidget):
+    order_changed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDragDropOverwriteMode(False)
+        self.setDropIndicatorShown(True)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setAlternatingRowColors(False)
+        self.setMinimumHeight(132)
+
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        self.order_changed.emit()
+
+
 class _PortraitPicker(QWidget):
-    def __init__(self, role: str, label: str, saved: str, styles: dict, parent=None):
+    def __init__(
+        self,
+        role: str,
+        label: str,
+        saved: str,
+        styles: dict,
+        parent=None,
+        default_source: str | None = None,
+        accent_color: str = "",
+    ):
         super().__init__(parent)
         self._role = role
-        self._default = role
+        self._default = default_source or role
         self._custom_path: str | None = None
+        self._accent_color = _clean_color(accent_color)
         self._styles = styles
         p = palette()
 
@@ -124,8 +173,10 @@ class _PortraitPicker(QWidget):
 
     def _refresh(self):
         source = self._custom_path or self._default
+        border = self._accent_color or palette()["BORDER"]
+        self.preview.setStyleSheet(f"border:2px solid {border}; border-radius:24px;")
         self.preview.setPixmap(
-            avatar_pixmap(source, 48).scaled(
+            avatar_pixmap(source, 48, self._accent_color).scaled(
                 48, 48, Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
@@ -150,6 +201,115 @@ class _PortraitPicker(QWidget):
 
     def value(self) -> str:
         return self._custom_path or self._default
+
+    def set_accent_color(self, color: str):
+        self._accent_color = _clean_color(color)
+        self._refresh()
+
+
+class _ColorSwatchButton(QPushButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._color = "#528bff"
+        self._fg = "#ffffff"
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(36)
+        self.setMinimumWidth(104)
+        self.setToolTip("Choose crew color")
+
+    def set_color(self, color: str):
+        self._color = _clean_color(color) or "#528bff"
+        self._fg = _contrast_text(self._color)
+        self.setText(self._color)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect().adjusted(1, 1, -1, -1)
+        painter.setBrush(QColor(self._color))
+        border = palette()["TEXT_DIM"] if self.underMouse() or self.hasFocus() else self._color
+        painter.setPen(QPen(QColor(border), 1))
+        painter.drawRoundedRect(rect, 8, 8)
+
+        font = QFont(self.font())
+        font.setBold(True)
+        font.setPointSize(12)
+        painter.setFont(font)
+        painter.setPen(QColor(self._fg))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.text())
+        painter.end()
+
+
+class _ColorPicker(QWidget):
+    color_changed = pyqtSignal(str)
+
+    def __init__(self, saved: str, fallback: str, styles: dict, parent=None):
+        super().__init__(parent)
+        self._value = _clean_color(saved)
+        self._fallback = _clean_color(fallback) or "#528bff"
+        self._styles = styles
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+
+        self.swatch = _ColorSwatchButton()
+        self.swatch.clicked.connect(self._pick)
+        row.addWidget(self.swatch)
+
+        self.reset = QPushButton()
+        self.reset.setText("Reset")
+        self.reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.reset.setToolTip("Use default crew color")
+        self.reset.setFixedHeight(36)
+        self.reset.setStyleSheet(self._styles["btn"])
+        self.reset.clicked.connect(self._reset)
+        row.addWidget(self.reset)
+        self._refresh()
+
+    def _pick(self):
+        color = QColorDialog.getColor(QColor(self.display_color()), self)
+        if color.isValid():
+            self._value = color.name()
+            self._refresh()
+            self.color_changed.emit(self.display_color())
+
+    def _reset(self):
+        self._value = ""
+        self._refresh()
+        self.color_changed.emit(self.display_color())
+
+    def _refresh(self):
+        display = self.display_color()
+        self.swatch.set_color(display)
+        self.reset.setEnabled(bool(self._value))
+
+    def display_color(self) -> str:
+        return self._value or self._fallback
+
+    def value(self) -> str:
+        return self._value
+
+
+def _clean_color(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if not text.startswith("#"):
+        text = f"#{text}"
+    return text if re.fullmatch(r"#[0-9a-fA-F]{6}", text) else ""
+
+
+def _contrast_text(hex_color: str) -> str:
+    color = _clean_color(hex_color)
+    if not color:
+        return "#ffffff"
+    r = int(color[1:3], 16)
+    g = int(color[3:5], 16)
+    b = int(color[5:7], 16)
+    # Perceived luminance; dark text reads better on bright crew swatches.
+    luminance = (0.299 * r + 0.587 * g + 0.114 * b)
+    return "#111111" if luminance > 160 else "#ffffff"
 
 
 class _ProviderDialog(QDialog):
@@ -301,6 +461,13 @@ def _builtin_models(provider: str) -> list[dict]:
     return models
 
 
+def _has_builtin_model_order_override(provider_id: str, models: list[dict]) -> bool:
+    if provider_id not in _BUILTIN_IDS:
+        return False
+    builtin_models = model_registry._BUILTIN.get(provider_id, {}).get("models", [])
+    return _model_ids(models) != _model_ids(builtin_models)
+
+
 def _scroll_page(content: QWidget) -> QScrollArea:
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
@@ -355,7 +522,8 @@ class SettingsDialog(QDialog):
             "label": self._label_style,
         }
         self._providers: list[dict] = []
-        self._default_combos: dict[str, QComboBox] = {}
+        self._model_order_provider_row = -1
+        self._crew_widgets: dict[str, dict] = {}
 
         saved = store.load()
 
@@ -391,10 +559,9 @@ class SettingsDialog(QDialog):
         self._stack = QStackedWidget()
         self._stack.setStyleSheet(f"background:{p['BG2']};")
 
-        self._stack.addWidget(_scroll_page(self._page_general()))
+        self._stack.addWidget(_scroll_page(self._page_general(saved)))
         self._stack.addWidget(_scroll_page(self._page_models()))
-        self._stack.addWidget(_scroll_page(self._page_chat(saved)))
-        self._stack.addWidget(_scroll_page(self._page_agent()))
+        self._stack.addWidget(_scroll_page(self._page_crew(saved)))
 
         body.addWidget(self._nav)
         body.addWidget(self._stack, 1)
@@ -455,11 +622,12 @@ class SettingsDialog(QDialog):
         sep.setStyleSheet(f"background:{palette()['BORDER']}; max-height:1px;")
         return sep
 
-    def _page_general(self) -> QWidget:
+    def _page_general(self, saved: dict) -> QWidget:
         page, layout = self._page_shell(
             "General",
-            "Look and feel of the app.",
+            "Look, feel, and composer behavior.",
         )
+        p = palette()
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["dark", "modern", "light"])
         self.theme_combo.setStyleSheet(self._field_style)
@@ -469,6 +637,30 @@ class SettingsDialog(QDialog):
         self.font_combo.addItems(["small", "medium", "large"])
         self.font_combo.setStyleSheet(self._field_style)
         self._field(layout, "Chat font size", self.font_combo)
+
+        layout.addWidget(self._section_separator())
+
+        check_icon = (Path(__file__).resolve().parents[2] / "assets" / "checkmark.svg").as_posix()
+        self.enter_to_send_check = QCheckBox("Enter sends message")
+        self.enter_to_send_check.setStyleSheet(
+            f"QCheckBox {{ color:{p['TEXT']}; font-size:13px; spacing:8px; }}"
+            f"QCheckBox::indicator {{ width:16px; height:16px;"
+            f"background:{p['BG3']}; border:1px solid {p['TEXT_DIM']}; border-radius:3px; }}"
+            f"QCheckBox::indicator:hover {{ border:1px solid {ACCENT}; }}"
+            f"QCheckBox::indicator:checked {{ image:url({check_icon}); border:1px solid {ACCENT}; }}"
+        )
+        layout.addWidget(self.enter_to_send_check)
+
+        enter_hint = QLabel("When enabled, Shift+Enter inserts a new line.")
+        enter_hint.setWordWrap(True)
+        enter_hint.setStyleSheet(self._hint_style)
+        layout.addWidget(enter_hint)
+
+        layout.addWidget(self._section_separator())
+        self.human_portrait = _PortraitPicker(
+            "human", "Your avatar", saved.get("avatar_human", "human"), self._styles,
+        )
+        layout.addWidget(self.human_portrait)
         layout.addStretch()
         return page
 
@@ -486,14 +678,15 @@ class SettingsDialog(QDialog):
         row.addWidget(add_btn)
         layout.addLayout(row)
 
-        self.providers_table = QTableWidget(0, 5)
+        self.providers_table = QTableWidget(0, 4)
         self.providers_table.setHorizontalHeaderLabels([
-            "Provider", "Type", "Endpoint", "Default", "",
+            "Provider", "Type", "Endpoint", "",
         ])
         self.providers_table.verticalHeader().setVisible(False)
         self.providers_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.providers_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.providers_table.setAlternatingRowColors(False)
+        self.providers_table.itemSelectionChanged.connect(self._on_provider_selection_changed)
         self.providers_table.setStyleSheet(
             f"QTableWidget {{ background:{palette()['BG2']}; color:{palette()['TEXT']};"
             f"border:1px solid {palette()['BORDER']}; border-radius:8px; gridline-color:{palette()['BORDER']}; }}"
@@ -505,8 +698,26 @@ class SettingsDialog(QDialog):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.providers_table)
+
+        order_lbl = QLabel("Model order")
+        order_lbl.setStyleSheet(self._label_style)
+        layout.addWidget(order_lbl)
+
+        order_hint = QLabel("Drag models to reorder them. The first model is used on startup unless a saved chat model exists.")
+        order_hint.setWordWrap(True)
+        order_hint.setStyleSheet(self._hint_style)
+        layout.addWidget(order_hint)
+
+        self.model_order_list = _ModelOrderList()
+        self.model_order_list.setStyleSheet(
+            f"QListWidget {{ background:{palette()['BG2']}; color:{palette()['TEXT']};"
+            f"border:1px solid {palette()['BORDER']}; border-radius:8px; padding:4px; outline:none; }}"
+            f"QListWidget::item {{ padding:8px 10px; border-radius:6px; }}"
+            f"QListWidget::item:selected {{ background:{palette()['SELECTION']}; color:{palette()['SELECTION_TEXT']}; }}"
+        )
+        self.model_order_list.order_changed.connect(self._apply_model_order)
+        layout.addWidget(self.model_order_list)
 
         layout.addWidget(self._section_separator())
 
@@ -586,30 +797,16 @@ class SettingsDialog(QDialog):
         return bool(env_var and os.environ.get(env_var))
 
     def _refresh_provider_table(self, defaults: dict | None = None):
-        defaults = defaults or self.store.load().get("default_models", {})
-        self._default_combos = {}
+        selected_row = self.providers_table.currentRow()
+        if selected_row < 0:
+            selected_row = 0
+        self.providers_table.blockSignals(True)
         self.providers_table.setRowCount(0)
         for row_idx, provider in enumerate(self._providers):
             self.providers_table.insertRow(row_idx)
             self.providers_table.setItem(row_idx, 0, QTableWidgetItem(_provider_title(provider["id"])))
             self.providers_table.setItem(row_idx, 1, QTableWidgetItem(provider["kind"].replace("-", " ")))
-            self.providers_table.setItem(row_idx, 2, QTableWidgetItem(provider.get("base_url") or "Default"))
-
-            combo = QComboBox()
-            combo.setStyleSheet(self._field_style)
-            models = provider.get("models", [])
-            combo.setToolTip(f"{len(models)} configured model{'s' if len(models) != 1 else ''}")
-            combo.setMinimumWidth(180)
-            for model in models:
-                mid = model.get("id", "")
-                name = model.get("name", mid)
-                combo.addItem(name if name == mid else f"{name} ({mid})", mid)
-            model = defaults.get(provider["id"], self._default_model_for_row(provider))
-            idx = combo.findData(model)
-            if idx >= 0:
-                combo.setCurrentIndex(idx)
-            self._default_combos[provider["id"]] = combo
-            self.providers_table.setCellWidget(row_idx, 3, combo)
+            self.providers_table.setItem(row_idx, 2, QTableWidgetItem(provider.get("base_url") or "Built-in"))
 
             actions = QWidget()
             buttons = QHBoxLayout(actions)
@@ -626,8 +823,52 @@ class SettingsDialog(QDialog):
             remove.clicked.connect(lambda _, i=row_idx: self._remove_provider(i))
             buttons.addWidget(edit)
             buttons.addWidget(remove)
-            self.providers_table.setCellWidget(row_idx, 4, actions)
+            self.providers_table.setCellWidget(row_idx, 3, actions)
+        self.providers_table.blockSignals(False)
         self.providers_table.resizeRowsToContents()
+        if self._providers:
+            self.providers_table.selectRow(min(selected_row, len(self._providers) - 1))
+        else:
+            self._refresh_model_order_list(-1)
+
+    def _on_provider_selection_changed(self):
+        self._refresh_model_order_list(self.providers_table.currentRow())
+
+    def _refresh_model_order_list(self, row: int):
+        self._model_order_provider_row = row
+        self.model_order_list.blockSignals(True)
+        self.model_order_list.clear()
+        if 0 <= row < len(self._providers):
+            for model in self._providers[row].get("models", []):
+                mid = model.get("id", "")
+                name = model.get("name", mid)
+                item = QListWidgetItem(name if name == mid else f"{name} ({mid})")
+                item.setIcon(_drag_handle_icon())
+                item.setData(Qt.ItemDataRole.UserRole, dict(model))
+                item.setFlags(
+                    item.flags()
+                    | Qt.ItemFlag.ItemIsDragEnabled
+                    | Qt.ItemFlag.ItemIsDropEnabled
+                )
+                self.model_order_list.addItem(item)
+            self.model_order_list.setEnabled(True)
+        else:
+            self.model_order_list.setEnabled(False)
+        self.model_order_list.blockSignals(False)
+
+    def _apply_model_order(self):
+        row = self._model_order_provider_row
+        if row < 0 or row >= len(self._providers):
+            return
+        models = []
+        for idx in range(self.model_order_list.count()):
+            data = self.model_order_list.item(idx).data(Qt.ItemDataRole.UserRole)
+            if isinstance(data, dict) and data.get("id"):
+                models.append(dict(data))
+        if not models:
+            return
+        provider = self._providers[row]
+        provider["models"] = models
 
     def _icon_button(self, tooltip: str, theme_icon: str, fallback: QStyle.StandardPixmap) -> QToolButton:
         button = QToolButton()
@@ -650,6 +891,7 @@ class SettingsDialog(QDialog):
         if dialog.exec():
             self._providers.append(dialog.value())
             self._refresh_provider_table()
+            self.providers_table.selectRow(len(self._providers) - 1)
 
     def _edit_provider(self, row: int):
         if row < 0 or row >= len(self._providers):
@@ -659,6 +901,7 @@ class SettingsDialog(QDialog):
         if dialog.exec():
             self._providers[row] = dialog.value()
             self._refresh_provider_table()
+            self.providers_table.selectRow(row)
 
     def _remove_provider(self, row: int):
         if row < 0 or row >= len(self._providers):
@@ -666,65 +909,134 @@ class SettingsDialog(QDialog):
         del self._providers[row]
         self._refresh_provider_table()
 
-    def _default_model_for_row(self, provider: dict) -> str:
-        models = provider.get("models", [])
-        if provider.get("id") == "claude" and len(models) > 1:
-            return models[1].get("id", "")
-        if models:
-            return models[0].get("id", "")
-        return ""
-
-    def _page_chat(self, saved: dict) -> QWidget:
+    def _page_crew(self, saved: dict) -> QWidget:
         page, layout = self._page_shell(
-            "Chat",
-            "Message composer behavior and portraits.",
+            "Crew",
+            "Configure aicc and each optional crew member's voice, model, color, and portrait.",
         )
+        self._crew_widgets = {}
+        tabs = QTabWidget()
         p = palette()
-        check_icon = (Path(__file__).resolve().parents[2] / "assets" / "checkmark.svg").as_posix()
-        self.enter_to_send_check = QCheckBox("Enter sends message")
-        self.enter_to_send_check.setStyleSheet(
-            f"QCheckBox {{ color:{p['TEXT']}; font-size:13px; spacing:8px; }}"
-            f"QCheckBox::indicator {{ width:16px; height:16px;"
-            f"background:{p['BG3']}; border:1px solid {p['TEXT_DIM']}; border-radius:3px; }}"
-            f"QCheckBox::indicator:hover {{ border:1px solid {ACCENT}; }}"
-            f"QCheckBox::indicator:checked {{ image:url({check_icon}); border:1px solid {ACCENT}; }}"
+        tabs.setStyleSheet(
+            f"QTabWidget {{ background:{p['BG2']}; }}"
+            f"QTabWidget::pane {{ border:1px solid {p['BORDER']}; background:{p['BG2']}; }}"
+            f"QTabBar::tab {{ background:{p['BG']}; color:{p['TEXT_DIM']};"
+            f"border:1px solid {p['BORDER']}; padding:8px 12px; }}"
+            f"QTabBar::tab:selected {{ background:{p['BG2']}; color:{p['TEXT']}; }}"
         )
-        layout.addWidget(self.enter_to_send_check)
 
-        enter_hint = QLabel("When enabled, Shift+Enter inserts a new line.")
-        enter_hint.setWordWrap(True)
-        enter_hint.setStyleSheet(self._hint_style)
-        layout.addWidget(enter_hint)
-        layout.addWidget(self._section_separator())
+        lead_tab = QWidget()
+        lead_layout = QVBoxLayout(lead_tab)
+        lead_layout.setContentsMargins(14, 14, 14, 14)
+        lead_layout.setSpacing(10)
 
-        self.human_portrait = _PortraitPicker(
-            "human", "You", saved.get("avatar_human", "human"), self._styles,
+        lead_header = QHBoxLayout()
+        lead_title = QLabel("aicc · Lead agent")
+        lead_title.setStyleSheet(f"color:{p['TEXT']}; font-weight:bold;")
+        lead_header.addWidget(lead_title)
+        lead_header.addStretch()
+        lead_status = QLabel("Always active")
+        lead_status.setStyleSheet(
+            f"color:{ACCENT}; background:{p['BG3']}; border:1px solid {p['BORDER']};"
+            "border-radius:6px; padding:4px 8px; font-size:12px;"
         )
+        lead_header.addWidget(lead_status)
+        lead_layout.addLayout(lead_header)
+
+        lead_desc = QLabel("The main agent that owns the conversation and invites crew members when useful.")
+        lead_desc.setWordWrap(True)
+        lead_desc.setStyleSheet(self._hint_style)
+        lead_layout.addWidget(lead_desc)
+
         self.agent_portrait = _PortraitPicker(
-            "agent", "Agent", saved.get("avatar_agent", "agent"), self._styles,
+            "agent", "aicc avatar", saved.get("avatar_agent", "agent"), self._styles,
         )
-        layout.addWidget(self.human_portrait)
-        layout.addWidget(self.agent_portrait)
-        layout.addStretch()
-        return page
+        lead_layout.addWidget(self.agent_portrait)
 
-    def _page_agent(self) -> QWidget:
-        page, layout = self._page_shell(
-            "Agent",
-            "Overrides SYSTEM_PROMPT from config.py. Workspace context is still appended automatically.",
-        )
-        row = QHBoxLayout()
-        row.addStretch()
+        prompt_row = QHBoxLayout()
+        prompt_label = QLabel("Personality and instructions")
+        prompt_label.setStyleSheet(f"color:{p['TEXT']}; font-weight:bold;")
+        prompt_row.addWidget(prompt_label)
+        prompt_row.addStretch()
         reset_btn = QPushButton("Reset to default")
         reset_btn.setStyleSheet(self._btn_style)
         reset_btn.clicked.connect(lambda: self.system_prompt.setPlainText(SYSTEM_PROMPT))
-        row.addWidget(reset_btn)
-        layout.addLayout(row)
+        prompt_row.addWidget(reset_btn)
+        lead_layout.addLayout(prompt_row)
 
         self.system_prompt = QTextEdit()
         self.system_prompt.setStyleSheet(self._field_style)
-        self.system_prompt.setMinimumHeight(200)
-        layout.addWidget(self.system_prompt, 1)
+        self.system_prompt.setMinimumHeight(180)
+        lead_layout.addWidget(self.system_prompt, 1)
+        lead_layout.addStretch()
+        tabs.addTab(lead_tab, "aicc")
+
+        for member in all_crew():
+            cfg = crew_settings(saved, member)
+            tab = QWidget()
+            card_layout = QVBoxLayout(tab)
+            card_layout.setContentsMargins(14, 14, 14, 14)
+            card_layout.setSpacing(10)
+
+            header = QHBoxLayout()
+            enabled = QCheckBox(f"{member.name} · {member.title}")
+            enabled.setChecked(cfg["enabled"])
+            enabled.setStyleSheet(f"color:{palette()['TEXT']}; font-weight:bold;")
+            header.addWidget(enabled)
+            header.addStretch()
+            card_layout.addLayout(header)
+
+            desc = QLabel(member.description)
+            desc.setWordWrap(True)
+            desc.setStyleSheet(self._hint_style)
+            card_layout.addWidget(desc)
+
+            controls = QHBoxLayout()
+            model = QComboBox()
+            model.setStyleSheet(self._field_style)
+            model.addItem("Use chat model", "")
+            for provider, model_ids in MODELS.items():
+                for model_id in model_ids:
+                    model.addItem(f"{_provider_title(provider)} · {model_id}", model_id)
+            idx = model.findData(cfg["model"])
+            if idx >= 0:
+                model.setCurrentIndex(idx)
+            controls.addWidget(model, 1)
+
+            fallback_color = crew_tone(member.id)["accent"]
+            color = _ColorPicker(cfg["color"], fallback_color, self._styles)
+            controls.addWidget(color)
+            card_layout.addLayout(controls)
+
+            portrait = _PortraitPicker(
+                f"crew_{member.id}",
+                f"{member.name} avatar",
+                cfg["avatar"],
+                self._styles,
+                default_source=f"crew_{member.id}",
+                accent_color=color.display_color(),
+            )
+            color.color_changed.connect(portrait.set_accent_color)
+            card_layout.addWidget(portrait)
+
+            prompt = QTextEdit()
+            prompt.setStyleSheet(self._field_style)
+            prompt.setMinimumHeight(86)
+            prompt.setPlaceholderText(member.prompt)
+            prompt.setPlainText(cfg["prompt"])
+            card_layout.addWidget(prompt)
+
+            self._crew_widgets[member.id] = {
+                "enabled": enabled,
+                "model": model,
+                "color": color,
+                "portrait": portrait,
+                "prompt": prompt,
+            }
+            card_layout.addStretch()
+            tabs.addTab(tab, member.name)
+        layout.addWidget(tabs, 1)
+        layout.addStretch()
         return page
 
     # ── logic ─────────────────────────────────────────────────────────────
@@ -773,15 +1085,43 @@ class SettingsDialog(QDialog):
             provider["id"]: provider.get("api_key", "").strip()
             for provider in self._providers
         }
+        existing_defaults = data.get("default_models", {})
         default_models = {}
-        for provider_id, combo in self._default_combos.items():
-            default_models[provider_id] = combo.currentData() or combo.currentText()
+        for provider in self._providers:
+            provider_id = provider["id"]
+            saved_default = str(existing_defaults.get(provider_id, ""))
+            if saved_default and saved_default in _model_ids(provider.get("models", [])):
+                default_models[provider_id] = saved_default
+        crew = {}
+        crew_models = {}
+        for member in all_crew():
+            widgets = self._crew_widgets.get(member.id, {})
+            if not widgets:
+                continue
+            model = widgets["model"].currentData() or ""
+            avatar = persist_portrait(
+                widgets["portrait"].value(),
+                f"crew_{member.id}",
+            )
+            crew[member.id] = {
+                "enabled": widgets["enabled"].isChecked(),
+                "model": model,
+                "prompt": widgets["prompt"].toPlainText().strip(),
+                "color": widgets["color"].value(),
+                "avatar": avatar,
+            }
+            if model:
+                crew_models[member.id] = model
 
         user_providers = {}
         for provider in self._providers:
             provider_id = provider["id"]
             is_builtin = provider_id in _BUILTIN_IDS
-            has_override = bool(provider.get("base_url")) or not is_builtin
+            has_model_override = _has_builtin_model_order_override(
+                provider_id,
+                provider.get("models", []),
+            )
+            has_override = bool(provider.get("base_url")) or not is_builtin or has_model_override
             if not has_override:
                 continue
             entry = {
@@ -790,7 +1130,7 @@ class SettingsDialog(QDialog):
             }
             if provider.get("base_url"):
                 entry["baseUrl"] = provider["base_url"]
-            if not is_builtin:
+            if not is_builtin or has_model_override:
                 entry["models"] = provider.get("models", [])
             user_providers[provider_id] = entry
 
@@ -804,6 +1144,8 @@ class SettingsDialog(QDialog):
             "enter_to_send": self.enter_to_send_check.isChecked(),
             "compaction_threshold_pct": self.compaction_slider.value(),
             "default_models": default_models,
+            "crew": crew,
+            "crew_models": crew_models,
             "avatar_human": persist_portrait(self.human_portrait.value(), "human"),
             "avatar_agent": persist_portrait(self.agent_portrait.value(), "agent"),
         })

@@ -18,6 +18,19 @@ from config import MODELS, MODEL_PROVIDER
 from storage.repository import ConversationStore
 from storage.settings import SettingsStore
 from services.chat import ChatThread
+from services.crew import (
+    CrewMember,
+    all_crew,
+    crew_enabled,
+    crew_metadata,
+    crew_model_choice,
+    crew_name_from_metadata,
+    crew_prompt,
+    crew_settings,
+    crew_system_prompt,
+    get_crew_member,
+    summoned_members,
+)
 from services.tool_policy import ConversationToolPolicy, ToolApprovalBus
 from ui.widgets.tool_approval_dialog import handle_pending_approval
 from services.compaction import CompactionThread, should_compact, can_compact, _estimate_tokens
@@ -25,11 +38,11 @@ from services.content import build_user_content, content_preview
 from services.auto_title import TitleThread
 from services.context_budget import analyze_context
 from services.model_registry import api_key_env_var, get_provider_config, load_user_providers
-from services.workspace import build_system, agents_md
+from services.workspace import build_system
 from services.export import export_conversation_dialog
 from services.tool_registry import extension_errors, extension_overview
 from ui.theme import (
-    palette, input_bar_style, agents_banner_style,
+    palette, input_bar_style,
     send_button_style, stop_button_style, floating_button_style,
     tool_notice_style, center_notice_style, icon_button_style,
 )
@@ -70,6 +83,8 @@ class _AssistantRun:
     bubble: MessageBubble | None = None
     last_edit_path: str = ""
     active_terminal: TerminalCard | None = None
+    crew: dict | None = None
+    crew_bubbles: dict[str, MessageBubble] = field(default_factory=dict)
 
 
 @dataclass
@@ -115,6 +130,13 @@ def _tool_call_notice(name: str, inputs: dict, cwd: str) -> str:
     if name == "bash":
         command = _compact_text(inputs.get("command") or "")
         return f"Running command: {command}" if command else "Running command"
+    if name == "web_fetch":
+        url = _compact_text(inputs.get("url") or "", 96)
+        return f"Fetching web page '{url}'" if url else "Fetching web page"
+    for label in ("url", "path", "query"):
+        value = _compact_text(inputs.get(label) or "", 96)
+        if value:
+            return f"Using tool '{name}' with {label} '{value}'"
     return f"Using tool '{name}'"
 
 
@@ -247,14 +269,6 @@ class ChatPanel(QWidget):
         self._sep.setFrameShape(QFrame.Shape.HLine)
         root.addWidget(self._sep)
 
-        # AGENTS.md banner
-        self._agents_banner = QLabel()
-        self._agents_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._agents_banner.setStyleSheet(agents_banner_style())
-        self._agents_banner.hide()
-        root.addWidget(self._agents_banner)
-        self._refresh_agents_banner()
-
         # messages
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -303,11 +317,11 @@ class ChatPanel(QWidget):
         self.composer.input.mention_confirm.connect(lambda: self._file_picker and self._file_picker.confirm())
 
         self.btn = QPushButton("Send")
-        self.btn.setFixedHeight(36)
+        self.btn.setFixedHeight(38)
         self.btn.clicked.connect(self.send)
 
         self.stop_btn = QPushButton("Stop")
-        self.stop_btn.setFixedHeight(36)
+        self.stop_btn.setFixedHeight(38)
         self.stop_btn.clicked.connect(self._stop_streaming)
         self.stop_btn.hide()
 
@@ -446,7 +460,6 @@ class ChatPanel(QWidget):
         self._clear_bubbles()
         self._update_context_ui()
         self._apply_default_model(self.provider_combo.currentText())
-        self._refresh_agents_banner()
         self._sync_visible_runtime_refs()
         self._refresh_runtime_controls()
         self.composer.focus_input()
@@ -475,7 +488,7 @@ class ChatPanel(QWidget):
         self.conv_id   = data["id"]
         self.conv_data = data
         self.history   = data["messages"]
-        self._set_model(data.get("model", MODELS["claude"][1]))
+        self._set_model(data.get("model") or MODELS.get("claude", [""])[0])
         self._runtime_for(self.conv_id)
         self._update_queue_ui()
         self._render_history_tail()
@@ -619,6 +632,7 @@ class ChatPanel(QWidget):
             "content": build_user_content(text, images, files),
             "title_text": text or "Image",
             "skill": self.composer.active_skill(),
+            "crew": _first_summoned_crew(text, self._settings.load()),
         }
 
         self.composer.clear()
@@ -639,7 +653,8 @@ class ChatPanel(QWidget):
         self._send_draft(draft)
 
     def _send_draft(self, draft: dict):
-        model = self.model_combo.currentText()
+        crew = draft.get("crew")
+        model = self._model_for_crew(crew)
         content = draft["content"]
         title_text = draft["title_text"]
 
@@ -653,10 +668,12 @@ class ChatPanel(QWidget):
         if self._render_start_index == user_idx:
             self._render_start_index = user_idx
         self._add_bubble(content, is_user=True, history_index=user_idx, timestamp=now)
+        if draft.get("crew"):
+            self._add_notice(_crew_notice_text(crew_metadata(draft["crew"], self._settings.load()), "joined"))
 
         self._save(touch_updated=True)
 
-        self._start_assistant(skill=draft.get("skill"))
+        self._start_assistant(skill=draft.get("skill"), crew=draft.get("crew"))
         self._pin_to_bottom()
 
     def _ensure_conversation(self, title_text: str, model: str):
@@ -677,10 +694,10 @@ class ChatPanel(QWidget):
         self.store.save(self.conv_id, self.conv_data)
         self.saved.emit()
 
-    def _start_assistant(self, skill=None):
+    def _start_assistant(self, skill=None, crew: CrewMember | None = None):
         if not self.conv_id or self.conv_data is None:
             return
-        model = self.model_combo.currentText()
+        model = self._model_for_crew(crew)
         conv_id = self.conv_id
         history_snapshot = copy.deepcopy(self.history)
         data_snapshot = copy.deepcopy(self.conv_data)
@@ -691,6 +708,7 @@ class ChatPanel(QWidget):
             history_snapshot,
             data_snapshot,
             skill=skill,
+            crew=crew,
             visible=True,
         )
 
@@ -702,19 +720,31 @@ class ChatPanel(QWidget):
         data_snapshot: dict,
         *,
         skill=None,
+        crew: CrewMember | None = None,
         visible: bool = False,
     ):
         run_id = uuid4().hex
-        system = self._build_system(skill)
-        allowed_tools = skill.tools if skill else None
+        settings = self._settings.load()
+        system = self._build_system(skill, crew=crew, settings=settings)
+        allowed_tools = list(crew.tools) if crew else (skill.tools if skill else None)
+        write_roots = list(crew.write_roots) if crew else None
         tool_policy = self._runtime_for(conv_id).tool_policy
         thread = ChatThread(
             model, copy.deepcopy(history_snapshot), system, self.cwd,
             allowed_tools=allowed_tools,
             tool_policy=tool_policy,
             approval_bus=self._approval_bus,
+            write_roots=write_roots,
+            enable_crew_tool=(crew is None),
+            crew_settings=settings,
+            configured_providers=set(self._configured_providers()),
         )
-        bubble = self._add_bubble("", is_user=False, typing=True) if visible else None
+        crew_meta = crew_metadata(crew, settings) if crew else None
+        bubble = (
+            self._add_bubble("", is_user=False, typing=True, crew=crew_meta)
+            if visible
+            else None
+        )
         run = _AssistantRun(
             run_id=run_id,
             conv_id=conv_id,
@@ -723,6 +753,7 @@ class ChatPanel(QWidget):
             history_snapshot=history_snapshot,
             data_snapshot=data_snapshot,
             bubble=bubble,
+            crew=crew_meta,
         )
         self._runtime_for(conv_id).run = run
         if visible:
@@ -731,13 +762,20 @@ class ChatPanel(QWidget):
         thread.tool_called.connect(lambda name, inputs, rid=run_id: self._on_tool_called(rid, name, inputs))
         thread.bash_line.connect(lambda line, rid=run_id: self._on_bash_line(rid, line))
         thread.tool_result.connect(lambda name, output, rid=run_id: self._on_tool_result(rid, name, output))
+        thread.crew_started.connect(lambda meta, rid=run_id: self._on_crew_started(rid, meta))
+        thread.crew_chunk.connect(lambda meta, text, rid=run_id: self._on_crew_chunk(rid, meta, text))
+        thread.crew_done.connect(lambda meta, text, rid=run_id: self._on_crew_done(rid, meta, text))
+        thread.crew_error.connect(lambda meta, text, rid=run_id: self._on_crew_error(rid, meta, text))
         thread.done.connect(lambda full, rid=run_id: self._on_done(rid, full))
         thread.error.connect(lambda msg, rid=run_id: self._on_error(rid, msg))
         thread.start()
 
-    def regenerate(self):
+    def regenerate(self, idx: int = -1):
         if self._visible_run():
             return
+        if idx != _latest_regenerable_assistant_index(self.history):
+            return
+        crew = _crew_for_history_message(self.history, idx)
         user_idx = self._find_turn_user_index()
         if user_idx is None:
             return
@@ -748,9 +786,10 @@ class ChatPanel(QWidget):
         for k in list(self._bubbles.keys()):
             if k > user_idx:
                 del self._bubbles[k]
+        self._sync_regenerate_flags()
         self._save(touch_updated=True)
         self._enter_streaming()
-        self._start_assistant()
+        self._start_assistant(crew=crew)
 
     def _edit_resend(self, idx: int, text: str):
         if self._visible_run() or idx < 0 or idx >= len(self.history):
@@ -779,9 +818,10 @@ class ChatPanel(QWidget):
         self.history.append({"role": "user", "content": new_content, "created_at": now})
         new_idx = len(self.history) - 1
         self._add_bubble(new_content, is_user=True, history_index=new_idx, timestamp=now)
+        self._sync_regenerate_flags()
         self._save(touch_updated=True)
         self._enter_streaming()
-        self._start_assistant()
+        self._start_assistant(crew=_first_summoned_crew(text, self._settings.load()))
 
     def _branch(self, idx: int):
         if idx < 0 or idx >= len(self.history):
@@ -871,18 +911,26 @@ class ChatPanel(QWidget):
                 configured.append(provider)
         return configured
 
-    def _refresh_agents_banner(self):
-        p = agents_md(self.cwd)
-        if p:
-            self._agents_banner.setText(f"  📋  {p.name}  ·  project memory active")
-            self._agents_banner.show()
-        else:
-            self._agents_banner.hide()
-
-    def _build_system(self, skill=None) -> str:
-        custom = self._settings.load().get("system_prompt", "").strip()
+    def _build_system(
+        self,
+        skill=None,
+        crew: CrewMember | None = None,
+        settings: dict | None = None,
+    ) -> str:
+        settings = settings or self._settings.load()
+        custom = settings.get("system_prompt", "").strip()
         base = skill.prompt if skill else (custom or None)
-        return build_system(self.cwd, base)
+        system = build_system(self.cwd, base)
+        return crew_system_prompt(crew, system, crew_prompt(crew, settings)) if crew else system
+
+    def _model_for_crew(self, crew: CrewMember | None) -> str:
+        current = self.model_combo.currentText()
+        if not crew:
+            return current
+        saved = self._settings.load()
+        configured = set(self._configured_providers())
+        model = crew_settings(saved, crew)["model"]
+        return crew_model_choice(crew, current, {crew.id: model}, configured)
 
     def _on_slash_changed(self, text: str):
         if not text:
@@ -909,10 +957,16 @@ class ChatPanel(QWidget):
                 self._file_picker.hide()
             return
         if self._file_picker is None:
-            self._file_picker = FileMentionPicker(_list_mention_files(self.cwd), parent=self)
+            self._file_picker = FileMentionPicker(
+                _list_mention_files(self.cwd),
+                crew=_enabled_crew(self._settings.load()),
+                parent=self,
+            )
             self._file_picker.file_selected.connect(self._on_file_mention_selected)
+            self._file_picker.crew_selected.connect(self._on_crew_mention_selected)
         else:
             self._file_picker.set_files(_list_mention_files(self.cwd))
+            self._file_picker.set_crew(_enabled_crew(self._settings.load()))
         self._file_picker.filter(text)
         if self._file_picker.count() == 0:
             self._file_picker.hide()
@@ -937,6 +991,12 @@ class ChatPanel(QWidget):
 
     def _on_file_mention_selected(self, rel_path: str, _abs_path: str):
         self.composer.input.insert_file_mention(rel_path)
+        if self._file_picker:
+            self._file_picker.hide()
+        self.composer.focus_input()
+
+    def _on_crew_mention_selected(self, name: str):
+        self.composer.input.insert_crew_mention(name)
         if self._file_picker:
             self._file_picker.hide()
         self.composer.focus_input()
@@ -1060,6 +1120,66 @@ class ChatPanel(QWidget):
             run.active_terminal.append_line(line)
             self._bottom()
 
+    def _on_crew_started(self, run_id: str, meta: dict):
+        run = self._find_run(run_id)
+        if not run or run.conv_id != self.conv_id:
+            return
+        self._flush_stream_buffer()
+        self._remove_empty_active_typing_bubble()
+        run.bubble = None
+        self.active_bubble = None
+        self._add_notice(_crew_notice_text(meta, "joined"))
+        bubble = self._add_bubble("", is_user=False, typing=True, crew=meta)
+        run.crew_bubbles[_crew_invocation_key(meta)] = bubble
+
+    def _on_crew_chunk(self, run_id: str, meta: dict, text: str):
+        run = self._find_run(run_id)
+        if not run or run.conv_id != self.conv_id:
+            return
+        key = _crew_invocation_key(meta)
+        bubble = run.crew_bubbles.get(key)
+        if bubble is None:
+            bubble = self._add_bubble("", is_user=False, typing=True, crew=meta)
+            run.crew_bubbles[key] = bubble
+        bubble.append(text)
+        self._bottom()
+
+    def _on_crew_done(self, run_id: str, meta: dict, text: str):
+        run = self._find_run(run_id)
+        if not run or run.conv_id != self.conv_id:
+            return
+        key = _crew_invocation_key(meta)
+        bubble = run.crew_bubbles.pop(key, None)
+        now = datetime.now().isoformat()
+        crew_msg = {
+            "role": "assistant",
+            "content": text,
+            "created_at": now,
+            "crew": _crew_history_meta(meta),
+        }
+        self.history.append(crew_msg)
+        idx = len(self.history) - 1
+        if bubble is None:
+            bubble = self._add_bubble(text, is_user=False, history_index=idx, timestamp=now, crew=meta)
+        else:
+            bubble._history_index = idx
+            self._bubbles[idx] = bubble
+            bubble.finalize(text)
+        self._add_notice(_crew_notice_text(meta, "left"))
+        self._update_context_ui()
+
+    def _on_crew_error(self, run_id: str, meta: dict, text: str):
+        run = self._find_run(run_id)
+        if not run or run.conv_id != self.conv_id:
+            return
+        key = _crew_invocation_key(meta)
+        bubble = run.crew_bubbles.pop(key, None)
+        if bubble:
+            bubble.append(text)
+        else:
+            self._add_bubble(text, is_user=False, crew=meta)
+        self._add_notice(_crew_notice_text(meta, "left"))
+
     def _on_tool_result(self, run_id: str, name: str, output: str):
         run = self._find_run(run_id)
         if not run:
@@ -1097,6 +1217,8 @@ class ChatPanel(QWidget):
             self._flush_stream_buffer()
         now = datetime.now().isoformat()
         assistant_msg = {"role": "assistant", "content": full, "created_at": now}
+        if run.crew:
+            assistant_msg["crew"] = dict(run.crew)
         run_history = copy.deepcopy(run.history_snapshot)
         run_data = copy.deepcopy(run.data_snapshot)
 
@@ -1120,7 +1242,7 @@ class ChatPanel(QWidget):
             self.active_bubble = None
 
         if is_current and bubble is None and full:
-            bubble = self._add_bubble(full, is_user=False)
+            bubble = self._add_bubble(full, is_user=False, crew=run.crew)
 
         if is_current and bubble:
             bubble._history_index = asst_idx
@@ -1143,6 +1265,10 @@ class ChatPanel(QWidget):
                 self._bottom()
 
             bubble.finalize(full, on_artifact=add_artifact)
+            self._sync_regenerate_flags()
+
+        if is_current and run.crew:
+            self._add_notice(_crew_notice_text(run.crew, "left"))
 
         if is_current:
             self._sync_visible_runtime_refs()
@@ -1208,11 +1334,15 @@ class ChatPanel(QWidget):
             return
         if not self.conv_data.get("title_auto", False):
             return
-        if sum(1 for m in self.history if m["role"] == "assistant") != 1:
+        assistant_msgs = [
+            m for m in self.history
+            if m["role"] == "assistant" and not m.get("crew")
+        ]
+        if len(assistant_msgs) != 1:
             return
 
         user_msg = next((m for m in self.history if m["role"] == "user"), None)
-        asst_msg = next((m for m in self.history if m["role"] == "assistant"), None)
+        asst_msg = assistant_msgs[0] if assistant_msgs else None
         if not user_msg or not asst_msg:
             return
 
@@ -1258,6 +1388,8 @@ class ChatPanel(QWidget):
             self._flush_stream_buffer()
         if is_current and run.bubble:
             run.bubble.append(f"[Error: {msg}]")
+        if is_current and run.crew:
+            self._add_notice(_crew_notice_text(run.crew, "left"))
         if is_current:
             self.active_bubble = None
         completed_thread = run.thread
@@ -1317,7 +1449,9 @@ class ChatPanel(QWidget):
         text = "".join(self._stream_buffer)
         self._stream_buffer.clear()
         if run.bubble is None:
-            run.bubble = self._add_bubble("", is_user=False, typing=True)
+            run.bubble = self._add_bubble(
+                "", is_user=False, typing=True, crew=run.crew,
+            )
         self.active_bubble = run.bubble
         if run.bubble:
             run.bubble.append(text)
@@ -1400,10 +1534,11 @@ class ChatPanel(QWidget):
         self._bottom()
 
     def _add_bubble(self, content, is_user: bool, typing: bool = False,
-                    history_index: int = -1, timestamp: str = "") -> MessageBubble:
+                    history_index: int = -1, timestamp: str = "",
+                    crew: dict | None = None) -> MessageBubble:
         bubble = self._make_bubble(
             content, is_user, typing=typing,
-            history_index=history_index, timestamp=timestamp,
+            history_index=history_index, timestamp=timestamp, crew=crew,
         )
         self.msg_layout.insertWidget(self.msg_layout.count() - 1, bubble)
         if history_index >= 0:
@@ -1412,16 +1547,23 @@ class ChatPanel(QWidget):
         return bubble
 
     def _make_bubble(self, content, is_user: bool, typing: bool = False,
-                     history_index: int = -1, timestamp: str = "") -> MessageBubble:
+                     history_index: int = -1, timestamp: str = "",
+                     crew: dict | None = None) -> MessageBubble:
         bubble = MessageBubble(
             content, is_user, typing=typing,
-            history_index=history_index, timestamp=timestamp,
+            history_index=history_index, timestamp=timestamp, crew=crew,
+            can_regenerate=(history_index == _latest_regenerable_assistant_index(self.history)),
         )
-        bubble.regenerate_requested.connect(lambda _: self.regenerate())
+        bubble.regenerate_requested.connect(self.regenerate)
         bubble.edit_resend_requested.connect(self._edit_resend)
         bubble.branch_requested.connect(self._branch)
         bubble.file_clicked.connect(self._open_linked_file)
         return bubble
+
+    def _sync_regenerate_flags(self):
+        latest = _latest_regenerable_assistant_index(self.history)
+        for idx, bubble in self._bubbles.items():
+            bubble.set_regenerable(idx == latest)
 
     def _open_linked_file(self, path: str):
         abs_path = path if os.path.isabs(path) else os.path.join(self.cwd, path)
@@ -1489,7 +1631,6 @@ class ChatPanel(QWidget):
 
     def set_cwd(self, cwd: str):
         self.cwd = cwd
-        self._refresh_agents_banner()
         self._update_context_ui()
 
     def _clear_bubbles(self):
@@ -1511,12 +1652,15 @@ class ChatPanel(QWidget):
         self._sync_older_button()
         for i in range(self._render_start_index, len(self.history)):
             self._insert_history_bubble(i)
+        self._sync_regenerate_flags()
 
     def _render_visible_run(self):
         run = self._visible_run()
         if not run:
             return
-        run.bubble = self._add_bubble("", is_user=False, typing=True)
+        run.bubble = self._add_bubble(
+            "", is_user=False, typing=True, crew=run.crew,
+        )
         self.active_bubble = run.bubble
         run.rendered_chars = 0
         if run.partial_text:
@@ -1583,10 +1727,12 @@ class ChatPanel(QWidget):
             is_user=(msg["role"] == "user"),
             history_index=history_index,
             timestamp=msg.get("created_at", ""),
+            crew=msg.get("crew"),
         )
         insert_at = 1 if at_top and self._older_btn else 0 if at_top else self.msg_layout.count() - 1
         self.msg_layout.insertWidget(insert_at, bubble)
         self._bubbles[history_index] = bubble
+        bubble.set_regenerable(history_index == _latest_regenerable_assistant_index(self.history))
         return bubble
 
     def _sync_older_button(self):
@@ -1784,6 +1930,7 @@ class ChatPanel(QWidget):
             history,
             data,
             skill=draft.get("skill"),
+            crew=draft.get("crew"),
             visible=False,
         )
 
@@ -1865,6 +2012,69 @@ def _queue_preview(draft: dict) -> str:
     if len(text) > 120:
         text = text[:117].rstrip() + "..."
     return text
+
+
+def _first_summoned_crew(text: str, settings: dict | None = None) -> CrewMember | None:
+    members = summoned_members(text)
+    for member in members:
+        if crew_enabled(settings, member):
+            return member
+    return None
+
+
+def _enabled_crew(settings: dict | None = None) -> list[CrewMember]:
+    return [member for member in all_crew() if crew_enabled(settings, member)]
+
+
+def _crew_for_history_message(history: list[dict], idx: int) -> CrewMember | None:
+    if idx < 0 or idx >= len(history):
+        return None
+    meta = history[idx].get("crew")
+    if not isinstance(meta, dict):
+        return None
+    return get_crew_member(str(meta.get("id") or ""))
+
+
+def _latest_regenerable_assistant_index(history: list[dict]) -> int:
+    if not history:
+        return -1
+    idx = len(history) - 1
+    return idx if history[idx].get("role") == "assistant" else -1
+
+
+def _crew_notice_text(crew: CrewMember | dict, action: str) -> str:
+    if isinstance(crew, CrewMember):
+        name = crew.name
+    else:
+        name = crew_name_from_metadata(crew)
+    name = name or "Crew"
+    verb = "joined" if action == "joined" else "left"
+    return f"{name} {verb} the thread."
+
+
+def _crew_invocation_key(meta: dict) -> str:
+    return str(meta.get("invocation_id") or meta.get("id") or "crew")
+
+
+def _crew_history_meta(meta: dict) -> dict:
+    return {
+        "id": str(meta.get("id") or ""),
+        "name": crew_name_from_metadata(meta),
+        "title": str(meta.get("title") or ""),
+        "preferred_model": str(meta.get("preferred_model") or ""),
+        "model": str(meta.get("model") or ""),
+        "color": str(meta.get("color") or ""),
+        "avatar": str(meta.get("avatar") or ""),
+    }
+
+
+def _crew_model_choice(
+    crew: CrewMember,
+    fallback: str,
+    saved_models: dict | None,
+    configured_providers: set[str] | None = None,
+) -> str:
+    return crew_model_choice(crew, fallback, saved_models, configured_providers)
 
 
 def _message_render_bytes(msg: dict) -> int:

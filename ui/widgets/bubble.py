@@ -8,14 +8,15 @@ import markdown as _md
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout, QVBoxLayout, QLabel, QSizePolicy, QMenu, QTextEdit,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize
 from PyQt6.QtGui import QPixmap, QAction, QGuiApplication
 
 from services.content import content_text, image_blocks
-from ui.avatars import avatar_label
+from services.crew import crew_name_from_metadata
+from ui.avatars import AVATAR_SIZE, avatar_label, avatar_pixmap
 from ui.theme import (
     palette, chat_font_pt, bubble_label_style, composer_style, edit_bubble_style,
-    markdown_css, markdown_file_link_style, timestamp_style,
+    markdown_css, markdown_file_link_style, timestamp_style, crew_name_style, crew_tone,
 )
 
 _CODE_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
@@ -226,13 +227,21 @@ class MessageBubble(QFrame):
     file_clicked          = pyqtSignal(str)   # relative or absolute path
 
     def __init__(self, content="", is_user=True, typing=False,
-                 history_index: int = -1, timestamp: str = "", parent=None):
+                 history_index: int = -1, timestamp: str = "",
+                 crew: dict | None = None, can_regenerate: bool = False,
+                 parent=None):
         super().__init__(parent)
         self._is_user = is_user
         self._history_index = history_index
         self._content = content
+        self._crew = crew if isinstance(crew, dict) else None
+        self._crew_id = str((self._crew or {}).get("id") or "").casefold()
+        self._crew_color = str((self._crew or {}).get("color") or "")
+        self._crew_avatar = str((self._crew or {}).get("avatar") or "")
+        self._can_regenerate = can_regenerate
         self._editing = False
         self._timestamp_lbl = None
+        self._speaker_lbl = None
         self._md_source: str | None = None
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
 
@@ -243,7 +252,7 @@ class MessageBubble(QFrame):
         row.setContentsMargins(20, 6, 20, 6)
         row.setSpacing(8)
 
-        portrait = avatar_label("human" if is_user else "agent")
+        portrait = self._portrait(is_user)
 
         self.body = QVBoxLayout()
         self.body.setSpacing(4)
@@ -288,7 +297,17 @@ class MessageBubble(QFrame):
                 self.body.addWidget(self.label, 0, Qt.AlignmentFlag.AlignRight)
             self.body.addWidget(self.edit_input, 0, Qt.AlignmentFlag.AlignRight)
         else:
-            self.label.setStyleSheet(bubble_label_style(False))
+            speaker = crew_name_from_metadata(self._crew)
+            if speaker:
+                self._speaker_lbl = QLabel(speaker)
+                self._speaker_lbl.setObjectName("crewSpeaker")
+                self._speaker_lbl.setStyleSheet(
+                    crew_name_style(self._crew_id, self._crew_color)
+                )
+                self.body.addWidget(self._speaker_lbl, 0, Qt.AlignmentFlag.AlignLeft)
+            self.label.setStyleSheet(
+                bubble_label_style(False, crew_id=self._crew_id, crew_color=self._crew_color)
+            )
             self.body.addWidget(self.label, 0, Qt.AlignmentFlag.AlignLeft)
             self.body.addWidget(self.edit_input, 0, Qt.AlignmentFlag.AlignLeft)
 
@@ -327,6 +346,16 @@ class MessageBubble(QFrame):
         lbl.setPixmap(pixmap.scaled(160, 160, Qt.AspectRatioMode.KeepAspectRatio,
                                    Qt.TransformationMode.SmoothTransformation))
         lbl.setStyleSheet("border-radius:8px;")
+        return lbl
+
+    def _portrait(self, is_user: bool) -> QLabel:
+        if not self._crew_avatar:
+            return avatar_label("human" if is_user else "agent")
+        lbl = QLabel()
+        color = crew_tone(self._crew_id, custom_color=self._crew_color)["accent"]
+        lbl.setPixmap(avatar_pixmap(self._crew_avatar, AVATAR_SIZE, color))
+        lbl.setFixedSize(QSize(AVATAR_SIZE, AVATAR_SIZE))
+        lbl.setStyleSheet("background:transparent;")
         return lbl
 
     def _start_edit(self):
@@ -409,12 +438,18 @@ class MessageBubble(QFrame):
         self.edit_input.setStyleSheet(edit_bubble_style(fs))
         if self._timestamp_lbl:
             self._timestamp_lbl.setStyleSheet(timestamp_style())
+        if self._speaker_lbl:
+            self._speaker_lbl.setStyleSheet(
+                crew_name_style(self._crew_id, self._crew_color)
+            )
         if self._is_user:
             self.label.setStyleSheet(bubble_label_style(True, fs))
             if self._copy_text and not self._typing and not self._editing:
                 self._show_user_text(self._copy_text)
             return
-        self.label.setStyleSheet(bubble_label_style(False, fs))
+        self.label.setStyleSheet(
+            bubble_label_style(False, fs, self._crew_id, self._crew_color)
+        )
         if self._md_source:
             self.label.setTextFormat(Qt.TextFormat.RichText)
             self.label.setText(_to_html(self._md_source))
@@ -430,7 +465,7 @@ class MessageBubble(QFrame):
             copy.triggered.connect(lambda: QGuiApplication.clipboard().setText(self._copy_text))
             menu.addAction(copy)
         if self._history_index >= 0:
-            if not self._is_user and not self._typing:
+            if self._can_regenerate and not self._is_user and not self._typing:
                 regen = QAction("Regenerate", self)
                 regen.triggered.connect(
                     lambda: self.regenerate_requested.emit(self._history_index)
@@ -447,3 +482,6 @@ class MessageBubble(QFrame):
             menu.addAction(branch)
         if menu.actions():
             menu.exec(self.label.mapToGlobal(pos))
+
+    def set_regenerable(self, enabled: bool):
+        self._can_regenerate = bool(enabled)

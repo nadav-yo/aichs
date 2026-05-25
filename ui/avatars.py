@@ -1,8 +1,9 @@
 import shutil
+import re
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QPainter, QPainterPath, QPixmap
+from PyQt6.QtCore import Qt, QSize, QByteArray
+from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import QLabel
 
@@ -41,8 +42,9 @@ def persist_portrait(source: str, role: str) -> str:
     return str(dest)
 
 
-def avatar_pixmap(source: str, size: int = AVATAR_SIZE) -> QPixmap:
-    key = f"{source}:{size}"
+def avatar_pixmap(source: str, size: int = AVATAR_SIZE, accent_color: str = "") -> QPixmap:
+    accent = _clean_color(accent_color)
+    key = f"{source}:{size}:{accent}"
     if key in _cache:
         return _cache[key]
 
@@ -55,6 +57,10 @@ def avatar_pixmap(source: str, size: int = AVATAR_SIZE) -> QPixmap:
     clip = QPainterPath()
     clip.addEllipse(0, 0, size, size)
     painter.setClipPath(clip)
+    if accent:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(accent))
+        painter.drawEllipse(0, 0, size, size)
 
     if path.is_file():
         if path.suffix.lower() == ".svg":
@@ -70,16 +76,48 @@ def avatar_pixmap(source: str, size: int = AVATAR_SIZE) -> QPixmap:
         svg = _ASSETS / f"{source}.svg"
         if not svg.exists():
             svg = _ASSETS / "human.svg"
-        QSvgRenderer(str(svg)).render(painter)
+        if accent and svg.stem.startswith("crew_"):
+            QSvgRenderer(QByteArray(_tinted_svg(svg, accent))).render(painter)
+        else:
+            QSvgRenderer(str(svg)).render(painter)
+
+    if accent:
+        painter.setClipping(False)
+        pen = QPen(QColor(accent))
+        pen.setWidth(max(2, size // 12))
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        inset = pen.widthF() / 2
+        painter.drawEllipse(int(inset), int(inset), int(size - pen.widthF()), int(size - pen.widthF()))
 
     painter.end()
     _cache[key] = image
     return image
 
 
-def avatar_label(role: str, size: int = AVATAR_SIZE) -> QLabel:
+def avatar_label(role: str, size: int = AVATAR_SIZE, accent_color: str = "") -> QLabel:
     lbl = QLabel()
-    lbl.setPixmap(avatar_pixmap(portrait_source(role), size))
+    lbl.setPixmap(avatar_pixmap(portrait_source(role), size, accent_color))
     lbl.setFixedSize(QSize(size, size))
     lbl.setStyleSheet("background:transparent;")
     return lbl
+
+
+def _clean_color(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if not text.startswith("#"):
+        text = f"#{text}"
+    return text if re.fullmatch(r"#[0-9a-fA-F]{6}", text) else ""
+
+
+def _tinted_svg(path: Path, color: str) -> bytes:
+    text = path.read_text(encoding="utf-8")
+    text = re.sub(
+        r'(<circle\b[^>]*\bfill=")#[0-9a-fA-F]{6}(")',
+        lambda match: f"{match.group(1)}{color}{match.group(2)}",
+        text,
+        count=1,
+    )
+    return text.encode("utf-8")

@@ -9,7 +9,6 @@ from ui import theme
         (theme.card_frame_style, ()),
         (theme.tool_notice_style, ()),
         (theme.center_notice_style, ()),
-        (theme.agents_banner_style, ()),
         (theme.input_bar_style, ()),
         (theme.send_button_style, ()),
         (theme.stop_button_style, ()),

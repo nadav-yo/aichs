@@ -7,6 +7,8 @@ def test_list_builtin_avatars():
     names = list_builtin_avatars()
     assert "agent" in names
     assert "human" in names
+    assert "crew_scout" in names
+    assert "crew_critic" in names
 
 
 def test_portrait_source_default(isolate_aicc_home):

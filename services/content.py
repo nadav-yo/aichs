@@ -1,5 +1,7 @@
 import base64
 
+from services.crew import crew_name_from_metadata
+
 
 def build_user_content(text: str, images: list[dict], files: list[dict] | None = None) -> str | list:
     files = files or []
@@ -93,23 +95,60 @@ def file_blocks(content) -> list[dict]:
 def prepare_for_anthropic(messages: list[dict]) -> list[dict]:
     out = []
     for msg in messages:
-        content = msg["content"]
-        if msg["role"] == "user" and isinstance(content, list) and _is_multimodal(content):
+        role = msg["role"]
+        content = _content_for_model(msg)
+        if role == "user" and isinstance(content, list) and _is_multimodal(content):
             out.append({"role": "user", "content": _to_anthropic_blocks(content)})
         else:
-            out.append(msg)
+            out.append({"role": role, "content": content})
     return out
 
 
 def prepare_for_openai(messages: list[dict]) -> list[dict]:
     out = []
     for msg in messages:
-        content = msg["content"]
-        if msg["role"] == "user" and isinstance(content, list) and _is_multimodal(content):
+        role = msg["role"]
+        content = _content_for_model(msg)
+        if role == "user" and isinstance(content, list) and _is_multimodal(content):
             out.append({"role": "user", "content": _to_openai_blocks(content)})
+        elif role == "tool":
+            out.append({
+                "role": "tool",
+                "tool_call_id": msg.get("tool_call_id", ""),
+                "content": content,
+            })
+        elif role == "assistant" and msg.get("tool_calls"):
+            out.append({
+                "role": "assistant",
+                "content": content,
+                "tool_calls": msg.get("tool_calls", []),
+            })
         else:
-            out.append(msg)
+            out.append({"role": role, "content": content})
     return out
+
+
+def _content_for_model(msg: dict):
+    content = msg.get("content", "")
+    speaker = crew_name_from_metadata(msg.get("crew"))
+    if not speaker or msg.get("role") != "assistant":
+        return content
+    if isinstance(content, str):
+        return f"{speaker}: {content}"
+    if isinstance(content, list):
+        out = []
+        prefixed = False
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text" and not prefixed:
+                updated = dict(block)
+                updated["text"] = f"{speaker}: {updated.get('text', '')}"
+                out.append(updated)
+                prefixed = True
+            else:
+                out.append(block)
+        if prefixed:
+            return out
+    return content
 
 
 def _is_multimodal(content: list) -> bool:

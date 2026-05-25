@@ -53,6 +53,61 @@ def test_load_save_user_providers(tmp_path, monkeypatch):
     assert "llama-test" in reg.MODELS.get("local", [])
 
 
+def test_builtin_provider_model_order_can_be_overridden():
+    original = list(reg.MODELS["claude"])
+    reordered = [original[1], original[0], *original[2:]]
+    try:
+        reg.save_user_providers({
+            "claude": {
+                "api": "anthropic",
+                "apiKey": "ANTHROPIC_API_KEY",
+                "models": [{"id": model_id} for model_id in reordered],
+            }
+        })
+        reg.reload()
+        assert reg.MODELS["claude"] == reordered
+        assert reg.get_model_config(reordered[0]).display_name
+    finally:
+        reg.save_user_providers({})
+        reg.reload()
+
+
+def test_merge_reorders_partial_builtin_models_and_keeps_unspecified_models():
+    merged = reg._merge(
+        {
+            "local": {
+                "api": "anthropic",
+                "api_key_spec": "OLD_KEY",
+                "models": [
+                    {"id": "model-a", "name": "Model A"},
+                    {"id": "model-b", "name": "Model B"},
+                ],
+            }
+        },
+        {
+            "local": {
+                "api": "openai-compatible",
+                "apiKey": "NEW_KEY",
+                "baseUrl": "http://localhost:11434/v1",
+                "models": [
+                    {"id": "model-b", "name": "Better B"},
+                    {"id": "model-b"},
+                    {},
+                ],
+            }
+        },
+    )
+
+    provider = merged["local"]
+    assert provider["api"] == "openai-compatible"
+    assert provider["api_key_spec"] == "NEW_KEY"
+    assert provider["base_url"] == "http://localhost:11434/v1"
+    assert provider["models"] == [
+        {"id": "model-b", "name": "Better B"},
+        {"id": "model-a", "name": "Model A"},
+    ]
+
+
 def test_merge_skips_invalid_api(isolate_aicc_home):
     from config import SETTINGS_PATH
 

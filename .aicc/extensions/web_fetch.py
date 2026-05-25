@@ -1,5 +1,6 @@
 from html.parser import HTMLParser
 from urllib.request import Request, urlopen
+from urllib.parse import urlparse
 
 
 class TextExtractor(HTMLParser):
@@ -26,11 +27,14 @@ class TextExtractor(HTMLParser):
 def register(registry):
     registry.tool(
         name="web_fetch",
-        description="Fetch a web page and return readable text.",
+        description="Fetch a web page and return readable text with its source URL.",
         input_schema={
             "type": "object",
             "properties": {
-                "url": {"type": "string"},
+                "url": {
+                    "type": "string",
+                    "description": "Where to fetch from. Must start with http:// or https://.",
+                },
                 "max_chars": {
                     "type": "integer",
                     "description": "Maximum characters to return.",
@@ -46,15 +50,19 @@ def register(registry):
 
 
 def web_fetch(ctx, inputs):
-    url = str(inputs["url"])
+    url = str(inputs["url"]).strip()
     max_chars = int(inputs.get("max_chars") or 12000)
     if not url.startswith(("http://", "https://")):
         return "[tool error] url must start with http:// or https://"
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return "[tool error] url must include a host"
 
     req = Request(url, headers={"User-Agent": "aicc/extension"})
     with urlopen(req, timeout=20) as response:
         raw = response.read(max_chars * 4)
         charset = response.headers.get_content_charset() or "utf-8"
+        final_url = response.geturl()
 
     html = raw.decode(charset, errors="replace")
     parser = TextExtractor()
@@ -62,4 +70,4 @@ def web_fetch(ctx, inputs):
     text = "\n".join(parser.parts)
     if len(text) > max_chars:
         text = text[:max_chars] + "\n\n[truncated]"
-    return text or "(no readable text)"
+    return f"Source: {final_url}\n\n{text or '(no readable text)'}"

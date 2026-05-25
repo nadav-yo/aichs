@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from config import IGNORED, MAX_TREE_ENTRIES_PER_DIR, SYSTEM_PROMPT
+from services.crew import crew_roster_prompt
 from services.tool_registry import extension_context_snippets
 
 
@@ -20,6 +21,7 @@ def build_system(repo_path: str, prompt: str | None = None) -> str:
     if agents:
         parts.append(f"## Project Memory (AGENTS.md)\n{agents}")
     parts.append(f"## Workspace\n{workspace}")
+    parts.append(f"## Crew\n{crew_roster_prompt()}")
     if extensions:
         parts.append(f"## Extension Context\n{extensions}")
     return "\n\n".join(parts)

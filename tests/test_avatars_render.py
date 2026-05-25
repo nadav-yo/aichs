@@ -8,6 +8,12 @@ def test_avatar_pixmap_builtin(qapp):
     assert not pix.isNull()
 
 
+def test_avatar_pixmap_tints_crew_avatar(qapp):
+    pix = avatar_pixmap("crew_scout", size=32, accent_color="#123456")
+    color = pix.toImage().pixelColor(4, 16).name().lower()
+    assert color == "#123456"
+
+
 def test_avatar_label_widget(qapp):
     label = avatar_label("human", size=24)
     assert label.pixmap() is not None or label.text() != ""

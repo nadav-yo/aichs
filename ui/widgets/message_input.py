@@ -84,6 +84,12 @@ class MessageInput(QTextEdit):
 
     def insert_file_mention(self, rel_path: str):
         token = f'@"{rel_path}"' if any(ch.isspace() for ch in rel_path) else f"@{rel_path}"
+        self._insert_mention_token(token)
+
+    def insert_crew_mention(self, name: str):
+        self._insert_mention_token(f"@{name}")
+
+    def _insert_mention_token(self, token: str):
         cursor = self.textCursor()
         end = cursor.position()
         start = self._mention_start if self._mention_start >= 0 else end

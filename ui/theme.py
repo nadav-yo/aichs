@@ -7,6 +7,34 @@ ACCENT_DIM = "#3a6fd4"
 ACCENT_SOFT_DARK = "#1a2744"
 ACCENT_SOFT_LIGHT = "#e8f0ff"
 
+_CREW_TONES = {
+    "scout": {
+        "dark": ("#132332", "#275f87", "#7dd3fc"),
+        "modern": ("#132832", "#2b697c", "#67e8f9"),
+        "light": ("#e8f6ff", "#9ed8f4", "#0369a1"),
+    },
+    "critic": {
+        "dark": ("#2d1d24", "#8c3b51", "#fb7185"),
+        "modern": ("#2c2026", "#8b4a5a", "#fda4af"),
+        "light": ("#fff1f2", "#f9a8b7", "#be123c"),
+    },
+    "tester": {
+        "dark": ("#18271e", "#2f7148", "#86efac"),
+        "modern": ("#172820", "#3a7b57", "#8ff0b4"),
+        "light": ("#ecfdf3", "#a7f3c2", "#15803d"),
+    },
+    "designer": {
+        "dark": ("#251f35", "#6d55a4", "#c4b5fd"),
+        "modern": ("#242238", "#6d5aa8", "#c4b5fd"),
+        "light": ("#f5f3ff", "#c4b5fd", "#6d28d9"),
+    },
+    "archivist": {
+        "dark": ("#282415", "#806c27", "#facc15"),
+        "modern": ("#292514", "#8b762b", "#fde047"),
+        "light": ("#fff9db", "#fde68a", "#a16207"),
+    },
+}
+
 _PALETTES = {
     "dark": {
         "BG": "#0f0f11",
@@ -215,15 +243,6 @@ def center_notice_style() -> str:
     return f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px; padding:8px;"
 
 
-def agents_banner_style() -> str:
-    p = palette()
-    return (
-        f"QLabel {{ background:{p['SUCCESS_BG']}; color:{p['SUCCESS']};"
-        f"font-size:{meta_font_pt()}px; padding:6px 12px;"
-        f"border-bottom:1px solid {p['SUCCESS_BORDER']}; }}"
-    )
-
-
 def input_bar_style() -> str:
     p = palette()
     return (
@@ -232,27 +251,37 @@ def input_bar_style() -> str:
     )
 
 
-def _pill_button_style(bg: str, hover: str, disabled_bg: str, disabled_fg: str) -> str:
+def _pill_button_style(
+    bg: str,
+    hover: str,
+    pressed: str,
+    disabled_bg: str,
+    disabled_fg: str,
+) -> str:
     fs = max(12, chat_font_pt())
+    height = 38
+    radius = height // 2
     return (
         f"QPushButton {{ background:{bg}; color:white; border:none;"
-        f"border-radius:20px; padding:0 22px; font-size:{fs}px; font-weight:600; }}"
+        f"border-radius:{radius}px; padding:0 24px; font-size:{fs}px; font-weight:600;"
+        f"min-width:76px; min-height:{height}px; max-height:{height}px; }}"
         f"QPushButton:hover {{ background:{hover}; }}"
+        f"QPushButton:pressed {{ background:{pressed}; }}"
         f"QPushButton:disabled {{ background:{disabled_bg}; color:{disabled_fg}; }}"
     )
 
 
 def send_button_style() -> str:
-    return _pill_button_style(ACCENT, ACCENT_HOVER, ACCENT_DIM, "#9bb8e8")
+    return _pill_button_style(ACCENT, ACCENT_HOVER, ACCENT_DIM, ACCENT_DIM, "#9bb8e8")
 
 
 def stop_button_style() -> str:
-    return _pill_button_style("#dc2626", "#ef4444", "#7f1d1d", "#fca5a5")
+    return _pill_button_style("#dc2626", "#ef4444", "#b91c1c", "#7f1d1d", "#fca5a5")
 
 
 def floating_button_style() -> str:
     meta = meta_font_pt()
-    return _pill_button_style(ACCENT, ACCENT_HOVER, ACCENT_DIM, "#9bb8e8").replace(
+    return _pill_button_style(ACCENT, ACCENT_HOVER, ACCENT_DIM, ACCENT_DIM, "#9bb8e8").replace(
         f"font-size:{max(12, chat_font_pt())}px;",
         f"font-size:{max(14, meta + 2)}px;",
     )
@@ -357,6 +386,30 @@ def timestamp_style() -> str:
     )
 
 
+def crew_tone(
+    crew_id: str = "",
+    theme: str | None = None,
+    custom_color: str = "",
+) -> dict:
+    theme_name = theme or current_theme()
+    bg, border, accent = _CREW_TONES.get(str(crew_id or "").casefold(), {}).get(
+        theme_name,
+        _CREW_TONES["scout"].get(theme_name, _CREW_TONES["scout"]["dark"]),
+    )
+    if custom_color:
+        border = custom_color
+        accent = custom_color
+    return {"background": bg, "border": border, "accent": accent}
+
+
+def crew_name_style(crew_id: str = "", custom_color: str = "") -> str:
+    tone = crew_tone(crew_id, custom_color=custom_color)
+    return (
+        f"color:{tone['accent']}; font-size:{max(10, chat_font_pt() - 3)}px;"
+        "font-weight:600; background:transparent; padding:0 4px;"
+    )
+
+
 def compaction_threshold_pct() -> int:
     pct = SettingsStore().load().get("compaction_threshold_pct", DEFAULT_COMPACTION_THRESHOLD_PCT)
     try:
@@ -458,13 +511,26 @@ QToolTip {{
 """
 
 
-def bubble_label_style(is_user: bool, font_pt: int | None = None) -> str:
+def bubble_label_style(
+    is_user: bool,
+    font_pt: int | None = None,
+    crew_id: str = "",
+    crew_color: str = "",
+) -> str:
     p = palette()
     fs = font_pt or chat_font_pt()
     if is_user:
         return (
             f"background:{ACCENT}; color:white; padding:10px 16px;"
             f"border-radius:18px; font-size:{fs}px; line-height:1.45;"
+        )
+    if crew_id:
+        tone = crew_tone(crew_id, custom_color=crew_color)
+        return (
+            f"background:{tone['background']}; color:{p['BUBBLE_AI_TEXT']};"
+            f"padding:10px 16px; border:1px solid {tone['border']};"
+            f"border-left:4px solid {tone['accent']}; border-radius:18px;"
+            f"font-size:{fs}px; line-height:1.45;"
         )
     return (
         f"background:{p['BUBBLE_AI']}; color:{p['BUBBLE_AI_TEXT']}; padding:10px 16px;"

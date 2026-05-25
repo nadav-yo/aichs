@@ -59,6 +59,9 @@ def test_user_blocks_with_image_and_timestamp():
     alines = _assistant_blocks("Reply", "2026-01-01T12:01:00")
     assert "## Agent" in alines
 
+    crew_lines = _assistant_blocks("Found", "", "Scout")
+    assert "## Scout" in crew_lines
+
 
 def test_conversation_metadata_updated_only():
     md = conversation_to_markdown({
@@ -101,6 +104,20 @@ def test_export_skips_tool_only_user_messages():
     })
     assert md.count("## You") == 1
     assert "Hello" in md
+
+
+def test_export_uses_crew_speaker_name():
+    md = conversation_to_markdown({
+        "title": "T",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "Found",
+                "crew": {"id": "scout", "name": "Scout"},
+            },
+        ],
+    })
+    assert "## Scout" in md
 
 
 def test_export_user_blocks_skip_non_dict():

@@ -1,18 +1,28 @@
 from PyQt6.QtWidgets import QFrame, QVBoxLayout, QListWidget, QListWidgetItem
 from PyQt6.QtCore import Qt, pyqtSignal
 
+from services.crew import CrewMember
 from ui.theme import palette, ACCENT
 
 _ROLE_REL = Qt.ItemDataRole.UserRole
 _ROLE_ABS = Qt.ItemDataRole.UserRole + 1
+_ROLE_KIND = Qt.ItemDataRole.UserRole + 2
+_ROLE_TOKEN = Qt.ItemDataRole.UserRole + 3
 
 
 class FileMentionPicker(QFrame):
     file_selected = pyqtSignal(str, str)  # relative path, absolute path
+    crew_selected = pyqtSignal(str)       # crew mention token
 
-    def __init__(self, files: list[tuple[str, str]], parent=None):
+    def __init__(
+        self,
+        files: list[tuple[str, str]],
+        crew: list[CrewMember] | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self._all = files
+        self._crew = crew or []
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         p = palette()
@@ -42,9 +52,21 @@ class FileMentionPicker(QFrame):
     def set_files(self, files: list[tuple[str, str]]):
         self._all = files
 
+    def set_crew(self, crew: list[CrewMember]):
+        self._crew = crew
+
     def filter(self, query: str):
         q = query.lstrip("@").lower().strip()
         self._list.clear()
+        for member in self._crew:
+            haystack = f"{member.name} {member.id} {member.title}".lower()
+            if q and q not in haystack:
+                continue
+            item = QListWidgetItem(f"@{member.name}  ·  {member.title}")
+            item.setData(_ROLE_KIND, "crew")
+            item.setData(_ROLE_TOKEN, member.name)
+            item.setToolTip(member.description)
+            self._list.addItem(item)
         matches = []
         for rel, abs_path in self._all:
             name = rel.rsplit("/", 1)[-1].lower()
@@ -55,6 +77,7 @@ class FileMentionPicker(QFrame):
                 break
         for rel, abs_path in matches:
             item = QListWidgetItem(f"@{rel}")
+            item.setData(_ROLE_KIND, "file")
             item.setData(_ROLE_REL, rel)
             item.setData(_ROLE_ABS, abs_path)
             self._list.addItem(item)
@@ -83,4 +106,7 @@ class FileMentionPicker(QFrame):
 
     def _on_activated(self, item: QListWidgetItem):
         self.hide()
-        self.file_selected.emit(item.data(_ROLE_REL), item.data(_ROLE_ABS))
+        if item.data(_ROLE_KIND) == "crew":
+            self.crew_selected.emit(item.data(_ROLE_TOKEN))
+        else:
+            self.file_selected.emit(item.data(_ROLE_REL), item.data(_ROLE_ABS))

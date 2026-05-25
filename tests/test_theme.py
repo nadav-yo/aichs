@@ -6,6 +6,8 @@ from ui.theme import (
     build_stylesheet,
     bubble_label_style,
     compaction_threshold_pct,
+    crew_name_style,
+    crew_tone,
     current_theme,
     git_status_color,
     markdown_css,
@@ -52,3 +54,12 @@ def test_markdown_css_and_stylesheet(qapp):
     sheet = build_stylesheet("dark")
     assert "QMainWindow" in sheet
     assert "background" in bubble_label_style(is_user=True)
+
+
+def test_crew_styles_are_distinct():
+    scout = bubble_label_style(False, crew_id="scout")
+    critic = bubble_label_style(False, crew_id="critic")
+    assert scout != critic
+    assert "#123456" in bubble_label_style(False, crew_id="scout", crew_color="#123456")
+    assert "#123456" in crew_name_style("scout", "#123456")
+    assert crew_tone("tester")["accent"].startswith("#")

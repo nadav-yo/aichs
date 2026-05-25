@@ -48,6 +48,7 @@ def test_prepare_for_providers():
     messages = [
         {
             "role": "user",
+            "created_at": "ignored",
             "content": [
                 {"type": "text", "text": "hi"},
                 {"type": "image", "media_type": "image/png", "data": "abc"},
@@ -60,3 +61,23 @@ def test_prepare_for_providers():
 
     openai = prepare_for_openai(messages)
     assert openai[0]["content"][1]["type"] == "image_url"
+    assert "created_at" not in openai[0]
+
+
+def test_prepare_prefixes_crew_assistant_for_model_context():
+    messages = [
+        {
+            "role": "assistant",
+            "content": "found it",
+            "crew": {"id": "scout", "name": "Scout"},
+            "created_at": "ignored",
+        }
+    ]
+    assert prepare_for_anthropic(messages)[0] == {
+        "role": "assistant",
+        "content": "Scout: found it",
+    }
+    assert prepare_for_openai(messages)[0] == {
+        "role": "assistant",
+        "content": "Scout: found it",
+    }

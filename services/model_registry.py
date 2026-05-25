@@ -155,11 +155,24 @@ def _merge(builtin: dict, user: dict) -> dict:
                 existing["base_url"] = base_url
             if api != existing.get("api"):
                 existing["api"] = api
-            # append new model ids only
-            existing_ids = {m["id"] for m in existing.get("models", [])}
-            for m in user_models:
-                if m["id"] not in existing_ids:
-                    existing.setdefault("models", []).append(m)
+            if user_models:
+                existing_models = existing.get("models", [])
+                existing_by_id = {m["id"]: m for m in existing_models if "id" in m}
+                ordered = []
+                seen = set()
+                for m in user_models:
+                    mid = m.get("id")
+                    if not mid or mid in seen:
+                        continue
+                    item = dict(existing_by_id.get(mid, {}))
+                    item.update({k: v for k, v in m.items() if v})
+                    ordered.append(item)
+                    seen.add(mid)
+                for m in existing_models:
+                    mid = m.get("id")
+                    if mid and mid not in seen:
+                        ordered.append(m)
+                existing["models"] = ordered
         else:
             merged[name] = {
                 "api":          api,
