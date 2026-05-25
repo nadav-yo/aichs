@@ -321,12 +321,15 @@ class ComposerWidget(QWidget):
 
     def set_skill(self, skill) -> None:
         self._active_skill = skill
-        self._skill_chip.setText(f"  /{skill.name}  ×  ")
+        p = palette()
+        self._skill_chip.setText(f"Mode: /{skill.name}  x")
         self._skill_chip.setStyleSheet(
-            f"QPushButton {{ background:{ACCENT}22; color:{ACCENT}; border:1px solid {ACCENT}55;"
-            "border-radius:10px; font-size:11px; padding:0 4px; }}"
-            f"QPushButton:hover {{ background:{ACCENT}44; }}"
+            f"QPushButton {{ background-color:{p['BG3']}; color:{p['TEXT']};"
+            f"border:1px solid {p['BORDER']}; border-radius:8px;"
+            "font-size:11px; padding-left:8px; padding-right:8px; }}"
+            f"QPushButton:hover {{ color:{ACCENT}; border-color:{ACCENT}; }}"
         )
+        self._skill_chip.setToolTip("Click to clear the active slash mode")
         self._skill_row.show()
 
     def clear_skill(self) -> None:

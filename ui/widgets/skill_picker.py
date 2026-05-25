@@ -11,7 +11,7 @@ _ROLE_DATA = Qt.ItemDataRole.UserRole + 1
 
 class SkillPicker(QFrame):
     skill_selected = pyqtSignal(object)   # Skill
-    command_selected = pyqtSignal(str)    # built-in command name
+    command_selected = pyqtSignal(object) # SlashCommand
     dismissed      = pyqtSignal()
 
     def __init__(self, skills: list[Skill], commands: list[SlashCommand] | None = None, parent=None):
@@ -51,7 +51,7 @@ class SkillPicker(QFrame):
             if not q or q in cmd.name or q in cmd.description.lower():
                 item = QListWidgetItem(f"/{cmd.name}  —  {cmd.description}")
                 item.setData(_ROLE_KIND, "command")
-                item.setData(_ROLE_DATA, cmd.name)
+                item.setData(_ROLE_DATA, cmd)
                 self._list.addItem(item)
         for skill in self._all:
             if not q or q in skill.name or q in skill.description.lower():

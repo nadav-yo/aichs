@@ -29,7 +29,8 @@ bugs, edge cases, and one concrete fix per issue. Do not edit files unless asked
 | `description` | no | Shown in the skill picker |
 | `tools` | no | Allowlist of tool names; omit to allow all tools |
 
-Valid tool names: `read_file`, `edit_file`, `bash`, `search_files`.
+Valid built-in tool names: `read_file`, `edit_file`, `bash`, `search_files`.
+Extension tool names may also be used after they are registered.
 
 The body (after the closing `---`) is the skill system prompt for the selected turn.
 

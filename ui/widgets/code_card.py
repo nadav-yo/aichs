@@ -16,6 +16,7 @@ class ArtifactCard(QFrame):
         title: str = "",
         reason: str = "",
         show_language: bool = True,
+        show_preview_actions: bool = True,
         max_width: int = 560,
         parent=None,
     ):
@@ -23,6 +24,7 @@ class ArtifactCard(QFrame):
         display_title = title or language or "snippet"
         self._code = code
         self._expanded = False
+        self._show_preview_actions = show_preview_actions
 
         self.setMaximumWidth(max_width)
 
@@ -74,8 +76,9 @@ class ArtifactCard(QFrame):
         self._copy_btn.clicked.connect(lambda: QGuiApplication.clipboard().setText(self._code))
 
         header.addLayout(title_col, 1)
-        header.addWidget(self._toggle_btn, 0, Qt.AlignmentFlag.AlignTop)
-        header.addWidget(self._copy_btn, 0, Qt.AlignmentFlag.AlignTop)
+        if show_preview_actions:
+            header.addWidget(self._toggle_btn, 0, Qt.AlignmentFlag.AlignTop)
+            header.addWidget(self._copy_btn, 0, Qt.AlignmentFlag.AlignTop)
         header.addWidget(self._open_btn, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(header)
 

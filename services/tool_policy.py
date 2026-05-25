@@ -15,19 +15,22 @@ class ConversationToolPolicy:
     edit_approved: bool = False
     bash_skip_prompts: bool = False
     bash_warning_shown: bool = False
+    approved_extension_tools: set[str] = field(default_factory=set)
 
 
 @dataclass
 class PendingApproval:
-    kind: str  # "edit" | "bash"
+    kind: str  # "edit" | "bash" | "tool"
     inputs: dict
     cwd: str
     policy: ConversationToolPolicy
+    tool_name: str = ""
     event: threading.Event = field(default_factory=threading.Event)
     approved: bool = False
     denied_message: str = "User denied."
     grant_edit: bool = False
     grant_bash_skip: bool = False
+    grant_extension_tool: bool = False
 
 
 def repo_root(cwd: str) -> Path:
@@ -120,6 +123,18 @@ class ToolApprovalBus(QObject):
 
         return None
 
+    def check_extension_tool(
+        self,
+        name: str,
+        inputs: dict,
+        cwd: str,
+        policy: ConversationToolPolicy,
+        is_cancelled: Callable[[], bool],
+    ) -> str | None:
+        if name in policy.approved_extension_tools:
+            return None
+        return self._wait_for_ui("tool", inputs, cwd, policy, is_cancelled, tool_name=name)
+
     def cancel_wait(self, message: str = "[cancelled]") -> None:
         with self._lock:
             pending = self._current
@@ -136,12 +151,14 @@ class ToolApprovalBus(QObject):
         approved: bool,
         grant_edit: bool = False,
         grant_bash_skip: bool = False,
+        grant_extension_tool: bool = False,
         message: str = "User denied.",
     ) -> None:
         pending.approved = approved
         pending.denied_message = message
         pending.grant_edit = grant_edit
         pending.grant_bash_skip = grant_bash_skip
+        pending.grant_extension_tool = grant_extension_tool
         pending.event.set()
 
     def _wait_for_ui(
@@ -151,8 +168,15 @@ class ToolApprovalBus(QObject):
         cwd: str,
         policy: ConversationToolPolicy,
         is_cancelled: Callable[[], bool],
+        tool_name: str = "",
     ) -> str | None:
-        pending = PendingApproval(kind=kind, inputs=inputs, cwd=cwd, policy=policy)
+        pending = PendingApproval(
+            kind=kind,
+            inputs=inputs,
+            cwd=cwd,
+            policy=policy,
+            tool_name=tool_name,
+        )
         with self._lock:
             self._current = pending
         self.approval_needed.emit(pending)
@@ -167,6 +191,8 @@ class ToolApprovalBus(QObject):
             policy.edit_approved = True
         if pending.grant_bash_skip:
             policy.bash_skip_prompts = True
+        if pending.grant_extension_tool and pending.tool_name:
+            policy.approved_extension_tools.add(pending.tool_name)
         if not pending.approved:
             return pending.denied_message
         return None

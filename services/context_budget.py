@@ -69,9 +69,9 @@ def analyze_context(
     api = get_model_config(model).api
     window = CONTEXT_WINDOWS.get(api, 100_000)
 
-    base, agents, workspace = system_parts(cwd, custom_system or None)
+    base, agents, workspace, extensions = system_parts(cwd, custom_system or None)
     tools_json = json.dumps(
-        tools_anthropic() if api == "anthropic" else tools_openai(),
+        tools_anthropic(cwd) if api == "anthropic" else tools_openai(cwd),
         ensure_ascii=False,
     )
 
@@ -81,6 +81,8 @@ def analyze_context(
     if agents:
         segments.append(ContextSegment("Rules", agents, "AGENTS.md"))
     segments.append(ContextSegment("Workspace", workspace, "File tree & git status"))
+    if extensions:
+        segments.append(ContextSegment("Extensions", extensions, "Context snippets"))
     segments.append(ContextSegment("Tool definitions", tools_json))
 
     if active_skill:

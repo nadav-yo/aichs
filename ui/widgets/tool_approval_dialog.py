@@ -12,6 +12,8 @@ def handle_pending_approval(parent, bus, pending: PendingApproval) -> None:
         _show_edit(parent, bus, pending)
     elif pending.kind == "bash":
         _show_bash(parent, bus, pending)
+    elif pending.kind == "tool":
+        _show_extension_tool(parent, bus, pending)
 
 
 def _show_edit(parent, bus, pending: PendingApproval) -> None:
@@ -101,4 +103,45 @@ def _show_bash(parent, bus, pending: PendingApproval) -> None:
             pending,
             approved=False,
             message="[tool error] User denied bash command.",
+        )
+
+
+def _show_extension_tool(parent, bus, pending: PendingApproval) -> None:
+    name = pending.tool_name or "extension tool"
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Allow extension tool?")
+    layout = QVBoxLayout(dlg)
+
+    note = QLabel(
+        f"Allow the <b>{name}</b> extension tool for this conversation?"
+    )
+    note.setWordWrap(True)
+    layout.addWidget(note)
+
+    caution = QLabel(
+        "Extensions are local Python code. Only allow tools from extensions you trust."
+    )
+    caution.setWordWrap(True)
+    caution.setStyleSheet("color: #888;")
+    layout.addWidget(caution)
+
+    buttons = QDialogButtonBox()
+    allow_once = buttons.addButton("Allow once", QDialogButtonBox.ButtonRole.AcceptRole)
+    allow_chat = buttons.addButton("Allow this conversation", QDialogButtonBox.ButtonRole.ActionRole)
+    cancel = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+    allow_once.clicked.connect(dlg.accept)
+    allow_chat.clicked.connect(lambda: dlg.done(2))
+    cancel.clicked.connect(dlg.reject)
+    layout.addWidget(buttons)
+
+    code = dlg.exec()
+    if code == QDialog.DialogCode.Accepted:
+        bus.complete(pending, approved=True)
+    elif code == 2:
+        bus.complete(pending, approved=True, grant_extension_tool=True)
+    else:
+        bus.complete(
+            pending,
+            approved=False,
+            message=f"[tool error] User denied extension tool {name}.",
         )

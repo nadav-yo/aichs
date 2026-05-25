@@ -11,16 +11,12 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from services.model_registry import get_model_config, resolve_api_key
 from services.content import prepare_for_anthropic, prepare_for_openai
 from services.tool_policy import ConversationToolPolicy, ToolApprovalBus
-from services.tools import tools_anthropic, tools_openai, execute
+from services.tools import tools_anthropic, tools_openai, execute, is_parallel_safe, tool_approval
+from services.tool_registry import HookContext, run_extension_hooks
 
-_PARALLEL_SAFE = frozenset({"read_file", "search_files"})
 _MAX_PARALLEL = 8
 _CHUNK_EMIT_INTERVAL_SEC = 0.10
 _CHUNK_EMIT_MAX_CHARS = 512
-
-
-def _is_parallel_safe(name: str) -> bool:
-    return name in _PARALLEL_SAFE
 
 
 class ChatThread(QThread):
@@ -55,28 +51,66 @@ class ChatThread(QThread):
             self._approval_bus.cancel_wait()
 
     def _tools_anthropic(self) -> list:
-        tools = tools_anthropic()
+        tools = tools_anthropic(self.cwd)
         if self._allowed_tools is None:
             return tools
         return [t for t in tools if t["name"] in self._allowed_tools]
 
     def _tools_openai(self) -> list:
-        tools = tools_openai()
+        tools = tools_openai(self.cwd)
         if self._allowed_tools is None:
             return tools
         return [t for t in tools if t["function"]["name"] in self._allowed_tools]
 
     def run(self):
         try:
+            start_ctx = HookContext(
+                event="turn_start",
+                cwd=self.cwd,
+                model=self.model,
+                system=self.system,
+                history=self.history,
+            )
+            run_extension_hooks(self.cwd, "turn_start", start_ctx)
+            self.system = start_ctx.system
+            self.history = start_ctx.history
+
             if self.provider == "anthropic":
                 text = self._loop_anthropic()
             else:
                 text = self._loop_openai()
             self._flush_chunk_buffer()
+            status = "cancelled" if self._cancel.is_set() else "ok"
+            run_extension_hooks(
+                self.cwd,
+                "turn_done",
+                HookContext(
+                    event="turn_done",
+                    cwd=self.cwd,
+                    model=self.model,
+                    system=self.system,
+                    history=self.history,
+                    output=text,
+                    status=status,
+                ),
+            )
             self.done.emit(text)
         except Exception as exc:
             self._flush_chunk_buffer()
             if not self._cancel.is_set():
+                run_extension_hooks(
+                    self.cwd,
+                    "turn_done",
+                    HookContext(
+                        event="turn_done",
+                        cwd=self.cwd,
+                        model=self.model,
+                        system=self.system,
+                        history=self.history,
+                        status="error",
+                        error=str(exc),
+                    ),
+                )
                 self.error.emit(str(exc))
 
     def _emit_chunk(self, text: str, *, force: bool = False):
@@ -109,6 +143,16 @@ class ChatThread(QThread):
             if self._cancel.is_set():
                 break
             turn_text = ""
+            request_ctx = HookContext(
+                event="before_model_request",
+                cwd=self.cwd,
+                model=self.model,
+                system=self.system,
+                history=self.history,
+            )
+            run_extension_hooks(self.cwd, "before_model_request", request_ctx)
+            self.system = request_ctx.system
+            self.history = request_ctx.history
             with client.messages.stream(
                 model=self.model,
                 max_tokens=4096,
@@ -172,6 +216,18 @@ class ChatThread(QThread):
                 break
             turn_text = ""
             pending: dict[int, dict] = {}
+            request_ctx = HookContext(
+                event="before_model_request",
+                cwd=self.cwd,
+                model=self.model,
+                system=self.system,
+                history=msgs,
+            )
+            run_extension_hooks(self.cwd, "before_model_request", request_ctx)
+            self.system = request_ctx.system
+            msgs = request_ctx.history
+            if msgs and msgs[0].get("role") == "system":
+                msgs[0]["content"] = self.system
 
             with client.chat.completions.create(
                 model=self.model, messages=msgs,
@@ -238,13 +294,13 @@ class ChatThread(QThread):
                 break
 
             tool_id, name, inputs = tools[i]
-            if not _is_parallel_safe(name):
+            if not is_parallel_safe(name, self.cwd):
                 results[i] = self._execute_one(tool_id, name, inputs)
                 i += 1
                 continue
 
             j = i
-            while j < len(tools) and _is_parallel_safe(tools[j][1]):
+            while j < len(tools) and is_parallel_safe(tools[j][1], self.cwd):
                 j += 1
             batch = tools[i:j]
 
@@ -260,6 +316,21 @@ class ChatThread(QThread):
         return results  # type: list[tuple[str, str, str]]
 
     def _execute_one(self, tool_id: str, name: str, inputs: dict) -> tuple[str, str, str]:
+        hook_ctx = HookContext(
+            event="before_tool_call",
+            cwd=self.cwd,
+            model=self.model,
+            system=self.system,
+            history=self.history,
+            tool_name=name,
+            inputs=dict(inputs),
+        )
+        run_extension_hooks(self.cwd, "before_tool_call", hook_ctx)
+        inputs = hook_ctx.inputs
+        if hook_ctx.status == "error":
+            blocked = hook_ctx.output or hook_ctx.error or "[tool error] Tool blocked by extension hook."
+            self.tool_result.emit(name, blocked)
+            return tool_id, name, blocked
         blocked = self._check_tool_gate(name, inputs)
         if blocked:
             self.tool_result.emit(name, blocked)
@@ -267,6 +338,18 @@ class ChatThread(QThread):
         self.tool_called.emit(name, inputs)
         on_line = (lambda line: self.bash_line.emit(line)) if name == "bash" else None
         output = execute(name, inputs, self.cwd, on_line=on_line, cancel=self._cancel)
+        result_ctx = HookContext(
+            event="after_tool_result",
+            cwd=self.cwd,
+            model=self.model,
+            system=self.system,
+            history=self.history,
+            tool_name=name,
+            inputs=inputs,
+            output=output,
+        )
+        run_extension_hooks(self.cwd, "after_tool_result", result_ctx)
+        output = result_ctx.output
         self.tool_result.emit(name, output)
         return tool_id, name, output
 
@@ -278,11 +361,37 @@ class ChatThread(QThread):
         def run(idx: int, tool_id: str, name: str, inputs: dict):
             if self._cancel.is_set():
                 return idx, tool_id, name, "[cancelled]"
+            hook_ctx = HookContext(
+                event="before_tool_call",
+                cwd=self.cwd,
+                model=self.model,
+                system=self.system,
+                history=self.history,
+                tool_name=name,
+                inputs=dict(inputs),
+            )
+            run_extension_hooks(self.cwd, "before_tool_call", hook_ctx)
+            inputs = hook_ctx.inputs
+            if hook_ctx.status == "error":
+                blocked = hook_ctx.output or hook_ctx.error or "[tool error] Tool blocked by extension hook."
+                return idx, tool_id, name, blocked
             blocked = self._check_tool_gate(name, inputs)
             if blocked:
                 return idx, tool_id, name, blocked
             self.tool_called.emit(name, inputs)
             output = execute(name, inputs, self.cwd, cancel=self._cancel)
+            result_ctx = HookContext(
+                event="after_tool_result",
+                cwd=self.cwd,
+                model=self.model,
+                system=self.system,
+                history=self.history,
+                tool_name=name,
+                inputs=inputs,
+                output=output,
+            )
+            run_extension_hooks(self.cwd, "after_tool_result", result_ctx)
+            output = result_ctx.output
             return idx, tool_id, name, output
 
         with ThreadPoolExecutor(max_workers=min(len(batch), _MAX_PARALLEL)) as pool:
@@ -302,6 +411,11 @@ class ChatThread(QThread):
     def _check_tool_gate(self, name: str, inputs: dict) -> str | None:
         if not self._approval_bus:
             return None
+        approval = tool_approval(name, self.cwd)
+        if approval == "once":
+            return self._approval_bus.check_extension_tool(
+                name, inputs, self.cwd, self._tool_policy, self._cancel.is_set,
+            )
         return self._approval_bus.check(
             name, inputs, self.cwd, self._tool_policy, self._cancel.is_set,
         )

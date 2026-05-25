@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from config import IGNORED, MAX_TREE_ENTRIES_PER_DIR, SYSTEM_PROMPT
+from services.tool_registry import extension_context_snippets
 
 
 def agents_md(repo_path: str) -> Path | None:
@@ -14,16 +15,18 @@ def agents_md(repo_path: str) -> Path | None:
 
 def build_system(repo_path: str, prompt: str | None = None) -> str:
     """Return the full system prompt with live workspace context appended."""
-    base, agents, workspace = system_parts(repo_path, prompt)
+    base, agents, workspace, extensions = system_parts(repo_path, prompt)
     parts = [base]
     if agents:
         parts.append(f"## Project Memory (AGENTS.md)\n{agents}")
     parts.append(f"## Workspace\n{workspace}")
+    if extensions:
+        parts.append(f"## Extension Context\n{extensions}")
     return "\n\n".join(parts)
 
 
-def system_parts(repo_path: str, prompt: str | None = None) -> tuple[str, str, str]:
-    """Return (base prompt, AGENTS.md body, workspace context) separately."""
+def system_parts(repo_path: str, prompt: str | None = None) -> tuple[str, str, str, str]:
+    """Return (base prompt, AGENTS.md body, workspace context, extension context)."""
     base = prompt if prompt else SYSTEM_PROMPT
     agents = ""
     mem = agents_md(repo_path)
@@ -32,7 +35,8 @@ def system_parts(repo_path: str, prompt: str | None = None) -> tuple[str, str, s
         if content:
             agents = content
     workspace = _build_context(repo_path)
-    return base, agents, workspace
+    extensions = _build_extension_context(repo_path)
+    return base, agents, workspace, extensions
 
 
 def _build_context(repo_path: str) -> str:
@@ -53,6 +57,16 @@ def _build_context(repo_path: str) -> str:
     if log:
         lines += ["", "Recent commits:", log]
 
+    return "\n".join(lines)
+
+
+def _build_extension_context(repo_path: str) -> str:
+    snippets, _errors = extension_context_snippets(repo_path)
+    if not snippets:
+        return ""
+    lines = []
+    for name, text in snippets:
+        lines += [f"### {name}", text]
     return "\n".join(lines)
 
 

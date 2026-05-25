@@ -7,11 +7,11 @@ from pathlib import Path
 
 from config import IGNORED, MAX_TOOL_OUTPUT_CHARS, MAX_TOOL_READ_BYTES
 from services.tool_policy import resolve_path, validate_tool_paths
+from services.tool_registry import ToolContext, ToolRegistry, load_extensions
 
 # ── Tool schemas ──────────────────────────────────────────────────────────────
 
 _PATH_DESC = "Path inside the workspace (relative or absolute)."
-_TOOL_NAMES = ("read_file", "edit_file", "bash", "search_files")
 
 
 def _bash_tool_description() -> str:
@@ -25,110 +25,25 @@ def _bash_tool_description() -> str:
     )
 
 
-def tools_anthropic() -> list:
+def registry_for(cwd: str | None = None) -> ToolRegistry:
+    registry = ToolRegistry()
+    _register_builtin_tools(registry)
+    load_extensions(registry, cwd)
+    return registry
+
+
+def tools_anthropic(cwd: str | None = None) -> list:
     return [
         {
-            "name": "read_file",
-            "description": "Read the full contents of a file in the workspace.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": _PATH_DESC},
-                },
-                "required": ["path"],
-            },
-        },
-        {
-            "name": "edit_file",
-            "description": (
-                "Modify workspace files. Use content to create a new file, append to "
-                "add text at end-of-file, and edits[] for exact replacements. If the "
-                "user asks to change a file, call this tool; do not merely describe "
-                "the change."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": _PATH_DESC},
-                    "content": {
-                        "type": "string",
-                        "description": (
-                            "Content for creating a new file. Use only when the file does "
-                            "not exist, and do not combine with append or edits. Use "
-                            "actual newline characters, not escaped '\\n' text."
-                        ),
-                    },
-                    "append": {
-                        "type": "string",
-                        "description": (
-                            "Text to append to the end of an existing file. Include any "
-                            "wanted leading newline. Do not combine with content or edits. "
-                            "Use actual newline characters, not escaped '\\n' text."
-                        ),
-                    },
-                    "edits": {
-                        "type": "array",
-                        "description": (
-                            "One or more targeted replacements for an existing file. "
-                            "Each edit is matched against the original file, not "
-                            "incrementally. For nearby changes, merge them into one edit."
-                        ),
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "oldText": {
-                                    "type": "string",
-                                    "description": (
-                                        "Exact text to replace. It must be unique in the "
-                                        "original file and must not overlap another edit."
-                                    ),
-                                },
-                                "newText": {
-                                    "type": "string",
-                                    "description": (
-                                        "Replacement text for this targeted edit. Use "
-                                        "actual newline characters, not escaped '\\n' text."
-                                    ),
-                                },
-                            },
-                            "required": ["oldText", "newText"],
-                        },
-                    },
-                },
-                "required": ["path"],
-            },
-        },
-        {
-            "name": "bash",
-            "description": _bash_tool_description(),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string"},
-                },
-                "required": ["command"],
-            },
-        },
-        {
-            "name": "search_files",
-            "description": "Search for a text pattern across files in a workspace directory.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "pattern":   {"type": "string", "description": "Text or basic regex to find"},
-                    "directory": {
-                        "type": "string",
-                        "description": f"Directory to search (default: workspace root). {_PATH_DESC}",
-                    },
-                    "glob":      {"type": "string", "description": "File filter e.g. '*.py' (default: all)"},
-                },
-                "required": ["pattern"],
-            },
-        },
+            "name": tool.name,
+            "description": tool.description,
+            "input_schema": tool.input_schema,
+        }
+        for tool in registry_for(cwd).all()
     ]
 
 
-def tools_openai() -> list:
+def tools_openai(cwd: str | None = None) -> list:
     return [
         {
             "type": "function",
@@ -138,42 +53,176 @@ def tools_openai() -> list:
                 "parameters":  t["input_schema"],
             },
         }
-        for t in tools_anthropic()
+        for t in tools_anthropic(cwd)
     ]
+
+
+def is_parallel_safe(name: str, cwd: str | None = None) -> bool:
+    tool = registry_for(cwd).get(name)
+    return bool(tool and tool.parallel_safe)
+
+
+def tool_names(cwd: str | None = None) -> list[str]:
+    return registry_for(cwd).names()
+
+
+def tool_approval(name: str, cwd: str | None = None) -> str | None:
+    tool = registry_for(cwd).get(name)
+    return tool.approval if tool else None
 
 
 # ── Executor ──────────────────────────────────────────────────────────────────
 
 def execute(name: str, inputs: dict, cwd: str, on_line=None, cancel=None) -> str:
     try:
+        registry = registry_for(cwd)
+        tool = registry.get(name)
+        if tool is None:
+            return (
+                f"[tool error] Unknown tool: {name}. Available tools: "
+                f"{', '.join(registry.names())}. Call one of these exact tool names "
+                "directly; do not wrap tool calls in script runners or namespaces."
+            )
+
         path_err = validate_tool_paths(name, inputs, cwd)
         if path_err:
             return f"[tool error] {path_err}"
 
-        if name == "read_file":
-            p = resolve_path(inputs["path"], cwd)
-            return _read_text_limited(p, MAX_TOOL_READ_BYTES)
-
-        elif name == "edit_file":
-            return _edit_file(inputs, cwd)
-
-        elif name == "bash":
-            return _run_shell_command(inputs["command"], cwd, on_line, cancel)
-
-        elif name == "search_files":
-            directory = resolve_path(inputs.get("directory", cwd), cwd)
-            glob      = inputs.get("glob", "*")
-            return _search_files(directory, glob, inputs["pattern"], cwd)
-
-        else:
-            return (
-                f"[tool error] Unknown tool: {name}. Available tools: "
-                f"{', '.join(_TOOL_NAMES)}. Call one of these exact tool names "
-                "directly; do not wrap tool calls in script runners or namespaces."
-            )
+        ctx = ToolContext(cwd=cwd, on_line=on_line, cancel=cancel)
+        return tool.execute(ctx, inputs)
 
     except Exception as exc:
         return f"[tool error] {exc}"
+
+
+def _register_builtin_tools(registry: ToolRegistry) -> None:
+    registry.tool(
+        name="read_file",
+        description="Read the full contents of a file in the workspace.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": _PATH_DESC},
+            },
+            "required": ["path"],
+        },
+        execute=_execute_read_file,
+        parallel_safe=True,
+        source="builtin",
+    )
+    registry.tool(
+        name="edit_file",
+        description=(
+            "Modify workspace files. Use content to create a new file, append to "
+            "add text at end-of-file, and edits[] for exact replacements. If the "
+            "user asks to change a file, call this tool; do not merely describe "
+            "the change."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": _PATH_DESC},
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "Content for creating a new file. Use only when the file does "
+                        "not exist, and do not combine with append or edits. Use "
+                        "actual newline characters, not escaped '\\n' text."
+                    ),
+                },
+                "append": {
+                    "type": "string",
+                    "description": (
+                        "Text to append to the end of an existing file. Include any "
+                        "wanted leading newline. Do not combine with content or edits. "
+                        "Use actual newline characters, not escaped '\\n' text."
+                    ),
+                },
+                "edits": {
+                    "type": "array",
+                    "description": (
+                        "One or more targeted replacements for an existing file. "
+                        "Each edit is matched against the original file, not "
+                        "incrementally. For nearby changes, merge them into one edit."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "oldText": {
+                                "type": "string",
+                                "description": (
+                                    "Exact text to replace. It must be unique in the "
+                                    "original file and must not overlap another edit."
+                                ),
+                            },
+                            "newText": {
+                                "type": "string",
+                                "description": (
+                                    "Replacement text for this targeted edit. Use "
+                                    "actual newline characters, not escaped '\\n' text."
+                                ),
+                            },
+                        },
+                        "required": ["oldText", "newText"],
+                    },
+                },
+            },
+            "required": ["path"],
+        },
+        execute=_execute_edit_file,
+        source="builtin",
+    )
+    registry.tool(
+        name="bash",
+        description=_bash_tool_description(),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+            },
+            "required": ["command"],
+        },
+        execute=_execute_bash,
+        source="builtin",
+    )
+    registry.tool(
+        name="search_files",
+        description="Search for a text pattern across files in a workspace directory.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Text or basic regex to find"},
+                "directory": {
+                    "type": "string",
+                    "description": f"Directory to search (default: workspace root). {_PATH_DESC}",
+                },
+                "glob": {"type": "string", "description": "File filter e.g. '*.py' (default: all)"},
+            },
+            "required": ["pattern"],
+        },
+        execute=_execute_search_files,
+        parallel_safe=True,
+        source="builtin",
+    )
+
+
+def _execute_read_file(ctx: ToolContext, inputs: dict) -> str:
+    p = resolve_path(inputs["path"], ctx.cwd)
+    return _read_text_limited(p, MAX_TOOL_READ_BYTES)
+
+
+def _execute_edit_file(ctx: ToolContext, inputs: dict) -> str:
+    return _edit_file(inputs, ctx.cwd)
+
+
+def _execute_bash(ctx: ToolContext, inputs: dict) -> str:
+    return _run_shell_command(inputs["command"], ctx.cwd, ctx.on_line, ctx.cancel)
+
+
+def _execute_search_files(ctx: ToolContext, inputs: dict) -> str:
+    directory = resolve_path(inputs.get("directory", ctx.cwd), ctx.cwd)
+    glob = inputs.get("glob", "*")
+    return _search_files(directory, glob, inputs["pattern"], ctx.cwd)
 
 
 def _read_text_limited(path: Path, max_bytes: int) -> str:

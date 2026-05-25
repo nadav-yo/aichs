@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QComboBox,
 )
 from PyQt6.QtCore import Qt, QPoint, QTimer, pyqtSignal, QThread
+from PyQt6.QtGui import QGuiApplication
 
 from config import IGNORED, MAX_FILE_PREVIEW_BYTES, MAX_TOOL_READ_BYTES
 from config import MODELS, MODEL_PROVIDER
@@ -26,13 +27,19 @@ from services.context_budget import analyze_context
 from services.model_registry import api_key_env_var, get_provider_config, load_user_providers
 from services.workspace import build_system, agents_md
 from services.export import export_conversation_dialog
+from services.tool_registry import extension_errors, extension_overview
 from ui.theme import (
     palette, input_bar_style, agents_banner_style,
     send_button_style, stop_button_style, floating_button_style,
     tool_notice_style, center_notice_style, icon_button_style,
 )
-from services.skills import load_all as load_skills
-from services.slash_commands import BUILTIN_COMMANDS, parse_builtin_command
+from services.skills import Skill, load_all as load_skills
+from services.slash_commands import (
+    load_all_commands,
+    parse_builtin_command,
+    parse_extension_command,
+    slash_invocation,
+)
 from ui.widgets.bubble import MessageBubble
 from ui.widgets.code_card import ArtifactCard
 from ui.widgets.message_input import ComposerWidget
@@ -41,6 +48,8 @@ from ui.widgets.skill_picker import SkillPicker
 from ui.widgets.terminal_card import TerminalCard
 from ui.widgets.context_ring import ContextRing
 from ui.widgets.context_breakdown import ContextBreakdownDialog
+from ui.widgets.extension_contributions import ExtensionContributionsBar
+from ui.widgets.extensions_dialog import ExtensionsDialog
 
 _INITIAL_RENDER_BYTES = 1 * 1024 * 1024
 _INITIAL_RENDER_MESSAGES = 150
@@ -211,12 +220,20 @@ class ChatPanel(QWidget):
 
         bar.addWidget(self.provider_combo)
         bar.addWidget(self.model_combo)
+
+        self._extension_bar = ExtensionContributionsBar(
+            self.cwd,
+            on_action=self._handle_extension_action,
+            parent=self,
+        )
+        bar.addWidget(self._extension_bar)
+
         bar.addStretch()
 
-        self.export_btn = QPushButton("Export")
-        self.export_btn.setToolTip("Export conversation as Markdown")
-        self.export_btn.clicked.connect(self.export_conversation)
-        bar.addWidget(self.export_btn)
+        self.extensions_btn = QPushButton("Extensions")
+        self.extensions_btn.setToolTip("View loaded extensions")
+        self.extensions_btn.clicked.connect(self.show_extensions)
+        bar.addWidget(self.extensions_btn)
 
         self.context_ring = ContextRing()
         self.context_ring.clicked.connect(self._show_context_breakdown)
@@ -380,16 +397,25 @@ class ChatPanel(QWidget):
         if cancel and hasattr(thread, "cancel"):
             thread.cancel()
 
+        self._keep_thread_until_finished(thread)
+
+    def _keep_thread_until_finished(self, thread: QThread | None):
+        """Retain a QThread object until Qt reports it has fully stopped."""
+        if thread is None:
+            return
+        if thread in self._orphan_threads:
+            return
+
         def _forget():
             try:
                 self._orphan_threads.remove(thread)
             except ValueError:
                 pass
+            thread.deleteLater()
 
         if thread.isRunning():
             self._orphan_threads.append(thread)
             thread.finished.connect(_forget)
-            thread.finished.connect(thread.deleteLater)
         else:
             thread.deleteLater()
 
@@ -456,6 +482,7 @@ class ChatPanel(QWidget):
         self._render_visible_run()
         self._sync_visible_runtime_refs()
         self._refresh_runtime_controls()
+        self._update_context_ui()
         self._scroll_to_bottom_after_load()
 
     def update_title(self, conv_id: str, title: str):
@@ -506,6 +533,48 @@ class ChatPanel(QWidget):
             }
         export_conversation_dialog(data, parent=self.window())
 
+    def show_extensions(self):
+        ExtensionsDialog(extension_overview(self.cwd), parent=self.window()).exec()
+
+    def _handle_extension_action(self, action: dict):
+        action_type = str(action.get("type") or "")
+        if action_type == "open_file":
+            path = str(action.get("path") or "")
+            if not path:
+                return
+            abs_path = path if os.path.isabs(path) else os.path.join(self.cwd, path)
+            try:
+                resolved = Path(abs_path).resolve()
+                resolved.relative_to(Path(self.cwd).resolve())
+            except (OSError, ValueError):
+                self._add_notice("Extension action blocked: file is outside the workspace.")
+                return
+            if not resolved.is_file():
+                self._add_notice(f"Extension action could not find file: {path}")
+                return
+            self.open_file.emit(str(resolved), None)
+        elif action_type == "copy":
+            QGuiApplication.clipboard().setText(str(action.get("text") or ""))
+            self._add_notice("Copied extension panel text.")
+        elif action_type == "send_message":
+            text = str(action.get("text") or action.get("message") or "").strip()
+            if not text:
+                self._add_notice("Extension action has no message to send.")
+                return
+            draft = {
+                "content": build_user_content(text, [], []),
+                "title_text": text,
+                "skill": None,
+            }
+            if self._visible_run():
+                self._ensure_conversation(text, self.model_combo.currentText())
+                self._runtime_for(self.conv_id).queued.append(draft)
+                self._update_queue_ui()
+            else:
+                self._send_draft(draft)
+        else:
+            self._add_notice(f"Unsupported extension action: {action_type or 'unknown'}")
+
     # ── send / receive ────────────────────────────────────────────────────────
 
     def send(self):
@@ -529,6 +598,22 @@ class ChatPanel(QWidget):
                 self._file_picker.hide()
             self._run_builtin_command(cmd)
             return
+
+        ext_cmd = parse_extension_command(text, self.cwd) if text and not images else None
+        if ext_cmd:
+            invocation = slash_invocation(text)
+            trailing_text = invocation[1] if invocation else ""
+            if not trailing_text:
+                self.composer.clear()
+                self.composer.input.exit_slash_mode()
+                self.composer.input.exit_mention_mode()
+                if self._skill_picker:
+                    self._skill_picker.hide()
+                self._activate_extension_command(ext_cmd)
+                return
+            text = trailing_text
+            files = _mentioned_files(self.cwd, text)
+            self.composer.set_skill(self._skill_from_extension_command(ext_cmd))
 
         draft = {
             "content": build_user_content(text, images, files),
@@ -806,7 +891,7 @@ class ChatPanel(QWidget):
             return
         if self._skill_picker is None:
             self._skill_picker = SkillPicker(
-                load_skills(self.cwd), BUILTIN_COMMANDS, parent=self,
+                load_skills(self.cwd), load_all_commands(self.cwd), parent=self,
             )
             self._skill_picker.skill_selected.connect(self._on_skill_selected)
             self._skill_picker.command_selected.connect(self._on_command_selected)
@@ -863,15 +948,41 @@ class ChatPanel(QWidget):
         self._skill_picker.hide()
         self.composer.focus_input()
 
-    def _on_command_selected(self, name: str):
+    def _on_command_selected(self, command):
         self.composer.clear()
         self.composer.input.exit_slash_mode()
         self._skill_picker.hide()
-        self._run_builtin_command(name)
+        if getattr(command, "source", "builtin") == "builtin":
+            self._run_builtin_command(command.name)
+        else:
+            self._activate_extension_command(command)
+
+    def _activate_extension_command(self, command):
+        self.composer.set_skill(self._skill_from_extension_command(command))
+        self.composer.focus_input()
+
+    def _skill_from_extension_command(self, command):
+        skill = Skill(
+            name=command.name,
+            description=command.description,
+            prompt=command.prompt,
+            tools=command.tools,
+        )
+        return skill
 
     def _run_builtin_command(self, name: str):
         if name == "compact":
             self.compact_conversation(force=True)
+        elif name == "reload":
+            self._skill_picker = None
+            self._file_picker = None
+            self._update_context_ui()
+            self._refresh_extension_ui()
+            errors = extension_errors(self.cwd)
+            if errors:
+                self._add_notice(f"Reloaded with {len(errors)} extension error(s). Check the extension file.")
+            else:
+                self._add_notice("Reloaded skills and extensions.")
 
     def compact_conversation(self, force: bool = False):
         if self._visible_run() or self._visible_compaction():
@@ -1002,6 +1113,7 @@ class ChatPanel(QWidget):
             asst_idx = -1
 
         bubble = run.bubble if is_current else None
+        completed_thread = run.thread
         self._runtime_for(run.conv_id).run = None
         run.bubble = None
         if is_current:
@@ -1045,11 +1157,13 @@ class ChatPanel(QWidget):
         else:
             self._refresh_runtime_controls()
             self._start_next_queued_for(run.conv_id, run_data)
+        self._keep_thread_until_finished(completed_thread)
 
     def _on_compacted(self, conv_id: str, compacted: list):
         compaction = self._find_compaction(conv_id)
         if not compaction:
             return
+        completed_thread = compaction.thread
         self._runtime_for(conv_id).compaction = None
         if conv_id == self.conv_id:
             self._sync_visible_runtime_refs()
@@ -1071,10 +1185,12 @@ class ChatPanel(QWidget):
             self.saved.emit()
             self._refresh_runtime_controls()
             self._start_next_queued_for(conv_id, data)
+        self._keep_thread_until_finished(completed_thread)
 
     def _on_compaction_error(self, conv_id: str, msg: str):
         if not self._find_compaction(conv_id):
             return
+        completed_thread = self._find_compaction(conv_id).thread
         self._runtime_for(conv_id).compaction = None
         if conv_id == self.conv_id:
             self._sync_visible_runtime_refs()
@@ -1085,6 +1201,7 @@ class ChatPanel(QWidget):
             self._start_next_queued()
         else:
             self._refresh_runtime_controls()
+        self._keep_thread_until_finished(completed_thread)
 
     def _maybe_auto_title(self):
         if not self.conv_id or not self.conv_data:
@@ -1113,18 +1230,24 @@ class ChatPanel(QWidget):
         self.title_thread.start()
 
     def _on_auto_title_done(self, conv_id: str, title: str):
+        completed_thread = self.title_thread
         self.title_thread = None
-        if conv_id != self.conv_id or self.conv_data is None:
-            return
-        if not self.conv_data.get("title_auto", False):
-            return
-        self.conv_data["title"] = title
-        self.conv_data["title_auto"] = False
-        self.store.save(self.conv_id, self.conv_data)
-        self.saved.emit()
+        try:
+            if conv_id != self.conv_id or self.conv_data is None:
+                return
+            if not self.conv_data.get("title_auto", False):
+                return
+            self.conv_data["title"] = title
+            self.conv_data["title_auto"] = False
+            self.store.save(self.conv_id, self.conv_data)
+            self.saved.emit()
+        finally:
+            self._keep_thread_until_finished(completed_thread)
 
     def _on_auto_title_error(self, _msg: str):
+        completed_thread = self.title_thread
         self.title_thread = None
+        self._keep_thread_until_finished(completed_thread)
 
     def _on_error(self, run_id: str, msg: str):
         run = self._find_run(run_id)
@@ -1137,6 +1260,7 @@ class ChatPanel(QWidget):
             run.bubble.append(f"[Error: {msg}]")
         if is_current:
             self.active_bubble = None
+        completed_thread = run.thread
         self._runtime_for(run.conv_id).run = None
         run.bubble = None
         if is_current:
@@ -1144,6 +1268,7 @@ class ChatPanel(QWidget):
             self._exit_streaming()
         else:
             self._refresh_runtime_controls()
+        self._keep_thread_until_finished(completed_thread)
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -1178,6 +1303,7 @@ class ChatPanel(QWidget):
     def _update_context_ui(self):
         budget = self._context_budget()
         self.context_ring.set_budget(budget)
+        self._refresh_extension_ui()
 
     def _flush_stream_buffer(self):
         run = self._visible_run()
@@ -1205,6 +1331,15 @@ class ChatPanel(QWidget):
             parent=self.window(),
         ).exec()
 
+    def _refresh_extension_ui(self):
+        if not hasattr(self, "_extension_bar"):
+            return
+        self._extension_bar.set_context(
+            cwd=self.cwd,
+            model=self.model_combo.currentText(),
+            history=self.history,
+        )
+
     def _add_terminal_card(self) -> TerminalCard:
         card = TerminalCard()
         self.msg_layout.insertWidget(self.msg_layout.count() - 1, self._wrap_artifact(card))
@@ -1222,7 +1357,7 @@ class ChatPanel(QWidget):
             content = f"[Could not read file: {e}]"
 
         def on_open(_, __):
-            self.open_file.emit(abs_path, "")
+            self.open_file.emit(abs_path, None)
 
         card = self._wrap_artifact(
             ArtifactCard(
@@ -1232,6 +1367,7 @@ class ChatPanel(QWidget):
                 name,
                 "Edited file",
                 show_language=False,
+                show_preview_actions=False,
                 max_width=960,
             )
         )
