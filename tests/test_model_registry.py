@@ -36,7 +36,11 @@ def test_get_model_config_unknown_fallback():
     assert cfg.display_name == "unknown"
 
 
-def test_context_window_tokens_honors_provider_override(tmp_path, monkeypatch):
+def test_normalize_model_id_strips_context_suffix():
+    assert reg.normalize_model_id("qwen2.5-coder:7b @ 65536") == "qwen2.5-coder:7b"
+
+
+def test_context_window_tokens_honors_per_model_override(tmp_path, monkeypatch):
     path = tmp_path / ".aicc" / "models.json"
     monkeypatch.setattr(reg, "_MODELS_PATH", path)
     reg.save_user_providers({
@@ -44,8 +48,7 @@ def test_context_window_tokens_honors_provider_override(tmp_path, monkeypatch):
             "api": "openai-compatible",
             "apiKey": "ollama",
             "baseUrl": "http://localhost:11434/v1",
-            "contextWindow": 8192,
-            "models": [{"id": "llama-test", "name": "Llama"}],
+            "models": [{"id": "llama-test", "name": "Llama", "contextWindow": 8192}],
         }
     })
     reg.reload()

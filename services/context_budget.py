@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass
 
-from services.compaction import RESERVE_TOKENS, _estimate_tokens
+from services.compaction import compaction_threshold, reserve_tokens
 from services.content import content_preview
 from services.model_registry import context_window_tokens, get_model_config
 from services.skills import Skill
@@ -28,7 +28,7 @@ class ContextSegment:
 class ContextBudget:
     segments: list[ContextSegment]
     window_tokens: int
-    reserve_tokens: int = RESERVE_TOKENS
+    reserve_tokens: int = 0
 
     @property
     def used_tokens(self) -> int:
@@ -46,9 +46,7 @@ class ContextBudget:
 
     @property
     def compaction_limit_tokens(self) -> int:
-        from ui.theme import compaction_threshold_pct
-        pct = compaction_threshold_pct()
-        return int(self.window_tokens * pct / 100) - self.reserve_tokens
+        return compaction_threshold(self.window_tokens)
 
 
 def format_bytes(n: int) -> str:
@@ -99,7 +97,11 @@ def analyze_context(
         f"{len(history)} message{'s' if len(history) != 1 else ''}",
     ))
 
-    return ContextBudget(segments=segments, window_tokens=window)
+    return ContextBudget(
+        segments=segments,
+        window_tokens=window,
+        reserve_tokens=reserve_tokens(window),
+    )
 
 
 def _history_text(history: list[dict]) -> str:

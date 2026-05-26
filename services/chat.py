@@ -25,7 +25,14 @@ from services.crew_context import crew_context_window
 from services.model_registry import get_model_config, resolve_api_key
 from services.content import content_preview, prepare_for_anthropic, prepare_for_openai
 from services.tool_policy import ConversationToolPolicy, ToolApprovalBus, resolve_path
-from services.tools import tools_anthropic, tools_openai, execute, is_parallel_safe, tool_approval
+from services.shell_tool import is_shell_tool
+from services.tools import (
+    execute,
+    is_parallel_safe,
+    tool_approval,
+    tools_anthropic,
+    tools_openai,
+)
 from services.tool_registry import HookContext, run_extension_hooks
 from services.usage import merge_usage, normalize_usage
 
@@ -84,24 +91,26 @@ class ChatThread(QThread):
 
     def _tools_anthropic(self) -> list:
         tools = tools_anthropic(self.cwd)
-        if self._allowed_tools is None:
+        allowed = None if self._allowed_tools is None else set(self._allowed_tools)
+        if allowed is None:
             selected = [t for t in tools if t["name"] not in _CREW_ONLY_TOOLS]
         else:
-            selected = [t for t in tools if t["name"] in self._allowed_tools]
-        if self._enable_crew_tool and (self._allowed_tools is None or ASK_CREW_TOOL_NAME in self._allowed_tools):
+            selected = [t for t in tools if t["name"] in allowed]
+        if self._enable_crew_tool and (allowed is None or ASK_CREW_TOOL_NAME in allowed):
             selected = selected + [ask_crew_tool_anthropic()]
         return selected
 
     def _tools_openai(self) -> list:
         tools = tools_openai(self.cwd)
-        if self._allowed_tools is None:
+        allowed = None if self._allowed_tools is None else set(self._allowed_tools)
+        if allowed is None:
             selected = [
                 t for t in tools
                 if t["function"]["name"] not in _CREW_ONLY_TOOLS
             ]
         else:
-            selected = [t for t in tools if t["function"]["name"] in self._allowed_tools]
-        if self._enable_crew_tool and (self._allowed_tools is None or ASK_CREW_TOOL_NAME in self._allowed_tools):
+            selected = [t for t in tools if t["function"]["name"] in allowed]
+        if self._enable_crew_tool and (allowed is None or ASK_CREW_TOOL_NAME in allowed):
             selected = selected + [ask_crew_tool_openai()]
         return selected
 
@@ -411,7 +420,7 @@ class ChatThread(QThread):
             self.tool_result.emit(name, blocked)
             return tool_id, name, blocked
         self.tool_called.emit(name, inputs)
-        on_line = (lambda line: self.bash_line.emit(line)) if name == "bash" else None
+        on_line = (lambda line: self.bash_line.emit(line)) if is_shell_tool(name) else None
         output = execute(name, inputs, self.cwd, on_line=on_line, cancel=self._cancel)
         result_ctx = HookContext(
             event="after_tool_result",

@@ -72,7 +72,7 @@ def register(registry):
             "Review the current diff for correctness, missing tests, and release "
             "risk. Read files as needed. Do not edit files unless explicitly asked."
         ),
-        tools=["read_file", "search_files", "bash"],
+        tools=["read_file", "search_files", "execute"],
     )
 ```
 
@@ -102,13 +102,13 @@ def register(registry):
 
 
 def before_tool_call(ctx):
-    if ctx.tool_name == "bash" and "git push" in ctx.inputs.get("command", ""):
+    if ctx.tool_name == "execute" and "git push" in ctx.inputs.get("command", ""):
         ctx.status = "error"
         ctx.output = "[tool error] git push is blocked by project policy."
 
 
 def after_tool_result(ctx):
-    if ctx.tool_name == "bash" and len(ctx.output) > 12000:
+    if ctx.tool_name == "execute" and len(ctx.output) > 12000:
         ctx.output = ctx.output[:12000] + "\n\n[trimmed by extension]"
 ```
 

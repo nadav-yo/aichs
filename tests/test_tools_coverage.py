@@ -11,8 +11,9 @@ import pytest
 
 from config import MAX_TOOL_OUTPUT_CHARS, MAX_TOOL_OUTPUT_LINES, MAX_TOOL_READ_BYTES
 from services.tool_registry import ToolContext
+from services.shell_tool import shell_tool_name
 from services.tools import (
-    _bash_tool_description,
+    _shell_tool_description,
     _display_path,
     _edit_file,
     _iter_list_paths,
@@ -37,7 +38,7 @@ def cwd(workspace):
 class TestBashDescription:
     def test_unix_shell_in_description(self, monkeypatch):
         monkeypatch.setattr(sys, "platform", "linux")
-        assert "/bin/sh" in _bash_tool_description()
+        assert "/bin/sh" in _shell_tool_description()
 
 
 class TestReadFile:
@@ -432,13 +433,13 @@ class TestRegistryApi:
         _run_shell_command("echo hi", cwd)
         assert captured["args"][:2] == ["/bin/sh", "-c"]
 
-    def test_bash_via_execute(self, cwd, monkeypatch):
+    def test_execute_shell_via_execute(self, cwd, monkeypatch):
         proc = MagicMock()
         proc.stdout = iter(["ok\n"])
         proc.wait.return_value = None
         proc.returncode = 0
         monkeypatch.setattr("services.tools.subprocess.Popen", lambda *a, **k: proc)
-        assert "ok" in execute("bash", {"command": "echo ok"}, cwd)
+        assert "ok" in execute(shell_tool_name(), {"command": "echo ok"}, cwd)
 
 
 class TestHelpers:

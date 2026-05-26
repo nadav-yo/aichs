@@ -62,7 +62,9 @@ def generate_title(model: str, user_text: str) -> str:
         raw = resp.choices[0].message.content or ""
 
     title = clean_title(raw)
-    return fallback_title(user_text) if _looks_like_bad_title(title) else title
+    if not _is_usable_title(title):
+        return fallback_title(user_text)
+    return title
 
 
 def clean_title(raw: str) -> str:
@@ -96,6 +98,12 @@ def _title_model_for(model: str, cfg) -> str | None:
     if cfg.provider_id in _BUILTIN_TITLE_PROVIDERS:
         return _TITLE_MODELS.get(cfg.api)
     return model
+
+
+def _is_usable_title(title: str) -> bool:
+    if not title or title.casefold() == "untitled":
+        return False
+    return not _looks_like_bad_title(title)
 
 
 def _looks_like_bad_title(title: str) -> bool:

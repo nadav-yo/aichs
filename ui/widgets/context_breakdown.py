@@ -65,8 +65,8 @@ class ContextBreakdownDialog(QDialog):
         root.addWidget(sep2)
 
         footer = QLabel(
-            f"Compaction starts around {budget.compaction_limit_tokens:,} tokens "
-            f"({budget.reserve_tokens:,} reserved for output)."
+            f"Auto-compaction when context exceeds {budget.compaction_limit_tokens:,} tokens "
+            f"({budget.reserve_tokens:,} reserved for the next response)."
         )
         footer.setWordWrap(True)
         footer.setStyleSheet(f"color:{p['TEXT_DIM']}; font-size:{meta}px;")

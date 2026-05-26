@@ -20,7 +20,7 @@ def register(registry):
             "Review the current workspace changes for correctness, missing tests, "
             "and risky assumptions. Do not edit files. Give concise findings first."
         ),
-        tools=["read_file", "search_files", "bash"],
+        tools=["read_file", "search_files", "execute"],
     )
 
     registry.context("Example workflow note", workflow_context)
@@ -40,7 +40,7 @@ def workflow_context(ctx):
 
 
 def block_git_push(ctx):
-    if ctx.tool_name != "bash":
+    if ctx.tool_name != "execute":
         return
     command = str(ctx.inputs.get("command") or "").lower()
     if "git push" in command:

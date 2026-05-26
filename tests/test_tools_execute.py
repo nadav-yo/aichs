@@ -14,7 +14,9 @@ def cwd(workspace):
 class TestRegistryFor:
     def test_builtin_tool_names(self, cwd):
         names = set(tool_names(cwd))
-        assert {"read_file", "edit_file", "bash", "list_files", "search_files"} <= names
+        from services.shell_tool import shell_tool_name
+
+        assert {shell_tool_name(), "read_file", "edit_file", "list_files", "search_files"} <= set(names)
 
     def test_extension_tool_merged(self, workspace_with_tool, cwd):
         cwd = str(workspace_with_tool)
@@ -32,6 +34,20 @@ class TestReadFile:
     def test_reads_workspace_file(self, cwd, workspace):
         out = execute("read_file", {"path": "src/main.py"}, cwd)
         assert "print('hi')" in out
+
+    def test_reads_line_range(self, cwd, workspace):
+        path = workspace / "lines.txt"
+        path.write_text("line1\nline2\nline3\nline4\nline5\n", encoding="utf-8")
+        out = execute("read_file", {"path": "lines.txt", "offset": 2, "limit": 2}, cwd)
+        assert out.startswith("line2\nline3\n")
+        assert "[read: lines 2-3 of 5]" in out
+        assert "more lines follow" in out
+
+    def test_offset_past_eof(self, cwd, workspace):
+        path = workspace / "short.txt"
+        path.write_text("only\n", encoding="utf-8")
+        out = execute("read_file", {"path": "short.txt", "offset": 9}, cwd)
+        assert "past end of file" in out
 
     def test_blocks_path_outside_workspace(self, cwd, tmp_path):
         outside = tmp_path / "secret.txt"

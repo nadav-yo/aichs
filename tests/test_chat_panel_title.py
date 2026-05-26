@@ -40,6 +40,7 @@ def test_auto_title_starts_from_first_user_message(monkeypatch):
     panel.history = [{"role": "user", "content": "x" * 200}]
     panel.title_thread = None
     panel.model_combo = _ModelCombo()
+    panel._resolve_model = lambda model: model
     panel._on_auto_title_done = lambda *_args: None
     panel._on_auto_title_error = lambda *_args: None
 
@@ -65,6 +66,7 @@ def test_auto_title_waits_for_single_first_user(monkeypatch):
     ]
     panel.title_thread = None
     panel.model_combo = _ModelCombo()
+    panel._resolve_model = lambda model: model
     panel._on_auto_title_done = lambda *_args: None
     panel._on_auto_title_error = lambda *_args: None
 

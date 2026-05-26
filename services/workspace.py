@@ -6,6 +6,7 @@ from pathlib import Path
 from config import IGNORED, MAX_TREE_ENTRIES_PER_DIR, SYSTEM_PROMPT
 from services.crew import crew_roster_prompt
 from services.tool_registry import extension_context_snippets
+from services.shell_tool import SHELL_TOOL_NAME
 
 
 def agents_md(repo_path: str) -> Path | None:
@@ -79,8 +80,14 @@ def _build_extension_context(repo_path: str) -> str:
 
 def _host_shell_name() -> str:
     if sys.platform == "win32":
-        return "PowerShell on Windows. Write PowerShell commands for the bash tool; prefer rg for search."
-    return "POSIX /bin/sh. Write sh-compatible commands for the bash tool; prefer rg for search."
+        return (
+            f"PowerShell on Windows. Call the {SHELL_TOOL_NAME} tool with PowerShell syntax; "
+            "prefer search_files over grep."
+        )
+    return (
+        f"POSIX /bin/sh. Call the {SHELL_TOOL_NAME} tool with sh-compatible commands; "
+        "prefer search_files over grep."
+    )
 
 
 def _tree(base: str, path: str, prefix: str = "", depth: int = 0) -> list[str]:

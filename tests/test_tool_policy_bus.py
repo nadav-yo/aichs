@@ -51,9 +51,9 @@ def test_bash_skip_after_grant(bus, workspace):
         _approve(bus, pending, grant_bash_skip=True)
 
     bus.approval_needed.connect(on_needed)
-    assert bus.check("bash", {"command": "echo hi"}, cwd, policy, lambda: False) is None
+    assert bus.check("execute", {"command": "echo hi"}, cwd, policy, lambda: False) is None
     assert policy.bash_skip_prompts
-    assert bus.check("bash", {"command": "echo again"}, cwd, policy, lambda: False) is None
+    assert bus.check("execute", {"command": "echo again"}, cwd, policy, lambda: False) is None
 
 
 def test_extension_tool_approval(bus, workspace_with_tool):
@@ -79,7 +79,7 @@ def test_cancel_wait(bus, workspace):
     bus.approval_needed.connect(on_needed)
 
     def wait():
-        out = bus.check("bash", {"command": "sleep 9"}, cwd, policy, lambda: True)
+        out = bus.check("execute", {"command": "sleep 9"}, cwd, policy, lambda: True)
         holder["out"] = out
 
     t = threading.Thread(target=wait)

@@ -4,7 +4,7 @@ Status: `[ ]` pending · `[-]` in progress · `[x]` done
 
 ## [x] Stop button
 Replace the Send button with a red ■ Stop button while a response is streaming.
-Clicking it cancels the ChatThread (including any running bash subprocess).
+Clicking it cancels the ChatThread (including any running shell subprocess from `execute`).
 On cancel, the partial response is kept in the bubble and input is re-enabled.
 
 ## [x] Markdown rendering
@@ -114,7 +114,7 @@ Restored on startup.
 ## [x] Tool validation
 Read/search paths must stay inside the workspace (resolved paths, symlinks followed).
 `edit_file`: one Allow per conversation for the repo; shell can still modify files other ways.
-`bash`: Run / Don't ask again (this conversation only) / Cancel; first prompt explains full user access.
+`execute` (host shell): Run / Don't ask again (this conversation only) / Cancel; first prompt explains full user access.
 Confirmations are not a sandbox — documented in dialogs and tool descriptions.
 
 ## [ ] Undo file changes
@@ -162,7 +162,7 @@ Cmd+K opens a fuzzy-search palette over recent conversations, slash-commands
 
 ## [ ] Task progress panel
 While the agent is in its tool-use loop, show a collapsible panel listing
-each step: ✓ read_file, ✓ bash, ⟳ edit_file… Gives a live map of what
+each step: ✓ read_file, ✓ execute, ⟳ edit_file… Gives a live map of what
 the agent is doing, like Claude Code's task list.
 
 ## [x] Parallel tool execution

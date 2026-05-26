@@ -91,4 +91,4 @@ class TestValidateToolPaths:
         assert "search directory" in err
 
     def test_unknown_tool_skipped(self, workspace):
-        assert validate_tool_paths("bash", {"command": "echo hi"}, str(workspace)) is None
+        assert validate_tool_paths("execute", {"command": "echo hi"}, str(workspace)) is None

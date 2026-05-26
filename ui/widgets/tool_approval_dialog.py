@@ -5,13 +5,14 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QFont
 
 from services.tool_policy import PendingApproval, repo_root
+from services.shell_tool import is_shell_tool
 
 
 def handle_pending_approval(parent, bus, pending: PendingApproval) -> None:
     if pending.kind == "edit":
         _show_edit(parent, bus, pending)
-    elif pending.kind == "bash":
-        _show_bash(parent, bus, pending)
+    elif is_shell_tool(pending.kind):
+        _show_shell_command(parent, bus, pending)
     elif pending.kind == "tool":
         _show_extension_tool(parent, bus, pending)
 
@@ -50,7 +51,7 @@ def _show_edit(parent, bus, pending: PendingApproval) -> None:
         )
 
 
-def _show_bash(parent, bus, pending: PendingApproval) -> None:
+def _show_shell_command(parent, bus, pending: PendingApproval) -> None:
     command = pending.inputs.get("command", "")
     policy = pending.policy
     dlg = QDialog(parent)
@@ -102,7 +103,7 @@ def _show_bash(parent, bus, pending: PendingApproval) -> None:
         bus.complete(
             pending,
             approved=False,
-            message="[tool error] User denied bash command.",
+            message="[tool error] User denied shell command.",
         )
 
 

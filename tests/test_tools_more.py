@@ -34,7 +34,7 @@ def test_bash_mocked(cwd, workspace, monkeypatch):
     proc.wait.return_value = 0
     proc.returncode = 0
     monkeypatch.setattr("services.tools.subprocess.Popen", lambda *a, **k: proc)
-    out = execute("bash", {"command": "echo hi"}, cwd)
+    out = execute("execute", {"command": "echo hi"}, cwd)
     assert "hello" in out
 
 

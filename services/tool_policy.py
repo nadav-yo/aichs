@@ -9,6 +9,8 @@ from typing import Callable
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from services.shell_tool import SHELL_TOOL_NAME, is_shell_tool
+
 
 @dataclass
 class ConversationToolPolicy:
@@ -20,7 +22,7 @@ class ConversationToolPolicy:
 
 @dataclass
 class PendingApproval:
-    kind: str  # "edit" | "bash" | "tool"
+    kind: str  # "edit" | "execute" | "tool"
     inputs: dict
     cwd: str
     policy: ConversationToolPolicy
@@ -117,10 +119,10 @@ class ToolApprovalBus(QObject):
                 return None
             return self._wait_for_ui("edit", inputs, cwd, policy, is_cancelled)
 
-        if name == "bash":
+        if is_shell_tool(name):
             if policy.bash_skip_prompts:
                 return None
-            return self._wait_for_ui("bash", inputs, cwd, policy, is_cancelled)
+            return self._wait_for_ui(SHELL_TOOL_NAME, inputs, cwd, policy, is_cancelled)
 
         return None
 

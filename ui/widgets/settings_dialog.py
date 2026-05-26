@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QTextEdit, QComboBox, QWidget, QFileDialog, QScrollArea, QSlider,
     QListWidget, QListWidgetItem, QStackedWidget, QFrame, QTableWidget,
     QTableWidgetItem, QHeaderView, QMessageBox, QToolButton, QStyle, QCheckBox,
-    QColorDialog, QTabWidget, QAbstractItemView, QSpinBox,
+    QColorDialog, QTabWidget, QAbstractItemView,
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
@@ -18,6 +18,8 @@ from services.crew import all_crew, crew_settings
 from services.model_registry import (
     api_default_context_window,
     api_key_env_var,
+    context_window_tokens,
+    custom_default_context_window,
     get_model_config,
     get_provider_config,
     load_user_providers,
@@ -26,7 +28,7 @@ from services.model_registry import (
 from storage.settings import SettingsStore
 from ui.avatars import avatar_pixmap, clear_cache, persist_portrait
 from ui.theme import (
-    ACCENT, palette, DEFAULT_COMPACTION_THRESHOLD_PCT, DEFAULT_FONT_SIZE, DEFAULT_THEME,
+    ACCENT, palette, DEFAULT_FONT_SIZE, DEFAULT_THEME,
     crew_tone,
 )
 
@@ -37,6 +39,8 @@ _NAV = [
 ]
 
 _BUILTIN_IDS = {"claude", "openai"}
+_MODEL_CONTEXT_SUFFIX = re.compile(r"\s@\s*(\d+)\s*$")
+_CUSTOM_DEFAULT_CONTEXT = 32_768
 
 
 def _provider_title(provider_id: str) -> str:
@@ -52,12 +56,28 @@ def _provider_env_var(provider_id: str) -> str:
     return f"AICC_{cleaned}_API_KEY"
 
 
-def _models_to_text(models: list[dict]) -> str:
+def _model_context_window(model: dict) -> int | None:
+    raw = model.get("contextWindow", model.get("context_window"))
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _models_to_text(models: list[dict], *, include_context: bool = False) -> str:
     lines = []
     for model in models:
         mid = model.get("id", "")
         name = model.get("name", "")
-        lines.append(f"{mid} = {name}" if name and name != mid else mid)
+        line = f"{mid} = {name}" if name and name != mid else mid
+        if include_context:
+            window = _model_context_window(model)
+            if window:
+                line = f"{line} @ {window}"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -67,6 +87,11 @@ def _parse_models(text: str) -> list[dict]:
         line = raw.strip()
         if not line:
             continue
+        window = None
+        ctx_match = _MODEL_CONTEXT_SUFFIX.search(line)
+        if ctx_match:
+            window = int(ctx_match.group(1))
+            line = line[:ctx_match.start()].strip()
         if "=" in line:
             mid, name = [part.strip() for part in line.split("=", 1)]
         elif "|" in line:
@@ -77,6 +102,8 @@ def _parse_models(text: str) -> list[dict]:
             item = {"id": mid}
             if name:
                 item["name"] = name
+            if window:
+                item["contextWindow"] = window
             models.append(item)
     return models
 
@@ -397,20 +424,10 @@ class _ProviderDialog(QDialog):
         self.models.setStyleSheet(styles["field"])
         self._field(root, "Models", self.models)
 
-        self.context_window = QSpinBox()
-        self.context_window.setRange(4_096, 2_000_000)
-        self.context_window.setSingleStep(1024)
-        self.context_window.setGroupSeparatorShown(True)
-        self.context_window.setStyleSheet(styles["field"])
-        self._field(root, "Context window (tokens)", self.context_window)
-
-        hint = QLabel(
-            "For custom providers (e.g. Ollama), set the context size you configured in the server. "
-            "Models are saved to ~/.aicc/models.json; API keys stay in settings."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet(styles["hint"])
-        root.addWidget(hint)
+        self.hint = QLabel()
+        self.hint.setWordWrap(True)
+        self.hint.setStyleSheet(styles["hint"])
+        root.addWidget(self.hint)
 
         buttons = QHBoxLayout()
         buttons.addStretch()
@@ -436,14 +453,40 @@ class _ProviderDialog(QDialog):
             self.provider_id.setText(data.get("id", ""))
             self.base_url.setText(data.get("base_url", ""))
             self.api_key.setText(data.get("api_key", ""))
-            self.models.setPlainText(_models_to_text(data.get("models", [])))
-            self.context_window.setValue(
-                int(data.get("context_window") or _default_context_window_for_kind(kind)),
+            self._apply_kind_ui(kind)
+            self.models.setPlainText(
+                _models_to_text(
+                    data.get("models", []),
+                    include_context=kind == "custom",
+                ),
             )
         else:
             self._apply_kind_defaults()
 
         self.setStyleSheet(f"QDialog {{ background:{p['BG2']}; }}")
+
+    def _apply_kind_ui(self, kind: str):
+        if kind == "custom":
+            self.models.setPlaceholderText(
+                "llama3.1:8b = Llama 3.1 8B @ 32768\n"
+                "qwen2.5-coder:7b @ 65536"
+            )
+            self.hint.setText(
+                "For custom providers (e.g. Ollama), append @ tokens to each model line "
+                f"(defaults to {custom_default_context_window():,} when omitted). "
+                "Models are saved to ~/.aicc/models.json; API keys stay in settings."
+            )
+        else:
+            self.models.setPlaceholderText("model-id\nmodel-id = Display Name")
+            if kind == "anthropic":
+                self.hint.setText(
+                    "Anthropic context limits are fetched from the API when a key is available."
+                )
+            else:
+                self.hint.setText(
+                    "OpenAI context limits use built-in defaults. "
+                    "Models are saved to ~/.aicc/models.json; API keys stay in settings."
+                )
 
     def _field(self, layout: QVBoxLayout, label: str, widget: QWidget):
         lbl = QLabel(label)
@@ -452,24 +495,22 @@ class _ProviderDialog(QDialog):
         layout.addWidget(widget)
 
     def _apply_kind_defaults(self):
+        kind = self.kind.currentData()
+        self._apply_kind_ui(kind)
         if self._original_id:
             return
-        kind = self.kind.currentData()
         if kind == "anthropic":
             self.provider_id.setText("claude")
             self.base_url.clear()
             self.models.setPlainText(_models_to_text(_builtin_models("claude")))
-            self.context_window.setValue(_default_context_window_for_kind("anthropic"))
         elif kind == "openai":
             self.provider_id.setText("openai")
             self.base_url.clear()
             self.models.setPlainText(_models_to_text(_builtin_models("openai")))
-            self.context_window.setValue(_default_context_window_for_kind("openai"))
         else:
             self.provider_id.setText("")
             self.base_url.clear()
             self.models.clear()
-            self.context_window.setValue(_default_context_window_for_kind("custom"))
 
     def _accept_if_valid(self):
         provider_id = self.provider_id.text().strip()
@@ -504,23 +545,70 @@ class _ProviderDialog(QDialog):
             "api_key": self.api_key.text().strip(),
             "api_key_spec": api_key_spec,
             "models": _parse_models(self.models.toPlainText()),
-            "context_window": self.context_window.value(),
         }
 
 
-def _default_context_window_for_kind(kind: str) -> int:
+def _provider_compaction_example(provider: dict) -> str:
+    provider_id = provider["id"]
+    kind = provider.get("kind", "custom")
+    models = provider.get("models", [])
     if kind == "anthropic":
-        return api_default_context_window("anthropic")
+        if models:
+            windows = sorted({
+                context_window_tokens(model["id"])
+                for model in models
+                if model.get("id")
+            })
+            if len(windows) == 1:
+                return f"{provider_id}: ~{_compaction_limit(windows[0]):,}"
+            if windows:
+                return (
+                    f"{provider_id}: ~{_compaction_limit(windows[0]):,}"
+                    f"–{_compaction_limit(windows[-1]):,}"
+                )
+        return f"{provider_id}: ~{_compaction_limit(api_default_context_window('anthropic')):,}"
     if kind == "openai":
-        return api_default_context_window("openai-compatible")
-    return 32_768
+        return f"{provider_id}: ~{_compaction_limit(api_default_context_window('openai-compatible')):,}"
+    windows = sorted({
+        _model_context_window(model) or custom_default_context_window()
+        for model in models
+    })
+    if not windows:
+        return f"{provider_id}: ~{_compaction_limit(custom_default_context_window()):,}"
+    if len(windows) == 1:
+        return f"{provider_id}: ~{_compaction_limit(windows[0]):,}"
+    return (
+        f"{provider_id}: ~{_compaction_limit(windows[0]):,}"
+        f"–{_compaction_limit(windows[-1]):,}"
+    )
 
 
-def _provider_context_window(provider: dict) -> int:
-    custom = provider.get("context_window")
-    if custom:
-        return int(custom)
-    return api_default_context_window(provider.get("api", "openai-compatible"))
+def _compaction_limit(window: int) -> int:
+    from services.compaction import compaction_threshold
+
+    return compaction_threshold(window)
+
+
+def _parse_context_window_value(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _apply_legacy_provider_context(models: list[dict], provider_window: int | None) -> list[dict]:
+    if not provider_window:
+        return models
+    migrated = []
+    for model in models:
+        item = dict(model)
+        if not _model_context_window(item):
+            item["contextWindow"] = provider_window
+        migrated.append(item)
+    return migrated
 
 
 def _builtin_models(provider: str) -> list[dict]:
@@ -814,19 +902,35 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(self._section_separator())
 
-        compact_lbl = QLabel("Compaction threshold")
+        compact_lbl = QLabel("Auto-compaction")
         compact_lbl.setStyleSheet(self._label_style)
         layout.addWidget(compact_lbl)
         self.compaction_label = QLabel()
         self.compaction_label.setWordWrap(True)
         self.compaction_label.setStyleSheet(self._hint_style)
         layout.addWidget(self.compaction_label)
-        self.compaction_slider = QSlider(Qt.Orientation.Horizontal)
-        self.compaction_slider.setRange(60, 95)
-        self.compaction_slider.setSingleStep(5)
-        self.compaction_slider.setPageStep(5)
-        self.compaction_slider.valueChanged.connect(self._update_compaction_label)
-        layout.addWidget(self.compaction_slider)
+
+        reserve_row = QHBoxLayout()
+        reserve_lbl = QLabel("Response reserve")
+        reserve_lbl.setStyleSheet(self._label_style)
+        reserve_row.addWidget(reserve_lbl)
+        self.compaction_reserve_edit = QLineEdit()
+        self.compaction_reserve_edit.setPlaceholderText("Auto (scaled from context window)")
+        self.compaction_reserve_edit.textChanged.connect(self._update_compaction_label)
+        reserve_row.addWidget(self.compaction_reserve_edit, 1)
+        layout.addLayout(reserve_row)
+
+        keep_row = QHBoxLayout()
+        keep_lbl = QLabel("Recent history kept")
+        keep_lbl.setStyleSheet(self._label_style)
+        keep_row.addWidget(keep_lbl)
+        self.compaction_keep_recent_edit = QLineEdit()
+        self.compaction_keep_recent_edit.setPlaceholderText("Auto (scaled from context window)")
+        self.compaction_keep_recent_edit.textChanged.connect(self._update_compaction_label)
+        keep_row.addWidget(self.compaction_keep_recent_edit, 1)
+        layout.addLayout(keep_row)
+
+        self._update_compaction_label()
         layout.addStretch()
         return page
 
@@ -864,13 +968,11 @@ class SettingsDialog(QDialog):
             or (raw or {}).get("api_key_spec")
             or (cfg.api_key_spec if cfg else _provider_env_var(provider_id))
         )
-        raw_window = (raw or {}).get("contextWindow", (raw or {}).get("context_window"))
-        if raw_window is not None:
-            context_window = int(raw_window)
-        elif cfg and cfg.context_window:
-            context_window = cfg.context_window
-        else:
-            context_window = _default_context_window_for_kind(kind)
+        provider_window = _parse_context_window_value(
+            (raw or {}).get("contextWindow", (raw or {}).get("context_window")),
+        )
+        if kind == "custom":
+            models = _apply_legacy_provider_context(models, provider_window)
         return {
             "id": provider_id,
             "kind": kind,
@@ -879,8 +981,8 @@ class SettingsDialog(QDialog):
             "api_key": self._saved_provider_key(saved, provider_id),
             "api_key_spec": api_key_spec,
             "models": models,
-            "context_window": context_window,
         }
+
 
     def _saved_provider_key(self, saved: dict, provider_id: str) -> str:
         provider_keys = saved.get("provider_api_keys", {})
@@ -1188,32 +1290,29 @@ class SettingsDialog(QDialog):
 
         self.enter_to_send_check.setChecked(bool(saved.get("enter_to_send", False)))
 
-        pct = saved.get("compaction_threshold_pct", DEFAULT_COMPACTION_THRESHOLD_PCT)
-        try:
-            pct = int(pct)
-        except (TypeError, ValueError):
-            pct = DEFAULT_COMPACTION_THRESHOLD_PCT
-        self.compaction_slider.setValue(max(60, min(95, pct)))
-        self._update_compaction_label(self.compaction_slider.value())
+        compaction = saved.get("compaction") if isinstance(saved.get("compaction"), dict) else {}
+        reserve = compaction.get("reserve_tokens", compaction.get("reserveTokens"))
+        keep = compaction.get("keep_recent_tokens", compaction.get("keepRecentTokens"))
+        self.compaction_reserve_edit.setText("" if reserve is None else str(int(reserve)))
+        self.compaction_keep_recent_edit.setText("" if keep is None else str(int(keep)))
 
-    def _update_compaction_label(self, pct: int):
-        from services.compaction import RESERVE_TOKENS
+        self._update_compaction_label()
 
+    def _update_compaction_label(self):
         if self._providers:
-            parts = []
-            for provider in self._providers:
-                window = _provider_context_window(provider)
-                limit = int(window * pct / 100) - RESERVE_TOKENS
-                parts.append(f"{provider['id']}: ~{limit:,}")
-            examples = ", ".join(parts)
+            examples = ", ".join(
+                _provider_compaction_example(provider) for provider in self._providers
+            )
         else:
+            from services.compaction import compaction_threshold
+
             examples = (
-                f"Claude ~{int(180_000 * pct / 100) - RESERVE_TOKENS:,}, "
-                f"OpenAI-compatible ~{int(100_000 * pct / 100) - RESERVE_TOKENS:,}"
+                f"Claude ~{compaction_threshold(180_000):,}, "
+                f"OpenAI-compatible ~{compaction_threshold(100_000):,}"
             )
         self.compaction_label.setText(
-            f"Compact when a conversation exceeds {pct}% of the active model's context window "
-            f"({examples} tokens at this threshold)."
+            "Compact when context exceeds the model window minus a scaled reserve "
+            f"(~{examples} tokens for your models). Use /compact to summarize manually."
         )
 
     def _save(self):
@@ -1269,12 +1368,28 @@ class SettingsDialog(QDialog):
             if provider.get("base_url"):
                 entry["baseUrl"] = provider["base_url"]
             if not is_builtin or has_model_override:
-                entry["models"] = provider.get("models", [])
-            api = provider.get("api", "openai-compatible")
-            window = int(provider.get("context_window") or 0)
-            if window > 0 and (not is_builtin or window != api_default_context_window(api)):
-                entry["contextWindow"] = window
+                models = []
+                for model in provider.get("models", []):
+                    model_entry = {"id": model["id"]}
+                    if model.get("name") and model["name"] != model["id"]:
+                        model_entry["name"] = model["name"]
+                    if not is_builtin:
+                        window = _model_context_window(model)
+                        if window:
+                            model_entry["contextWindow"] = window
+                    models.append(model_entry)
+                entry["models"] = models
             user_providers[provider_id] = entry
+
+        from services.compaction import parse_compaction_token
+
+        compaction: dict = {}
+        reserve = parse_compaction_token(self.compaction_reserve_edit.text())
+        keep = parse_compaction_token(self.compaction_keep_recent_edit.text())
+        if reserve is not None:
+            compaction["reserve_tokens"] = reserve
+        if keep is not None:
+            compaction["keep_recent_tokens"] = keep
 
         data.update({
             "anthropic_api_key": provider_keys.get("claude", ""),
@@ -1284,7 +1399,6 @@ class SettingsDialog(QDialog):
             "theme": self.theme_combo.currentText(),
             "font_size": self.font_combo.currentText(),
             "enter_to_send": self.enter_to_send_check.isChecked(),
-            "compaction_threshold_pct": self.compaction_slider.value(),
             "default_models": default_models,
             "provider_order": [provider["id"] for provider in self._providers],
             "crew": crew,
@@ -1292,6 +1406,10 @@ class SettingsDialog(QDialog):
             "avatar_human": persist_portrait(self.human_portrait.value(), "human"),
             "avatar_agent": persist_portrait(self.agent_portrait.value(), "agent"),
         })
+        if compaction:
+            data["compaction"] = compaction
+        else:
+            data.pop("compaction", None)
         if not configured_ids:
             data["default_models"] = {}
             data["provider_api_keys"] = {}

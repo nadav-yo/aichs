@@ -12,7 +12,7 @@ def test_call_model_anthropic():
         "services.compaction.resolve_api_key", return_value="k"
     ), patch("services.compaction.anthropic.Anthropic", return_value=mock_client):
         cfg.return_value = MagicMock(api="anthropic", api_key_spec="ANTHROPIC_API_KEY", base_url=None)
-        assert _call_model("claude-sonnet-4-6", "prompt") == "summary"
+        assert _call_model("claude-sonnet-4-6", "prompt", 4096) == "summary"
 
 
 def test_call_model_openai():
@@ -28,7 +28,7 @@ def test_call_model_openai():
             api_key_spec="OPENAI_API_KEY",
             base_url="https://api.example.com/v1",
         )
-        assert _call_model("gpt-5.4-nano", "prompt") == "openai summary"
+        assert _call_model("gpt-5.4-nano", "prompt", 4096) == "openai summary"
         assert openai_cls.call_args.kwargs["base_url"] == "https://api.example.com/v1"
 
 

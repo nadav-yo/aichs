@@ -48,6 +48,7 @@ from ui.theme import (
     tool_notice_style, center_notice_style, icon_button_style,
 )
 from services.skills import Skill, load_all as load_skills
+from services.shell_tool import is_shell_tool
 from services.slash_commands import (
     load_all_commands,
     parse_builtin_command,
@@ -117,6 +118,13 @@ def _display_tool_path(path: str, cwd: str) -> str:
 def _tool_call_notice(name: str, inputs: dict, cwd: str) -> str:
     if name == "read_file":
         path = _display_tool_path(str(inputs.get("path") or ""), cwd)
+        offset = inputs.get("offset")
+        limit = inputs.get("limit")
+        if offset is not None or limit is not None:
+            detail = f" from line {offset or 1}"
+            if limit is not None:
+                detail += f", {limit} lines"
+            return f"Reading file '{path}'{detail}"
         return f"Reading file '{path}'"
     if name == "edit_file":
         path = _display_tool_path(str(inputs.get("path") or ""), cwd)
@@ -135,7 +143,7 @@ def _tool_call_notice(name: str, inputs: dict, cwd: str) -> str:
     if name == "search_project_chats":
         query = _compact_text(inputs.get("query") or "", 96)
         return f"Searching project chat history for '{query}'" if query else "Searching project chat history"
-    if name == "bash":
+    if is_shell_tool(name):
         command = _compact_text(inputs.get("command") or "")
         return f"Running command: {command}" if command else "Running command"
     if name == "web_fetch":
@@ -498,7 +506,7 @@ class ChatPanel(QWidget):
         self.conv_id   = data["id"]
         self.conv_data = data
         self.history   = data["messages"]
-        self._set_model(data.get("model") or MODELS.get("claude", [""])[0])
+        self._set_model(data.get("model", ""))
         self._runtime_for(self.conv_id)
         self._update_queue_ui()
         self._render_history_tail()
@@ -1075,10 +1083,13 @@ class ChatPanel(QWidget):
             self._add_notice("Nothing to compact — start a conversation first.")
             return
         model = self.model_combo.currentText()
-        if not force and not should_compact(model, self.history):
+        budget = self._context_budget()
+        if not force and not should_compact(
+            model, self.history, context_tokens=budget.used_tokens,
+        ):
             self._add_notice("Context is not large enough to compact yet.")
             return
-        if not can_compact(self.history):
+        if not can_compact(self.history, model):
             self._add_notice("Nothing to compact — recent messages already fit in context.")
             return
         self._set_input_enabled(False)
@@ -1121,6 +1132,9 @@ class ChatPanel(QWidget):
             return
         self._flush_stream_buffer()
         self._remove_empty_active_typing_bubble()
+        bubble = run.bubble
+        if bubble and bubble._copy_text.strip():
+            bubble.finalize(bubble._copy_text)
         run.bubble = None
         self.active_bubble = None
         if name == "edit_file":
@@ -1130,7 +1144,7 @@ class ChatPanel(QWidget):
             if path:
                 self.file_written.emit(path)
         self._add_tool_notice(_tool_call_notice(name, inputs, self.cwd))
-        if name == "bash":
+        if is_shell_tool(name):
             run.active_terminal = self._add_terminal_card()
             self._active_terminal = run.active_terminal
 
@@ -1216,7 +1230,7 @@ class ChatPanel(QWidget):
             return
         if run.conv_id != self.conv_id:
             return
-        if name == "bash" and run.active_terminal:
+        if is_shell_tool(name) and run.active_terminal:
             import re
             m = re.search(r'\[exit (\d+)\]', output)
             run.active_terminal.finish(int(m.group(1)) if m else 0)
@@ -1308,7 +1322,8 @@ class ChatPanel(QWidget):
             self._exit_streaming()
             self._maybe_auto_title()
             model = self.model_combo.currentText()
-            if should_compact(model, self.history):
+            budget = self._context_budget()
+            if should_compact(model, self.history, context_tokens=budget.used_tokens):
                 self.compact_conversation(force=False)
             else:
                 self._save(touch_updated=True)
@@ -1367,8 +1382,15 @@ class ChatPanel(QWidget):
             return
         if not self.conv_data.get("title_auto", False):
             return
-        user_msgs = [m for m in self.history if m.get("role") == "user"]
+        user_msgs = [
+            m for m in self.history
+            if m.get("role") == "user" and m.get("synthetic") != "tool_results"
+        ]
         if len(user_msgs) != 1:
+            return
+
+        preview = content_preview(user_msgs[0].get("content", "")).strip()
+        if not preview:
             return
 
         if self.title_thread and self.title_thread.isRunning():
@@ -1376,8 +1398,8 @@ class ChatPanel(QWidget):
 
         self.title_thread = TitleThread(
             self.conv_id,
-            self.model_combo.currentText(),
-            content_preview(user_msgs[0]["content"])[:100],
+            self._resolve_model(self.model_combo.currentText()),
+            preview[:100],
         )
         self.title_thread.done.connect(self._on_auto_title_done)
         self.title_thread.error.connect(self._on_auto_title_error)
@@ -1428,8 +1450,34 @@ class ChatPanel(QWidget):
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
+    def _default_model_for_provider(self, provider: str) -> str:
+        defaults = self._settings.load().get("default_models", {})
+        models = MODELS.get(provider, [])
+        default = defaults.get(provider)
+        if default and default in models:
+            return default
+        return models[0] if models else ""
+
+    def _resolve_model(self, model: str | None) -> str:
+        model = str(model or "").strip()
+        if model and model in MODEL_PROVIDER:
+            provider = MODEL_PROVIDER[model]
+            if model in MODELS.get(provider, []):
+                return model
+            return self._default_model_for_provider(provider)
+        providers = self._configured_providers()
+        if providers:
+            return self._default_model_for_provider(providers[0])
+        for provider_models in MODELS.values():
+            if provider_models:
+                return provider_models[0]
+        return model
+
     def _set_model(self, model: str):
-        provider = MODEL_PROVIDER.get(model, "claude")
+        model = self._resolve_model(model)
+        if not model:
+            return
+        provider = MODEL_PROVIDER[model]
         self.provider_combo.setCurrentText(provider)
         self._on_provider_changed(provider)
         self.model_combo.setCurrentText(model)

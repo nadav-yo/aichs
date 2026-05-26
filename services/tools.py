@@ -1,12 +1,29 @@
 import json
+import os
 import re
 import shutil
 import sys
 import subprocess
 from pathlib import Path
 
+# PowerShell 7+ colors stderr/stdout; strip before UI and model context.
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-9;]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07]*(?:\x07|\x1b\\)"
+    r"|\x1b[@-Z\\-_]"
+)
+_ORPHAN_SGR_RE = re.compile(r"(?m)^(?:\[[0-9;]*m)+")
+
 import config
-from config import IGNORED, MAX_TOOL_OUTPUT_CHARS, MAX_TOOL_OUTPUT_LINES, MAX_TOOL_READ_BYTES
+from config import (
+    DEFAULT_READ_FILE_LINES,
+    IGNORED,
+    MAX_READ_FILE_LINES,
+    MAX_TOOL_OUTPUT_CHARS,
+    MAX_TOOL_OUTPUT_LINES,
+    MAX_TOOL_READ_BYTES,
+)
+from services.shell_tool import shell_tool_name
 from services.tool_policy import resolve_path, validate_tool_paths
 from services.tool_registry import ToolContext, ToolRegistry, load_extensions
 
@@ -21,15 +38,36 @@ _CHAT_SEARCH_STOPWORDS = {
 }
 
 
-def _bash_tool_description() -> str:
+def _shell_tool_description() -> str:
     if sys.platform == "win32":
-        shell = "PowerShell"
-    else:
-        shell = "/bin/sh"
+        return (
+            "Run a PowerShell command and return stdout + stderr. "
+            "Use PowerShell syntax (not POSIX sh). Prefer search_files over grep. "
+            "Runs on your machine with your user account. Output is capped."
+        )
     return (
-        f"Run a shell command ({shell}) and return stdout + stderr. "
+        "Run a /bin/sh command and return stdout + stderr. "
+        "Use POSIX shell syntax. Prefer search_files over grep when searching the repo. "
         "Runs on your machine with your user account. Output is capped."
     )
+
+
+def _strip_ansi(text: str) -> str:
+    text = _ANSI_ESCAPE_RE.sub("", text)
+    return _ORPHAN_SGR_RE.sub("", text)
+
+
+def _shell_env() -> dict:
+    env = os.environ.copy()
+    env["NO_COLOR"] = "1"
+    env["FORCE_COLOR"] = "0"
+    env["CLICOLOR"] = "0"
+    env["CLICOLOR_FORCE"] = "0"
+    return env
+
+
+def _powershell_command(command: str) -> str:
+    return f"$PSStyle.OutputRendering = 'PlainText'; {command}"
 
 
 def registry_for(cwd: str | None = None) -> ToolRegistry:
@@ -106,13 +144,26 @@ def _register_builtin_tools(registry: ToolRegistry) -> None:
     registry.tool(
         name="read_file",
         description=(
-            "Read one workspace file. Output is capped at 64KB; for broad tasks, "
-            "use list_files/search_files first and read targeted files in small batches."
+            "Read one workspace file. Default: from the start, 64KB max. After search_files "
+            "reports a line number, pass offset (1-based) and optional limit to read that "
+            f"region (default {DEFAULT_READ_FILE_LINES} lines, max {MAX_READ_FILE_LINES}). "
+            f"Prefer this over {shell_tool_name()} for reading a function or nearby context."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": _PATH_DESC},
+                "offset": {
+                    "type": "integer",
+                    "description": "First line to include (1-based). Use with search_files line numbers.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        f"Maximum lines to return when offset is set (default "
+                        f"{DEFAULT_READ_FILE_LINES}, max {MAX_READ_FILE_LINES})."
+                    ),
+                },
             },
             "required": ["path"],
         },
@@ -183,8 +234,8 @@ def _register_builtin_tools(registry: ToolRegistry) -> None:
         source="builtin",
     )
     registry.tool(
-        name="bash",
-        description=_bash_tool_description(),
+        name=shell_tool_name(),
+        description=_shell_tool_description(),
         input_schema={
             "type": "object",
             "properties": {
@@ -192,7 +243,7 @@ def _register_builtin_tools(registry: ToolRegistry) -> None:
             },
             "required": ["command"],
         },
-        execute=_execute_bash,
+        execute=_execute_shell_command,
         source="builtin",
     )
     registry.tool(
@@ -278,6 +329,19 @@ def _register_builtin_tools(registry: ToolRegistry) -> None:
 
 def _execute_read_file(ctx: ToolContext, inputs: dict) -> str:
     p = resolve_path(inputs["path"], ctx.cwd)
+    if not p.exists():
+        return f"[tool error] File does not exist: {_display_path(p, ctx.cwd)}"
+    if not p.is_file():
+        return f"[tool error] Not a file: {_display_path(p, ctx.cwd)}"
+    if "offset" in inputs or "limit" in inputs:
+        offset = _bounded_int(inputs.get("offset"), default=1, minimum=1, maximum=10_000_000)
+        limit = _bounded_int(
+            inputs.get("limit"),
+            default=DEFAULT_READ_FILE_LINES,
+            minimum=1,
+            maximum=MAX_READ_FILE_LINES,
+        )
+        return _read_text_lines(p, offset, limit, MAX_TOOL_READ_BYTES)
     return _read_text_limited(p, MAX_TOOL_READ_BYTES)
 
 
@@ -285,7 +349,7 @@ def _execute_edit_file(ctx: ToolContext, inputs: dict) -> str:
     return _edit_file(inputs, ctx.cwd)
 
 
-def _execute_bash(ctx: ToolContext, inputs: dict) -> str:
+def _execute_shell_command(ctx: ToolContext, inputs: dict) -> str:
     return _run_shell_command(inputs["command"], ctx.cwd, ctx.on_line, ctx.cancel)
 
 
@@ -320,6 +384,54 @@ def _read_text_limited(path: Path, max_bytes: int) -> str:
     if truncated:
         text += f"\n\n[truncated: showing {max_bytes} of {size} bytes]"
     return text
+
+
+def _normalize_read_line(line: str) -> str:
+    if line.endswith("\r\n"):
+        line = line[:-2]
+    elif line.endswith("\r"):
+        line = line[:-1]
+    return line + "\n"
+
+
+def _read_text_lines(path: Path, offset: int, limit: int, max_bytes: int) -> str:
+    selected: list[str] = []
+    byte_count = 0
+    file_lines = 0
+    truncated_bytes = False
+
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as f:
+        for line_no, line in enumerate(f, start=1):
+            file_lines = line_no
+            if line_no < offset:
+                continue
+            if len(selected) >= limit:
+                continue
+            line = _normalize_read_line(line)
+            line_bytes = len(line.encode("utf-8"))
+            if byte_count + line_bytes > max_bytes:
+                truncated_bytes = True
+                break
+            selected.append(line)
+            byte_count += line_bytes
+
+    if offset > file_lines and file_lines > 0:
+        return f"(empty: offset {offset} is past end of file at line {file_lines})"
+    if offset > 1 and file_lines == 0:
+        return f"(empty: offset {offset} is past end of file)"
+
+    text = "".join(selected)
+    if not text and offset <= max(file_lines, 1):
+        return f"(empty: no lines in range starting at {offset})"
+
+    end_line = offset + len(selected) - 1
+    truncated_lines = file_lines > end_line and len(selected) == limit
+    notes = [f"[read: lines {offset}-{end_line} of {file_lines}]"]
+    if truncated_lines:
+        notes.append(f"[truncated: more lines follow line {end_line}]")
+    if truncated_bytes:
+        notes.append(f"[truncated: {max_bytes} byte limit reached]")
+    return text + "\n\n" + " ".join(notes)
 
 
 def _edit_file(inputs: dict, cwd: str) -> str:
@@ -447,6 +559,7 @@ def _run_shell_command(command: str, cwd: str, on_line=None, cancel=None) -> str
     proc = subprocess.Popen(
         _shell_command_args(command),
         cwd=cwd,
+        env=_shell_env(),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -457,6 +570,7 @@ def _run_shell_command(command: str, cwd: str, on_line=None, cancel=None) -> str
     total_lines = 0
     truncated = False
     for line in proc.stdout:
+        line = _strip_ansi(line)
         if cancel and cancel.is_set():
             proc.kill()
             break
@@ -485,7 +599,10 @@ def _run_shell_command(command: str, cwd: str, on_line=None, cancel=None) -> str
 
 def _shell_command_args(command: str) -> list[str]:
     if sys.platform == "win32":
-        shell = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+        pwsh = shutil.which("pwsh")
+        shell = pwsh or shutil.which("powershell") or "powershell"
+        if pwsh:
+            command = _powershell_command(command)
         return [
             shell,
             "-NoLogo",

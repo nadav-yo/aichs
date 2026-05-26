@@ -18,12 +18,14 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import subprocess
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
 _MODELS_PATH = Path.home() / ".aicc" / "models.json"
+_MODEL_ID_CONTEXT_SUFFIX = re.compile(r"\s@\s*\d+\s*$")
 
 _BUILTIN: dict = {
     "claude": {
@@ -48,6 +50,8 @@ _BUILTIN: dict = {
 }
 
 _VALID_APIS = {"anthropic", "openai-compatible"}
+_BUILTIN_PROVIDER_IDS = frozenset({"claude", "openai"})
+_ANTHROPIC_CONTEXT: dict[str, int] = {}
 
 
 def api_default_context_window(api: str) -> int:
@@ -272,7 +276,13 @@ _FALLBACK = ModelConfig(
 )
 
 
+def normalize_model_id(model_id: str) -> str:
+    """Strip a trailing settings-style context suffix (``id @ 32768``) if present."""
+    return _MODEL_ID_CONTEXT_SUFFIX.sub("", str(model_id or "").strip())
+
+
 def get_model_config(model_id: str) -> ModelConfig:
+    model_id = normalize_model_id(model_id)
     return _MODEL_CONFIG.get(model_id, _FALLBACK)
 
 
@@ -280,11 +290,47 @@ def get_provider_config(provider_id: str) -> ProviderConfig | None:
     return PROVIDERS.get(provider_id)
 
 
+def custom_default_context_window() -> int:
+    """Default context size for custom (non built-in) openai-compatible models."""
+    return 32_768
+
+
+def _fetch_anthropic_context_window(cfg: ModelConfig, model_id: str) -> int | None:
+    if not resolve_api_key(cfg.api_key_spec):
+        return None
+    try:
+        import anthropic
+
+        kwargs: dict = {"api_key": resolve_api_key(cfg.api_key_spec)}
+        if cfg.base_url:
+            kwargs["base_url"] = cfg.base_url
+        info = anthropic.Anthropic(**kwargs).models.retrieve(model_id)
+        if info.max_input_tokens:
+            return int(info.max_input_tokens)
+    except Exception:
+        return None
+    return None
+
+
+def _refresh_anthropic_context_cache() -> None:
+    _ANTHROPIC_CONTEXT.clear()
+    for model_id, cfg in _MODEL_CONFIG.items():
+        if cfg.api != "anthropic":
+            continue
+        window = _fetch_anthropic_context_window(cfg, model_id)
+        if window:
+            _ANTHROPIC_CONTEXT[model_id] = window
+
+
 def context_window_tokens(model_id: str) -> int:
-    """Context window (tokens) for a model, honoring per-model/provider overrides."""
+    """Context window (tokens) for a model."""
     cfg = get_model_config(model_id)
+    if cfg.api == "anthropic":
+        return _ANTHROPIC_CONTEXT.get(model_id, api_default_context_window("anthropic"))
     if cfg.context_window:
         return cfg.context_window
+    if cfg.provider_id not in _BUILTIN_PROVIDER_IDS:
+        return custom_default_context_window()
     return api_default_context_window(cfg.api)
 
 
@@ -301,3 +347,7 @@ def reload() -> None:
     _MODEL_CONFIG.update(model_config)
     PROVIDERS.clear()
     PROVIDERS.update(provider_config)
+    _refresh_anthropic_context_cache()
+
+
+_refresh_anthropic_context_cache()

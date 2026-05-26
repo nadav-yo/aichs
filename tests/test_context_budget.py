@@ -1,6 +1,6 @@
 import pytest
 
-from services.compaction import RESERVE_TOKENS
+from services.compaction import compaction_threshold, reserve_tokens
 from services.context_budget import ContextBudget, ContextSegment, format_bytes
 
 
@@ -34,7 +34,11 @@ class TestContextSegment:
 
 class TestContextBudget:
     def _budget(self, segments, window_tokens=10_000):
-        return ContextBudget(segments=segments, window_tokens=window_tokens)
+        return ContextBudget(
+            segments=segments,
+            window_tokens=window_tokens,
+            reserve_tokens=reserve_tokens(window_tokens),
+        )
 
     def test_used_tokens_and_bytes(self):
         budget = self._budget([
@@ -52,8 +56,7 @@ class TestContextBudget:
         budget = self._budget([ContextSegment("x", "hello")], window_tokens=0)
         assert budget.pct == 0.0
 
-    def test_compaction_limit_tokens(self, monkeypatch):
-        monkeypatch.setattr("ui.theme.compaction_threshold_pct", lambda: 90)
-        budget = self._budget([], window_tokens=100_000)
-        expected = int(100_000 * 90 / 100) - RESERVE_TOKENS
-        assert budget.compaction_limit_tokens == expected
+    def test_compaction_limit_tokens(self):
+        window = 100_000
+        budget = self._budget([], window_tokens=window)
+        assert budget.compaction_limit_tokens == compaction_threshold(window)

@@ -38,7 +38,7 @@ Project agent instructions for this repo: [AGENTS.md](AGENTS.md) (loaded into th
 Open a workspace folder, pick a model, and work in one window:
 
 - **Chat** — streaming Markdown, vision, `@file` mentions, edit/resend, branch, queue while busy
-- **Agent** — `read_file`, `edit_file`, `bash`, `search_files`; extension tools; parallel reads; you approve edits (once per chat) and each shell command
+- **Agent** — `read_file`, `edit_file`, `execute`, `search_files`; extension tools; parallel reads; you approve edits (once per chat) and each shell command
 - **Repo** — file tree, syntax-highlighted tabs, git status/diffs, `AGENTS.md` in the system prompt
 - **Context** — usage ring, breakdown, auto-compaction
 - **Extras** — `/` skills, `Cmd+K` palette, themes, export/pin/search history
