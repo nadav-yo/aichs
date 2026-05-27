@@ -53,7 +53,7 @@ Archive candidates should carry enough provenance to be audited later:
 ```json
 {
   "conversation_id": "20260527_101500",
-  "cwd": "C:/Users/nadav/source/repos/aicc",
+  "cwd": "C:/Users/nadav/source/repos/aichs",
   "message_range": [0, 18],
   "created_at": "2026-05-27T10:42:00",
   "kind": "decision",

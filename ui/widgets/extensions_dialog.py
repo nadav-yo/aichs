@@ -203,7 +203,7 @@ class _ApiReferenceTab(QWidget):
         root.addWidget(scroll, 1)
 
         intro = QLabel(
-            "Extensions return structured data. aicc owns the widgets, layout, "
+            "Extensions return structured data. aichs owns the widgets, layout, "
             "and styling, so extension UI stays predictable."
         )
         intro.setWordWrap(True)
@@ -217,7 +217,7 @@ class _ApiReferenceTab(QWidget):
             ),
             (
                 "panel",
-                "Adds a structured read-only dialog rendered by aicc.",
+                "Adds a structured read-only dialog rendered by aichs.",
             ),
             (
                 "Extensions view",

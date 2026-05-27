@@ -58,7 +58,7 @@ def web_fetch(ctx, inputs):
     if not parsed.netloc:
         return "[tool error] url must include a host"
 
-    req = Request(url, headers={"User-Agent": "aicc/extension"})
+    req = Request(url, headers={"User-Agent": "aichs/extension"})
     with urlopen(req, timeout=20) as response:
         raw = response.read(max_chars * 4)
         charset = response.headers.get_content_charset() or "utf-8"

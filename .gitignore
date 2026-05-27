@@ -16,7 +16,7 @@ dist/
 build/
 *.egg-info/
 
-# Secrets / credentials (user settings live in ~/.aicc/, outside this repo)
+# Secrets / credentials (user settings live in ~/.aichs/, outside this repo)
 .env
 .env.*
 *.pem
@@ -37,6 +37,6 @@ settings.local.json
 .DS_Store
 
 # App user data (if accidentally created inside the repo)
-.aicc/settings.json
-.aicc/conversations/
-.aicc/avatars/
+.aichs/settings.json
+.aichs/conversations/
+.aichs/avatars/

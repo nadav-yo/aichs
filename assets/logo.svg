@@ -29,7 +29,7 @@
     fill="#ffffff"
   />
 
-  <!-- Wordmark: AI + CC -->
+  <!-- Wordmark: AI + CHS -->
   <text
     x="144"
     y="88"
@@ -47,7 +47,7 @@
     font-weight="700"
     letter-spacing="3"
     fill="#007AFF"
-  >CC</text>
+  >CHS</text>
 
   <!-- Tagline -->
   <text
@@ -58,5 +58,5 @@
     font-weight="400"
     letter-spacing="0.5"
     fill="#858585"
-  >(AI Chat Companion)</text>
+  >(AI Choding Harness Studio)</text>
 </svg>

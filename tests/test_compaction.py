@@ -32,7 +32,7 @@ def test_reserve_caps_at_default_for_large_window():
     assert keep_recent_tokens(180_000) == 20_000
 
 
-def test_settings_override_reserve_and_keep(isolate_aicc_home):
+def test_settings_override_reserve_and_keep(isolate_aichs_home):
     from config import SETTINGS_PATH
 
     SETTINGS_PATH.write_text(
@@ -44,7 +44,7 @@ def test_settings_override_reserve_and_keep(isolate_aicc_home):
     assert compaction_threshold(20_488) == 12_296
 
 
-def test_settings_accepts_legacy_camel_case_keys(isolate_aicc_home):
+def test_settings_accepts_legacy_camel_case_keys(isolate_aichs_home):
     from config import SETTINGS_PATH
 
     SETTINGS_PATH.write_text(

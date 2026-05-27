@@ -1690,8 +1690,8 @@ class ChatPanel(QWidget):
         row.setContentsMargins(60, 1, 24, 1)
         row.setSpacing(0)
         lbl = QLabel(text)
-        lbl.setObjectName("aicc-tool-notice")
-        lbl.setProperty("aicc-tool-text", text)
+        lbl.setObjectName("aichs-tool-notice")
+        lbl.setProperty("aichs-tool-text", text)
         lbl.setTextFormat(Qt.TextFormat.RichText)
         lbl.setText(_tool_notice_html(text))
         lbl.setWordWrap(True)
@@ -1705,7 +1705,7 @@ class ChatPanel(QWidget):
 
     def _add_notice(self, text: str):
         lbl = QLabel(text)
-        lbl.setObjectName("aicc-center-notice")
+        lbl.setObjectName("aichs-center-notice")
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl.setStyleSheet(center_notice_style())
         self.msg_layout.insertWidget(self.msg_layout.count() - 1, lbl)
@@ -1816,12 +1816,12 @@ class ChatPanel(QWidget):
                     card.apply_appearance()
         for lbl in self.msg_container.findChildren(QLabel):
             name = lbl.objectName()
-            if name == "aicc-tool-notice":
+            if name == "aichs-tool-notice":
                 lbl.setStyleSheet(tool_notice_style())
-                raw = lbl.property("aicc-tool-text")
+                raw = lbl.property("aichs-tool-text")
                 if raw:
                     lbl.setText(_tool_notice_html(str(raw)))
-            elif name == "aicc-center-notice":
+            elif name == "aichs-center-notice":
                 lbl.setStyleSheet(center_notice_style())
 
     def set_cwd(self, cwd: str):

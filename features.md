@@ -31,7 +31,7 @@ Clicking it resumes auto-scroll. Auto-resumes when user scrolls back to the bott
 ## [x] Settings panel
 Gear icon (⚙) at the bottom of the left panel opens a QDialog.
 Fields: Anthropic API Key, OpenAI API Key (password-masked).
-Saved to ~/.aicc/settings.json. Loaded at startup and applied as env vars
+Saved to ~/.aichs/settings.json. Loaded at startup and applied as env vars
 (only if the env var isn't already set externally).
 
 ## [x] Image / vision input
@@ -85,7 +85,7 @@ Send as a text excerpt or base64 for supported types.
 
 ## [x] Custom system prompt
 Editable in Settings with a reset-to-default button.
-Saved to `~/.aicc/settings.json` and passed to `build_system()`.
+Saved to `~/.aichs/settings.json` and passed to `build_system()`.
 
 ## [x] Default model
 Remember last-used or preferred model per provider in `settings.json`.
@@ -171,6 +171,6 @@ concurrently using a thread pool rather than sequentially.
 Significant speedup for read-heavy tasks.
 ## [-] Skills / slash commands
 Type `/` in the composer to open a fuzzy-filtered skill picker.
-Skills live in `assets/skills/*.md` (built-in) and `~/.aicc/skills/*.md` (user).
+Skills live in `assets/skills/*.md` (built-in) and `~/.aichs/skills/*.md` (user).
 Each skill has a name, description, prompt, and optional tool allowlist.
 Selected skill shown as a dismissible chip; prompt replaces system base for that turn.

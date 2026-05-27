@@ -1,6 +1,6 @@
 # Configuration
 
-Settings are stored in `~/.aicc/settings.json` (written by **Settings** in the app).
+Settings are stored in `~/.aichs/settings.json` (written by **Settings** in the app).
 
 | Key | Description |
 |---|---|

@@ -53,7 +53,7 @@ def _provider_title(provider_id: str) -> str:
 
 def _provider_env_var(provider_id: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9]+", "_", provider_id).strip("_").upper()
-    return f"AICC_{cleaned}_API_KEY"
+    return f"AICHS_{cleaned}_API_KEY"
 
 
 def _model_context_window(model: dict) -> int | None:
@@ -474,7 +474,7 @@ class _ProviderDialog(QDialog):
             self.hint.setText(
                 "For custom providers (e.g. Ollama), append @ tokens to each model line "
                 f"(defaults to {custom_default_context_window():,} when omitted). "
-                "Models are saved to ~/.aicc/models.json; API keys stay in settings."
+                "Models are saved to ~/.aichs/models.json; API keys stay in settings."
             )
         else:
             self.models.setPlaceholderText("model-id\nmodel-id = Display Name")
@@ -485,7 +485,7 @@ class _ProviderDialog(QDialog):
             else:
                 self.hint.setText(
                     "OpenAI context limits use built-in defaults. "
-                    "Models are saved to ~/.aicc/models.json; API keys stay in settings."
+                    "Models are saved to ~/.aichs/models.json; API keys stay in settings."
                 )
 
     def _field(self, layout: QVBoxLayout, label: str, widget: QWidget):
@@ -1143,7 +1143,7 @@ class SettingsDialog(QDialog):
     def _page_crew(self, saved: dict) -> QWidget:
         page, layout = self._page_shell(
             "Crew",
-            "Configure aicc and each optional crew member's voice, model, color, and portrait.",
+            "Configure aichs and each optional crew member's voice, model, color, and portrait.",
         )
         self._crew_widgets = {}
         p = palette()
@@ -1156,7 +1156,7 @@ class SettingsDialog(QDialog):
         lead_layout.setSpacing(10)
 
         lead_header = QHBoxLayout()
-        lead_title = QLabel("aicc · Lead agent")
+        lead_title = QLabel("aichs · Lead agent")
         lead_title.setStyleSheet(f"color:{p['TEXT']}; font-weight:bold;")
         lead_header.addWidget(lead_title)
         lead_header.addStretch()
@@ -1174,7 +1174,7 @@ class SettingsDialog(QDialog):
         lead_layout.addWidget(lead_desc)
 
         self.agent_portrait = _PortraitPicker(
-            "agent", "aicc avatar", saved.get("avatar_agent", "agent"), self._styles,
+            "agent", "aichs avatar", saved.get("avatar_agent", "agent"), self._styles,
         )
         lead_layout.addWidget(self.agent_portrait)
 
@@ -1194,7 +1194,7 @@ class SettingsDialog(QDialog):
         self.system_prompt.setMinimumHeight(180)
         lead_layout.addWidget(self.system_prompt, 1)
         lead_layout.addStretch()
-        tabs.addTab(lead_tab, "aicc")
+        tabs.addTab(lead_tab, "aichs")
 
         for member in all_crew():
             cfg = crew_settings(saved, member)

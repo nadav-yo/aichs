@@ -116,7 +116,7 @@ def _message_text(content) -> str:
 
 
 def _prune_leaked_test_conversations() -> None:
-    """Remove c1/First fixture files if pytest ever wrote them to the real ~/.aicc dir."""
+    """Remove c1/First fixture files if pytest ever wrote them to the real ~/.aichs dir."""
     for p in list(CONV_DIR.glob("*.json")):
         try:
             data = json.loads(p.read_text(encoding="utf-8"))

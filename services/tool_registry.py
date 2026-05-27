@@ -339,9 +339,9 @@ def extension_panel_data(
 
 
 def _extension_files(cwd: str | None) -> list[Path]:
-    roots = [Path.home() / ".aicc" / "extensions"]
+    roots = [Path.home() / ".aichs" / "extensions"]
     if cwd:
-        roots.append(Path(cwd) / ".aicc" / "extensions")
+        roots.append(Path(cwd) / ".aichs" / "extensions")
 
     files: list[Path] = []
     seen: set[Path] = set()
@@ -357,7 +357,7 @@ def _extension_files(cwd: str | None) -> list[Path]:
 
 
 def _load_extension_file(registry: ToolRegistry, path: Path) -> None:
-    module_name = f"_aicc_ext_{abs(hash(str(path.resolve())))}"
+    module_name = f"_aichs_ext_{abs(hash(str(path.resolve())))}"
     try:
         spec = importlib.util.spec_from_file_location(module_name, path)
         if spec is None or spec.loader is None:

@@ -7,11 +7,11 @@ from storage.settings import SettingsStore
 
 
 @pytest.fixture
-def settings_store(isolate_aicc_home):
+def settings_store(isolate_aichs_home):
     return SettingsStore()
 
 
-def test_load_save_roundtrip(settings_store, isolate_aicc_home):
+def test_load_save_roundtrip(settings_store, isolate_aichs_home):
     settings_store.save({"theme": "light", "font_size": "large"})
     data = settings_store.load()
     assert data["theme"] == "light"
@@ -38,7 +38,7 @@ def test_apply_saved_overwrites_env(settings_store, monkeypatch):
     assert os.environ["OPENAI_API_KEY"] == "new-key"
 
 
-def test_load_invalid_json_returns_empty(settings_store, isolate_aicc_home):
+def test_load_invalid_json_returns_empty(settings_store, isolate_aichs_home):
     from config import SETTINGS_PATH
 
     SETTINGS_PATH.write_text("{not json", encoding="utf-8")

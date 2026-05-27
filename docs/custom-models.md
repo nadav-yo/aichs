@@ -1,6 +1,6 @@
 # Custom models
 
-aicc ships with Claude and OpenAI models built in. You can add any provider that exposes an **OpenAI-compatible API** by creating `~/.aicc/models.json`.
+aichs ships with Claude and OpenAI models built in. You can add any provider that exposes an **OpenAI-compatible API** by creating `~/.aichs/models.json`.
 
 Custom providers appear automatically in the provider dropdown — no code changes needed.
 
@@ -122,7 +122,7 @@ ollama serve
 
 Ollama listens on `http://localhost:11434` by default.
 
-**4. Add to `~/.aicc/models.json`**
+**4. Add to `~/.aichs/models.json`**
 
 ```json
 {
@@ -147,7 +147,7 @@ Ollama listens on `http://localhost:11434` by default.
 
 No API key needed — `"ollama"` is a placeholder the server ignores.
 
-Set `contextWindow` to the size you configured in Ollama (or in **Settings → Models → Edit provider**). Without it, aicc assumes 100k like cloud OpenAI models.
+Set `contextWindow` to the size you configured in Ollama (or in **Settings → Models → Edit provider**). Without it, aichs assumes 100k like cloud OpenAI models.
 
 > **Tip:** Only list models you have already pulled. Selecting an unpulled model will return an error from the Ollama server.
 
@@ -259,7 +259,7 @@ Works with any CLI tool: `op` (1Password), `bw` (Bitwarden), `pass`, `security` 
 
 ## Full example
 
-A `~/.aicc/models.json` combining multiple providers:
+A `~/.aichs/models.json` combining multiple providers:
 
 ```json
 {

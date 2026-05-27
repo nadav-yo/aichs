@@ -1,14 +1,14 @@
 # Extensions
 
-Extensions let `aicc` load extra tools, slash-command prompts, context snippets,
+Extensions let `aichs` load extra tools, slash-command prompts, context snippets,
 and lifecycle hooks from local Python files.
 
 ## Locations
 
 | Path | Scope |
 |---|---|
-| `~/.aicc/extensions/*.py` | User-global |
-| `.aicc/extensions/*.py` | Project-local |
+| `~/.aichs/extensions/*.py` | User-global |
+| `.aichs/extensions/*.py` | Project-local |
 
 Project-local extensions load after user-global extensions. Tool names must be
 unique.
@@ -125,7 +125,7 @@ Supported hook names:
 ## UI Contributions
 
 Extensions can declare small UI contributions. They return structured data;
-`aicc` owns the actual widgets, layout, and styling.
+`aichs` owns the actual widgets, layout, and styling.
 
 ### Status Badges
 
@@ -246,4 +246,4 @@ Currently unsupported in panel data:
 | arbitrary PyQt widgets |
 | HTML or Markdown rendering |
 
-see [Examples](../.aicc/extensions/)
+see [Examples](../.aichs/extensions/)

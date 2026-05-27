@@ -36,7 +36,7 @@ def test_apply_legacy_provider_context_migrates_provider_default():
 
 
 def test_context_window_tokens_honors_per_model_override(tmp_path, monkeypatch):
-    path = tmp_path / ".aicc" / "models.json"
+    path = tmp_path / ".aichs" / "models.json"
     monkeypatch.setattr(reg, "_MODELS_PATH", path)
     reg.save_user_providers({
         "ollama": {
@@ -52,7 +52,7 @@ def test_context_window_tokens_honors_per_model_override(tmp_path, monkeypatch):
 
 
 def test_context_window_tokens_uses_provider_fallback_for_legacy_json(tmp_path, monkeypatch):
-    path = tmp_path / ".aicc" / "models.json"
+    path = tmp_path / ".aichs" / "models.json"
     monkeypatch.setattr(reg, "_MODELS_PATH", path)
     reg.save_user_providers({
         "ollama": {

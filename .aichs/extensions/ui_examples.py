@@ -84,7 +84,7 @@ def workspace_status_panel(ctx):
 
     return {
         "title": "Workspace Status",
-        "body": "Read-only git status from .aicc/extensions/ui_examples.py.",
+        "body": "Read-only git status from .aichs/extensions/ui_examples.py.",
         "sections": sections,
     }
 
@@ -125,7 +125,7 @@ def chat_context_panel(ctx):
 
     return {
         "title": "Chat Context",
-        "body": "Conversation-aware UI from .aicc/extensions/ui_examples.py.",
+        "body": "Conversation-aware UI from .aichs/extensions/ui_examples.py.",
         "sections": [
             {
                 "heading": "Current conversation",

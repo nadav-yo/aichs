@@ -41,7 +41,7 @@ def test_normalize_model_id_strips_context_suffix():
 
 
 def test_context_window_tokens_honors_per_model_override(tmp_path, monkeypatch):
-    path = tmp_path / ".aicc" / "models.json"
+    path = tmp_path / ".aichs" / "models.json"
     monkeypatch.setattr(reg, "_MODELS_PATH", path)
     reg.save_user_providers({
         "ollama": {
@@ -58,7 +58,7 @@ def test_context_window_tokens_honors_per_model_override(tmp_path, monkeypatch):
 
 
 def test_load_save_user_providers(tmp_path, monkeypatch):
-    path = tmp_path / ".aicc" / "models.json"
+    path = tmp_path / ".aichs" / "models.json"
     monkeypatch.setattr(reg, "_MODELS_PATH", path)
     reg.save_user_providers({
         "local": {
@@ -129,7 +129,7 @@ def test_merge_reorders_partial_builtin_models_and_keeps_unspecified_models():
     ]
 
 
-def test_merge_skips_invalid_api(isolate_aicc_home):
+def test_merge_skips_invalid_api(isolate_aichs_home):
     from config import SETTINGS_PATH
 
     SETTINGS_PATH.write_text(

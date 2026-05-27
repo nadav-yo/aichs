@@ -54,7 +54,7 @@ _PATH_RE  = re.compile(
 def _linkify_paths(html: str) -> str:
     return _PATH_RE.sub(
         lambda m: (
-            f'<code><a class="aicc-file-link" href="aicc-file:{m.group(1)}" '
+            f'<code><a class="aichs-file-link" href="aichs-file:{m.group(1)}" '
             f'style="{markdown_file_link_style()}">'
             f'{m.group(1)}</a></code>'
         ),
@@ -82,7 +82,7 @@ def _linkify_user_text(text: str) -> str:
         is_file_ref = any(ch in path for ch in (".", "/", "\\"))
         if not is_file_ref:
             return f'<span style="{link_style}">{label}</span>'
-        href = html.escape(f"aicc-file:{path}", quote=True)
+        href = html.escape(f"aichs-file:{path}", quote=True)
         return f'<a href="{href}" style="{link_style}">{label}</a>'
 
     parts: list[str] = []
@@ -472,8 +472,8 @@ class MessageBubble(QFrame):
             self.label.setText(_to_html(self._md_source))
 
     def _on_link(self, href: str):
-        if href.startswith("aicc-file:"):
-            self.file_clicked.emit(href[len("aicc-file:"):])
+        if href.startswith("aichs-file:"):
+            self.file_clicked.emit(href[len("aichs-file:"):])
 
     def _context_menu(self, pos):
         menu = QMenu(self)

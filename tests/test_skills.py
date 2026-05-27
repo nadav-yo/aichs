@@ -1,5 +1,5 @@
 def test_load_skill_from_project(workspace):
-    skills_dir = workspace / ".aicc" / "skills"
+    skills_dir = workspace / ".aichs" / "skills"
     skills_dir.mkdir(parents=True)
     (skills_dir / "review.md").write_text(
         "---\nname: review\ndescription: Code review\ntools: read_file, search_files\n---\n"
@@ -15,7 +15,7 @@ def test_load_skill_from_project(workspace):
 
 
 def test_skill_without_frontmatter_ignored(workspace):
-    skills_dir = workspace / ".aicc" / "skills"
+    skills_dir = workspace / ".aichs" / "skills"
     skills_dir.mkdir(parents=True)
     (skills_dir / "bad.md").write_text("no frontmatter\n", encoding="utf-8")
     from services.skills import load_all

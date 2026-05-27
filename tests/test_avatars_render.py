@@ -19,5 +19,5 @@ def test_avatar_label_widget(qapp):
     assert label.pixmap() is not None or label.text() != ""
 
 
-def test_persist_missing_file_returns_role(isolate_aicc_home):
+def test_persist_missing_file_returns_role(isolate_aichs_home):
     assert persist_portrait(str(Path("nope.png")), "user") == "user"

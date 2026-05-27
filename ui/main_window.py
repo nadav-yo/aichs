@@ -17,7 +17,7 @@ from ui.widgets.command_palette import CommandPalette
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AICC")
+        self.setWindowTitle("AICHS")
 
         self._settings = SettingsStore()
         saved = self._settings.load()

@@ -20,21 +20,21 @@ def test_palette_dark_and_light():
     assert palette("light")["BG"] != palette("dark")["BG"]
 
 
-def test_current_theme_from_settings(isolate_aicc_home):
+def test_current_theme_from_settings(isolate_aichs_home):
     from config import SETTINGS_PATH
 
     SETTINGS_PATH.write_text(json.dumps({"theme": "light"}), encoding="utf-8")
     assert current_theme() == "light"
 
 
-def test_current_theme_invalid_falls_back(isolate_aicc_home):
+def test_current_theme_invalid_falls_back(isolate_aichs_home):
     from config import SETTINGS_PATH
 
     SETTINGS_PATH.write_text(json.dumps({"theme": "neon"}), encoding="utf-8")
     assert current_theme() in ("dark", "light")
 
 
-def test_compaction_threshold_clamped(isolate_aicc_home):
+def test_compaction_threshold_clamped(isolate_aichs_home):
     from config import SETTINGS_PATH
 
     SETTINGS_PATH.write_text(json.dumps({"compaction_threshold_pct": 10}), encoding="utf-8")

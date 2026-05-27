@@ -1,4 +1,4 @@
-"""Model registry — loads built-in providers and merges ~/.aicc/models.json on top.
+"""Model registry - loads built-in providers and merges ~/.aichs/models.json on top.
 
 Public API
 ----------
@@ -24,7 +24,7 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
-_MODELS_PATH = Path.home() / ".aicc" / "models.json"
+_MODELS_PATH = Path.home() / ".aichs" / "models.json"
 _MODEL_ID_CONTEXT_SUFFIX = re.compile(r"\s@\s*\d+\s*$")
 
 _BUILTIN: dict = {
@@ -118,11 +118,11 @@ def resolve_api_key(spec: str) -> str:
                 spec[1:], shell=True, capture_output=True, text=True, timeout=10,
             )
             if result.returncode != 0:
-                warnings.warn(f"aicc: API key command failed ({spec[1:]!r}): {result.stderr.strip()}")
+                warnings.warn(f"aichs: API key command failed ({spec[1:]!r}): {result.stderr.strip()}")
                 return ""
             return result.stdout.strip()
         except Exception as exc:
-            warnings.warn(f"aicc: API key command error: {exc}")
+            warnings.warn(f"aichs: API key command error: {exc}")
             return ""
     env_var = api_key_env_var(spec)
     if env_var:
@@ -139,17 +139,17 @@ def _load_user_providers() -> dict:
         data = json.loads(_MODELS_PATH.read_text(errors="replace"))
         return data.get("providers", {})
     except Exception as exc:
-        warnings.warn(f"aicc: could not parse ~/.aicc/models.json: {exc}")
+        warnings.warn(f"aichs: could not parse ~/.aichs/models.json: {exc}")
         return {}
 
 
 def load_user_providers() -> dict:
-    """Return provider definitions from ~/.aicc/models.json."""
+    """Return provider definitions from ~/.aichs/models.json."""
     return copy.deepcopy(_load_user_providers())
 
 
 def save_user_providers(providers: dict) -> None:
-    """Persist provider definitions to ~/.aicc/models.json."""
+    """Persist provider definitions to ~/.aichs/models.json."""
     _MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)
     if providers:
         _MODELS_PATH.write_text(json.dumps({"providers": providers}, indent=2))
@@ -170,7 +170,7 @@ def _merge(builtin: dict, user: dict) -> dict:
         user_models  = ucfg.get("models", [])
 
         if api not in _VALID_APIS:
-            warnings.warn(f"aicc: unknown api type {api!r} for provider {name!r} — skipping")
+            warnings.warn(f"aichs: unknown api type {api!r} for provider {name!r} — skipping")
             continue
 
         if name in merged:
@@ -235,7 +235,7 @@ def _build(providers: dict) -> tuple[dict, dict, dict, dict]:
             mid = m["id"]
             if mid in model_provider:
                 warnings.warn(
-                    f"aicc: model {mid!r} already registered under "
+                    f"aichs: model {mid!r} already registered under "
                     f"{model_provider[mid]!r}, overriding with {provider_id!r}"
                 )
             ids.append(mid)
@@ -335,7 +335,7 @@ def context_window_tokens(model_id: str) -> int:
 
 
 def reload() -> None:
-    """Reload built-ins plus ~/.aicc/models.json, preserving public dict objects."""
+    """Reload built-ins plus ~/.aichs/models.json, preserving public dict objects."""
     global _providers
     _providers = _merge(_BUILTIN, _load_user_providers())
     models, model_provider, model_config, provider_config = _build(_providers)

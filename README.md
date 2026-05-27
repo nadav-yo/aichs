@@ -1,15 +1,15 @@
-# aicc — AI Coding Companion
+# aichs - AI Choding Harness Studio
 
-A **minimal** desktop agent for the repository on your machine: chat, an approval-gated tool loop, git, and an adaptable environment that supports custom extensions—not a full IDE.
+A **minimal** desktop agent studio for the repository on your machine: chat, an approval-gated tool loop, git, and an adaptable environment that supports custom extensions - not a full IDE.
 
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
-![Tests](https://github.com/nadav-yo/aicc/actions/workflows/tests.yml/badge.svg)
+![Tests](https://github.com/nadav-yo/aichs/actions/workflows/tests.yml/badge.svg)
 
 ## Quick start
 
 ```bash
-git clone https://github.com/nadav-yo/aicc
-cd aicc
+git clone https://github.com/nadav-yo/aichs
+cd aichs
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
@@ -29,7 +29,7 @@ Run the **full** suite from the repo root for the real coverage number. If you r
 
 CI enforces **≥90%** line coverage (`pytest -q --cov-fail-under=90`); the full suite currently runs **~91%+**, leaving headroom below the gate. For a quick local check without coverage: `pytest --no-cov`.
 
-CI runs on Ubuntu and Windows ([Tests workflow](https://github.com/nadav-yo/aicc/actions/workflows/tests.yml)). Git-dependent tests skip if `git` is unavailable. Large Qt widgets (`chat_panel`, `main_window`, …) are not in the coverage gate yet.
+CI runs on Ubuntu and Windows ([Tests workflow](https://github.com/nadav-yo/aichs/actions/workflows/tests.yml)). Git-dependent tests skip if `git` is unavailable. Large Qt widgets (`chat_panel`, `main_window`, …) are not in the coverage gate yet.
 
 Project agent instructions for this repo: [AGENTS.md](AGENTS.md) (loaded into the app when this folder is the workspace).
 
@@ -45,6 +45,28 @@ Open a workspace folder, pick a model, and work in one window:
 
 Paths stay inside the workspace for read/search. Shell runs as your user—not a sandbox.
 
+## FAQ
+
+### What does aichs stand for?
+
+**AI Choding Harness Studio.** It is also a play on the Hebrew word "ichs" (`איכס`). The name is a little cursed on purpose.
+
+### Why do I need aichs when I already have Cursor, Claude Code, Codex, or another agent tool?
+
+You probably do not. Those tools are wonderful. aichs is for when you want a small, local, hackable agent workspace that is shaped around your own habits.
+
+### Is aichs trying to replace those tools?
+
+No. It is closer to a personal workbench: one window, your repo, your tools, your prompts, your extensions, your approvals. Like the old "this is mine" line, that is the point.
+
+### Can I contribute something?
+
+Very much. Please do. Small fixes, weird ideas, extensions, docs, and sharp opinions are all welcome.
+
+### Does the S feel forced?
+
+Yes. It is.
+
 ## Documentation
 
 | Topic | |
@@ -58,4 +80,4 @@ Paths stay inside the workspace for read/search. Shell runs as your user—not a
 
 ## License
 
-Copyright © 2026 AI Coding Companion. [MIT License](https://opensource.org/licenses/MIT).
+Copyright © 2026 AI Choding Harness Studio. [MIT License](https://opensource.org/licenses/MIT).

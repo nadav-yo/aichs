@@ -189,7 +189,7 @@ def markdown_css(font_pt: int | None = None, theme: str | None = None) -> str:
         f"body {{ margin:0; padding:0; color:{p['BUBBLE_AI_TEXT']}; font-size:{fs}px;"
         f"line-height:1.58; font-family:{FONT_FAMILY}; }}"
         f"a {{ color:{link}; text-decoration:none; }}"
-        f"a.aicc-file-link {{ color:{file_link}; text-decoration:none; }}"
+        f"a.aichs-file-link {{ color:{file_link}; text-decoration:none; }}"
         f"code {{ background:{code_bg}; border-radius:4px;"
         f"padding:1px 4px; color:{code_fg}; font-family:{MONO_FONT_CSS};"
         f"font-size:{max(10, fs - 1)}px; }}"

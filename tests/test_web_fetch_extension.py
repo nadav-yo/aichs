@@ -3,8 +3,8 @@ from pathlib import Path
 
 
 def _load_web_fetch_module():
-    path = Path(__file__).parents[1] / ".aicc" / "extensions" / "web_fetch.py"
-    spec = importlib.util.spec_from_file_location("aicc_test_web_fetch", path)
+    path = Path(__file__).parents[1] / ".aichs" / "extensions" / "web_fetch.py"
+    spec = importlib.util.spec_from_file_location("aichs_test_web_fetch", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

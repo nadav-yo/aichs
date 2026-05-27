@@ -7,7 +7,7 @@ import pytest
 
 
 def write_extension(workspace: Path, filename: str, source: str) -> Path:
-    ext_dir = workspace / ".aicc" / "extensions"
+    ext_dir = workspace / ".aichs" / "extensions"
     ext_dir.mkdir(parents=True, exist_ok=True)
     path = ext_dir / filename
     path.write_text(textwrap.dedent(source).strip() + "\n", encoding="utf-8")
@@ -25,7 +25,7 @@ def qapp():
 
 
 @pytest.fixture
-def conv_dir(monkeypatch, tmp_path, isolate_aicc_home):
+def conv_dir(monkeypatch, tmp_path, isolate_aichs_home):
     path = tmp_path / "conversations"
     path.mkdir()
     monkeypatch.setattr("config.CONV_DIR", path)
@@ -41,12 +41,12 @@ def store(conv_dir):
 
 
 @pytest.fixture(autouse=True)
-def isolate_aicc_home(monkeypatch, tmp_path):
-    """Keep extension loading deterministic (ignore real ~/.aicc/extensions)."""
+def isolate_aichs_home(monkeypatch, tmp_path):
+    """Keep extension loading deterministic (ignore real ~/.aichs/extensions)."""
     home = tmp_path / "fake_home"
     home.mkdir()
     monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
-    settings_dir = home / ".aicc"
+    settings_dir = home / ".aichs"
     settings_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr("config.SETTINGS_PATH", settings_dir / "settings.json")
     monkeypatch.setattr("config.CONV_DIR", settings_dir / "conversations")

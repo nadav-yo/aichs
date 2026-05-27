@@ -75,5 +75,5 @@ def install_caption_sync(app) -> None:
 
     filt = _CaptionFilter(app)
     app.installEventFilter(filt)
-    app._aicc_caption_filter = filt  # keep alive
+    app._aichs_caption_filter = filt  # keep alive
     _filter_installed = True

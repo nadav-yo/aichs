@@ -303,7 +303,7 @@ def _register_builtin_tools(registry: ToolRegistry) -> None:
     registry.tool(
         name="search_project_chats",
         description=(
-            "Search saved aicc conversations for this project and return compact, "
+            "Search saved aichs conversations for this project and return compact, "
             "dated snippets. Read-only memory lookup; use only when past discussion "
             "or decisions are relevant."
         ),

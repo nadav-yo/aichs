@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-_USER_DIR = Path.home() / ".aicc" / "skills"
+_USER_DIR = Path.home() / ".aichs" / "skills"
 
 _FRONT_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)", re.DOTALL)
 
@@ -18,15 +18,15 @@ class Skill:
 
 
 def load_all(cwd: str | None = None) -> list[Skill]:
-    """Return skills from user-global and project-local .aicc/skills/.
+    """Return skills from user-global and project-local .aichs/skills/.
 
-    Load order: user-global (~/.aicc/skills/) then project-local (.aicc/skills/
+    Load order: user-global (~/.aichs/skills/) then project-local (.aichs/skills/
     in cwd). Later entries override earlier ones with the same name.
     """
     skills: dict[str, Skill] = {}
     dirs = [_USER_DIR]
     if cwd:
-        dirs.append(Path(cwd) / ".aicc" / "skills")
+        dirs.append(Path(cwd) / ".aichs" / "skills")
     for directory in dirs:
         if not directory.exists():
             continue
