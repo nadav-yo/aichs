@@ -62,6 +62,7 @@ def test_parse_extension_command(workspace_with_extension):
     assert cmd is not None
     assert cmd.name == "demo_cmd"
     assert cmd.source == "extension"
+    assert cmd.executable is False
 
 
 def test_parse_extension_command_guards(workspace_with_extension):
@@ -76,3 +77,25 @@ def test_extension_commands_sorted_after_builtins(workspace_with_extension):
     builtin_idx = next(i for i, c in enumerate(commands) if c.name == "compact")
     ext_idx = next(i for i, c in enumerate(commands) if c.name == "demo_cmd")
     assert builtin_idx < ext_idx
+
+
+def test_executable_extension_command_metadata(workspace):
+    from tests.conftest import write_extension
+
+    write_extension(
+        workspace,
+        "runtime.py",
+        """
+        def register(registry):
+            registry.command(
+                name="continue",
+                description="Runtime continuation",
+                execute=lambda ctx, args: "ok",
+                capabilities=["runtime_control"],
+            )
+        """,
+    )
+    cmd = parse_extension_command("/continue status", str(workspace))
+    assert cmd is not None
+    assert cmd.executable is True
+    assert cmd.capabilities == ["runtime_control"]

@@ -75,6 +75,7 @@ class MessageInput(QTextEdit):
     picker_next         = pyqtSignal()
     picker_prev         = pyqtSignal()
     picker_confirm      = pyqtSignal()
+    picker_complete     = pyqtSignal()
     mention_next        = pyqtSignal()
     mention_prev        = pyqtSignal()
     mention_confirm     = pyqtSignal()
@@ -168,6 +169,19 @@ class MessageInput(QTextEdit):
         cursor.insertText(prefix + token + suffix)
         self.setTextCursor(cursor)
 
+    def complete_slash_command(self, name: str):
+        text = self.toPlainText()
+        leading = len(text) - len(text.lstrip())
+        body = text[leading:]
+        if not body.startswith("/"):
+            return
+        parts = body[1:].split(maxsplit=1)
+        suffix = f" {parts[1]}" if len(parts) > 1 else " "
+        self.setPlainText(f"{text[:leading]}/{name}{suffix}")
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.setTextCursor(cursor)
+
     def keyPressEvent(self, event):
         if self._in_mention_mode:
             key = event.key()
@@ -177,6 +191,10 @@ class MessageInput(QTextEdit):
                 return
             if key == Qt.Key.Key_Down:
                 self.mention_next.emit()
+                event.accept()
+                return
+            if key == Qt.Key.Key_Tab:
+                self.mention_confirm.emit()
                 event.accept()
                 return
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (
@@ -201,9 +219,17 @@ class MessageInput(QTextEdit):
                 self.picker_next.emit()
                 event.accept()
                 return
+            if key == Qt.Key.Key_Tab:
+                self.picker_complete.emit()
+                event.accept()
+                return
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (
                 event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier)
             ):
+                if _slash_has_args(self.toPlainText()):
+                    event.accept()
+                    self.send_requested.emit()
+                    return
                 self.picker_confirm.emit()
                 event.accept()
                 return
@@ -477,3 +503,11 @@ def _scaled_for_inline(image: QImage) -> QImage:
         Qt.AspectRatioMode.KeepAspectRatio,
         Qt.TransformationMode.SmoothTransformation,
     )
+
+
+def _slash_has_args(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped.startswith("/"):
+        return False
+    parts = stripped[1:].split(maxsplit=1)
+    return len(parts) > 1 and bool(parts[1].strip())

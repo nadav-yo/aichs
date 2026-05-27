@@ -3,6 +3,9 @@ from urllib.request import Request, urlopen
 from urllib.parse import urlparse
 
 
+EXTENSION_DESCRIPTION = "Adds an approved web_fetch tool for reading public web pages into the model context."
+
+
 class TextExtractor(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -25,6 +28,7 @@ class TextExtractor(HTMLParser):
 
 
 def register(registry):
+    registry.metadata(description=EXTENSION_DESCRIPTION)
     registry.tool(
         name="web_fetch",
         description="Fetch a web page and return readable text with its source URL.",

@@ -8,6 +8,7 @@ from services.compaction import (
     _find_cut_point,
     can_compact,
     compact,
+    compact_with_result,
     compaction_threshold,
     keep_recent_tokens,
     reserve_tokens,
@@ -141,6 +142,49 @@ def test_compact_replaces_prefix(monkeypatch):
     assert "Files, symbols, commands, tests" in call.call_args.args[1]
     assert out[0]["content"].startswith("[Conversation summary]")
     assert len(out) < len(messages)
+
+
+def test_compact_with_result_includes_proof():
+    messages = _msgs(4, size=20)
+    with patch("services.compaction._call_model", return_value="Summary text."):
+        result = compact_with_result(
+            "claude-sonnet-4-6",
+            messages,
+            force=True,
+            source="test-extension",
+        )
+    assert result.status == "compacted"
+    assert result.cut_index == 2
+    assert result.proof["version"] == "aicc-compaction/v1"
+    assert result.proof["source"] == "test-extension"
+    assert result.proof["summary_input_sha256"]
+
+
+def test_compact_with_result_validates_ledger():
+    messages = _msgs(4, size=20)
+    ledger = {
+        "version": "aicc-continuation/v1",
+        "task": "Keep working",
+        "done_when": "Done",
+        "forbid": [],
+        "established": [{"claim": "A"}],
+        "learned": [],
+        "open": [],
+        "next": ["Continue"],
+    }
+    import json
+
+    with patch("services.compaction._call_model", return_value=json.dumps(ledger)):
+        result = compact_with_result("claude-sonnet-4-6", messages, force=True, ledger=True)
+    assert result.artifact == ledger
+    assert "[Continuation ledger]" in result.summary
+
+
+def test_compact_with_result_rejects_invalid_ledger():
+    messages = _msgs(4, size=20)
+    with patch("services.compaction._call_model", return_value='{"version": "wrong"}'):
+        with pytest.raises(ValueError, match="invalid continuation ledger"):
+            compact_with_result("claude-sonnet-4-6", messages, force=True, ledger=True)
 
 
 def test_compact_force_replaces_small_prefix():

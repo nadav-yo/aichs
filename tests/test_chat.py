@@ -35,6 +35,16 @@ def test_active_task_preview_skips_tool_result_turns():
     assert _active_task_preview(history) == "summarize docs and compare skills"
 
 
+def test_active_task_preview_skips_runtime_synthetic_messages():
+    history = [
+        {"role": "user", "content": "read missing file"},
+        {"role": "user", "content": "guard instruction", "synthetic": "extension"},
+        {"role": "user", "content": "resume", "synthetic": "extension_resume"},
+        {"role": "user", "content": "anchor", "synthetic": "active_task"},
+    ]
+    assert _active_task_preview(history) == "read missing file"
+
+
 def test_chat_thread_filters_tools(workspace, qapp):
     thread = ChatThread(
         "claude-sonnet-4-6",

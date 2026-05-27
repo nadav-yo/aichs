@@ -12,6 +12,8 @@ class SlashCommand:
     prompt: str = ""
     tools: list[str] | None = None
     source: str = "builtin"
+    executable: bool = False
+    capabilities: list[str] | None = None
 
 
 BUILTIN_COMMANDS: list[SlashCommand] = [
@@ -42,6 +44,8 @@ def load_all_commands(cwd: str | None = None) -> list[SlashCommand]:
             prompt=cmd.prompt,
             tools=cmd.tools,
             source=cmd.source,
+            executable=cmd.executable,
+            capabilities=list(cmd.capabilities),
         )
         for cmd in extension_commands(cwd)
     )
@@ -64,6 +68,8 @@ def parse_extension_command(text: str, cwd: str | None = None) -> SlashCommand |
         prompt=cmd.prompt,
         tools=cmd.tools,
         source=cmd.source,
+        executable=cmd.executable,
+        capabilities=list(cmd.capabilities),
     )
 
 

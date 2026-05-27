@@ -3,6 +3,10 @@ import copy
 
 from services.crew import crew_name_from_metadata
 
+_HIDDEN_SYNTHETIC_MESSAGES = {"tool_results", "active_task", "extension", "extension_resume"}
+_TRANSIENT_SYNTHETIC_MESSAGES = {"active_task", "extension", "extension_resume"}
+_ACTIVE_TASK_PREFIX = "Continue the active user task."
+
 
 def build_user_content(text: str, images: list[dict], files: list[dict] | None = None) -> str | list:
     files = files or []
@@ -40,6 +44,28 @@ def compact_ephemeral_attachments(messages: list[dict]) -> list[dict]:
             continue
         msg["content"] = _compact_ephemeral_blocks(content)
     return compacted
+
+
+def prepare_for_storage(messages: list[dict]) -> list[dict]:
+    """Return persisted history without runtime-only instruction messages."""
+    prepared = []
+    for msg in copy.deepcopy(messages):
+        if _is_transient_runtime_message(msg):
+            continue
+        content = msg.get("content")
+        if msg.get("synthetic") == "tool_results" and isinstance(content, list):
+            msg["content"] = [
+                block for block in content
+                if not _is_internal_text_block(block)
+            ]
+        prepared.append(msg)
+    return compact_ephemeral_attachments(prepared)
+
+
+def is_visible_message(msg: dict) -> bool:
+    if msg.get("role") == "tool":
+        return False
+    return str(msg.get("synthetic") or "") not in _HIDDEN_SYNTHETIC_MESSAGES
 
 
 def content_text(content) -> str:
@@ -120,6 +146,19 @@ def _compact_ephemeral_blocks(blocks: list) -> list:
         else:
             out.append(block)
     return out
+
+
+def _is_transient_runtime_message(msg: dict) -> bool:
+    return str(msg.get("synthetic") or "") in _TRANSIENT_SYNTHETIC_MESSAGES
+
+
+def _is_internal_text_block(block: object) -> bool:
+    if not isinstance(block, dict) or block.get("type") != "text":
+        return False
+    if block.get("internal") or block.get("synthetic"):
+        return True
+    text = str(block.get("text") or "")
+    return text.startswith(_ACTIVE_TASK_PREFIX)
 
 
 def image_blocks(content) -> list[dict]:

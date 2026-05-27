@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 
 from config import CONV_DIR
+from services.content import is_visible_message
 
 
 class ConversationStore:
@@ -93,6 +94,8 @@ class ConversationStore:
         except Exception:
             return False
         for msg in data.get("messages", []):
+            if not is_visible_message(msg):
+                continue
             if q in _message_text(msg.get("content", "")).casefold():
                 return True
         return False

@@ -3,7 +3,11 @@ from pathlib import Path
 from services.git_status import is_git_repo, list_file_changes, run_git
 
 
+EXTENSION_DESCRIPTION = "Shows status badges and panels for workspace state and current chat context."
+
+
 def register(registry):
+    registry.metadata(description=EXTENSION_DESCRIPTION)
     registry.status_badge(name="workspace_status", provider=workspace_status_badge)
     registry.panel(
         name="workspace_status",

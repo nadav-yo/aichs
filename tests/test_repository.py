@@ -109,10 +109,12 @@ class TestConversationStore:
     def test_matches_search_title_and_body(self, store):
         path = store.save("x", _sample_conv("x", messages=[
             {"role": "user", "content": "find the needle"},
+            {"role": "user", "content": "hidden runtime", "synthetic": "extension"},
         ]))
         _, summary = store.list_all()[0]
         assert store.matches_search(path, summary, "needle")
         assert store.matches_search(path, summary, "First")
+        assert not store.matches_search(path, summary, "runtime")
         assert not store.matches_search(path, summary, "missing")
 
 

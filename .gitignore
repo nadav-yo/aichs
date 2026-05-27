@@ -40,3 +40,5 @@ settings.local.json
 .aichs/settings.json
 .aichs/conversations/
 .aichs/avatars/
+.aichs/extensions.disabled.json
+.aichs/state/

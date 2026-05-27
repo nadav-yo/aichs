@@ -22,6 +22,7 @@ from services.crew import (
     get_crew_member,
 )
 from services.crew_context import crew_context_window
+from services.compaction import compact_with_result
 from services.model_registry import get_model_config, resolve_api_key
 from services.content import content_preview, prepare_for_anthropic, prepare_for_openai
 from services.tool_policy import ConversationToolPolicy, ToolApprovalBus, resolve_path
@@ -53,6 +54,7 @@ class ChatThread(QThread):
     crew_chunk   = pyqtSignal(dict, str)
     crew_done    = pyqtSignal(dict, str)
     crew_error   = pyqtSignal(dict, str)
+    runtime_event = pyqtSignal(dict)
     done        = pyqtSignal(str)
     error       = pyqtSignal(str)
 
@@ -196,16 +198,8 @@ class ChatThread(QThread):
             if self._cancel.is_set():
                 break
             turn_text = ""
-            request_ctx = HookContext(
-                event="before_model_request",
-                cwd=self.cwd,
-                model=self.model,
-                system=self.system,
-                history=self.history,
-            )
-            run_extension_hooks(self.cwd, "before_model_request", request_ctx)
-            self.system = request_ctx.system
-            self.history = request_ctx.history
+            if not self._run_runtime_hook("before_model_request"):
+                break
             with client.messages.stream(
                 model=self.model,
                 max_tokens=4096,
@@ -255,6 +249,8 @@ class ChatThread(QThread):
                     "content": self._tool_results_with_active_task(tool_results),
                     "synthetic": "tool_results",
                 })
+                if not self._run_runtime_hook("before_next_model_request"):
+                    break
             else:
                 full_text += turn_text
                 break
@@ -269,7 +265,6 @@ class ChatThread(QThread):
         if cfg.base_url:
             kwargs["base_url"] = cfg.base_url
         client    = OpenAI(**kwargs)
-        msgs      = [{"role": "system", "content": self.system}] + prepare_for_openai(self.history)
         full_text = ""
         self.last_usage = {}
 
@@ -278,16 +273,9 @@ class ChatThread(QThread):
                 break
             turn_text = ""
             pending: dict[int, dict] = {}
-            request_ctx = HookContext(
-                event="before_model_request",
-                cwd=self.cwd,
-                model=self.model,
-                system=self.system,
-                history=msgs,
-            )
-            run_extension_hooks(self.cwd, "before_model_request", request_ctx)
-            self.system = request_ctx.system
-            msgs = request_ctx.history
+            if not self._run_runtime_hook("before_model_request"):
+                break
+            msgs = [{"role": "system", "content": self.system}] + prepare_for_openai(self.history)
             if msgs and msgs[0].get("role") == "system":
                 msgs[0]["content"] = self.system
 
@@ -339,23 +327,95 @@ class ChatThread(QThread):
                         for s in pending.values()
                     ],
                 }
-                msgs.append(assistant_msg)
+                self.history.append(assistant_msg)
                 ordered = sorted(pending.items())
                 tools = [(s["id"], s["name"], json.loads(s["args"])) for _, s in ordered]
                 for tool_id, name, output in self._execute_tools(tools):
-                    msgs.append({
+                    self.history.append({
                         "role":         "tool",
                         "tool_call_id": tool_id,
                         "content":      output,
                     })
                 anchor = self._active_task_anchor()
                 if anchor:
-                    msgs.append({"role": "user", "content": anchor})
+                    self.history.append({"role": "user", "content": anchor, "synthetic": "active_task"})
+                if not self._run_runtime_hook("before_next_model_request"):
+                    break
             else:
                 full_text += turn_text
                 break
 
         return full_text
+
+    def _run_runtime_hook(self, event: str) -> bool:
+        ctx = HookContext(
+            event=event,
+            cwd=self.cwd,
+            model=self.model,
+            system=self.system,
+            history=self.history,
+        )
+        run_extension_hooks(self.cwd, event, ctx)
+        self.system = ctx.system
+        self.history = ctx.history
+        return self._apply_runtime_directives(ctx)
+
+    def _apply_runtime_directives(self, ctx: HookContext) -> bool:
+        for directive in ctx.directives:
+            action = directive.action
+            params = dict(directive.params)
+            if action == "show_notice":
+                self.runtime_event.emit({"type": "notice", "text": str(params.get("text") or "")})
+            elif action == "enqueue_message":
+                text = str(params.get("text") or "").strip()
+                if text:
+                    self.history.append({"role": "user", "content": text, "synthetic": "extension"})
+            elif action in {"compact_now", "compact_and_resume"}:
+                if not self._apply_compaction_directive(action, params):
+                    return False
+            elif action == "block":
+                self.runtime_event.emit({
+                    "type": "blocked",
+                    "text": str(params.get("text") or params.get("reason") or "Blocked by extension."),
+                })
+                return False
+        return not self._cancel.is_set()
+
+    def _apply_compaction_directive(self, action: str, params: dict) -> bool:
+        try:
+            result = compact_with_result(
+                self.model,
+                self.history,
+                force=bool(params.get("force", False)),
+                source=str(params.get("source") or "extension"),
+                ledger=bool(params.get("ledger", False)),
+            )
+        except Exception as exc:
+            self.runtime_event.emit({
+                "type": "compaction_failed",
+                "action": action,
+                "error": str(exc),
+            })
+            return False
+        self.runtime_event.emit({
+            "type": "compaction",
+            "action": action,
+            "status": result.status,
+            "proof": result.proof,
+            "artifact": result.artifact,
+        })
+        if result.status == "compacted":
+            self.history = list(result.messages)
+        if action == "compact_and_resume":
+            resume_prompt = str(params.get("resume_prompt") or "").strip()
+            if not resume_prompt:
+                resume_prompt = "Continue the active task from the compacted context."
+            self.history.append({
+                "role": "user",
+                "content": resume_prompt,
+                "synthetic": "extension_resume",
+            })
+        return True
 
     def _execute_tools(self, tools: list[tuple[str, str, dict]]) -> list[tuple[str, str, str]]:
         """Run tool calls, parallelizing consecutive read/search tools."""
@@ -622,7 +682,12 @@ class ChatThread(QThread):
         anchor = self._active_task_anchor()
         if not anchor:
             return tool_results
-        return tool_results + [{"type": "text", "text": anchor}]
+        return tool_results + [{
+            "type": "text",
+            "text": anchor,
+            "synthetic": "active_task",
+            "internal": True,
+        }]
 
     def _active_task_anchor(self) -> str:
         task = _active_task_preview(self.history)
@@ -653,7 +718,7 @@ def _active_task_preview(history: list[dict]) -> str:
     for msg in reversed(history):
         if msg.get("role") != "user":
             continue
-        if msg.get("synthetic") == "tool_results":
+        if msg.get("synthetic"):
             continue
         content = msg.get("content", "")
         if _is_tool_result_only(content):

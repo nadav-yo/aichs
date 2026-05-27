@@ -79,6 +79,12 @@ class SkillPicker(QFrame):
         if item:
             self._on_activated(item)
 
+    def current(self) -> tuple[str, object] | None:
+        item = self._list.currentItem()
+        if not item:
+            return None
+        return item.data(_ROLE_KIND), item.data(_ROLE_DATA)
+
     def count(self) -> int:
         return self._list.count()
 

@@ -37,3 +37,16 @@ def test_apply_windows_caption_skips_non_qwidget_window_like_object(monkeypatch)
     widget = MagicMock(isWindow=lambda: True)
     apply_windows_caption(widget)
     widget.winId.assert_not_called()
+
+
+def test_apply_windows_caption_skips_plain_qwidget_window(monkeypatch, qapp):
+    from PyQt6.QtWidgets import QWidget
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    widget = QWidget()
+    widget.setWindowTitle("Plain")
+    widget.show()
+
+    apply_windows_caption(widget)
+
+    assert widget.isWindow()

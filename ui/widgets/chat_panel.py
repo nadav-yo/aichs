@@ -36,13 +36,23 @@ from services.crew_context import crew_context_window
 from services.tool_policy import ConversationToolPolicy, ToolApprovalBus
 from ui.widgets.tool_approval_dialog import handle_pending_approval
 from services.compaction import CompactionThread, should_compact, can_compact, _estimate_tokens
-from services.content import build_user_content, compact_ephemeral_attachments, content_preview
+from services.content import (
+    build_user_content,
+    content_preview,
+    is_visible_message,
+    prepare_for_storage,
+)
 from services.auto_title import TitleThread
 from services.context_budget import analyze_context
 from services.model_registry import api_key_env_var, get_provider_config, load_user_providers
 from services.workspace import build_system
 from services.export import export_conversation_dialog
-from services.tool_registry import extension_errors, extension_overview
+from services.tool_registry import (
+    RuntimeCommandApi,
+    extension_errors,
+    extension_overview,
+    run_extension_command,
+)
 from ui.theme import (
     palette, input_bar_style, separator_color,
     send_button_style, stop_button_style, floating_button_style,
@@ -408,6 +418,7 @@ class ChatPanel(QWidget):
         self.composer.input.picker_next.connect(lambda: self._skill_picker and self._skill_picker.select_next())
         self.composer.input.picker_prev.connect(lambda: self._skill_picker and self._skill_picker.select_prev())
         self.composer.input.picker_confirm.connect(lambda: self._skill_picker and self._skill_picker.confirm())
+        self.composer.input.picker_complete.connect(self._complete_slash_selection)
         self.composer.input.mention_changed.connect(self._on_file_mention_changed)
         self.composer.input.mention_next.connect(lambda: self._file_picker and self._file_picker.select_next())
         self.composer.input.mention_prev.connect(lambda: self._file_picker and self._file_picker.select_prev())
@@ -591,7 +602,8 @@ class ChatPanel(QWidget):
         self.new_conversation()
         self.conv_id   = data["id"]
         self.conv_data = data
-        self.history   = data["messages"]
+        self.history   = prepare_for_storage(data.get("messages", []))
+        self.conv_data["messages"] = self.history
         self._set_model(data.get("model", ""))
         self._runtime_for(self.conv_id)
         self._update_queue_ui()
@@ -625,6 +637,8 @@ class ChatPanel(QWidget):
         if self._visible_run():
             return
         for i in range(len(self.history) - 1, -1, -1):
+            if not is_visible_message(self.history[i]):
+                continue
             if self.history[i]["role"] != "user":
                 continue
             bubble = self._bubbles.get(i)
@@ -651,7 +665,11 @@ class ChatPanel(QWidget):
         export_conversation_dialog(data, parent=self.window())
 
     def show_extensions(self):
-        ExtensionsDialog(extension_overview(self.cwd), parent=self.window()).exec()
+        ExtensionsDialog(
+            self.cwd,
+            parent=self.window(),
+            on_reload=self._refresh_extension_ui,
+        ).exec()
 
     def _handle_extension_action(self, action: dict):
         action_type = str(action.get("type") or "")
@@ -683,7 +701,7 @@ class ChatPanel(QWidget):
                 "title_text": text,
                 "skill": None,
             }
-            if self._visible_run():
+            if self._visible_run() or self._visible_compaction():
                 self._ensure_conversation(text, self.model_combo.currentText())
                 self._runtime_for(self.conv_id).queued.append(draft)
                 self._update_queue_ui()
@@ -703,8 +721,8 @@ class ChatPanel(QWidget):
 
         cmd = parse_builtin_command(text) if text and not images else None
         if cmd:
-            if self._visible_run():
-                self._add_notice("Finish the current response before running a command.")
+            if self._visible_run() or self._visible_compaction():
+                self._add_notice("Finish the current response or compaction before running a command.")
                 return
             self.composer.clear()
             self.composer.input.exit_slash_mode()
@@ -720,6 +738,16 @@ class ChatPanel(QWidget):
         if ext_cmd:
             invocation = slash_invocation(text)
             trailing_text = invocation[1] if invocation else ""
+            if ext_cmd.executable:
+                self.composer.clear()
+                self.composer.input.exit_slash_mode()
+                self.composer.input.exit_mention_mode()
+                if self._skill_picker:
+                    self._skill_picker.hide()
+                if self._file_picker:
+                    self._file_picker.hide()
+                self._run_extension_command(ext_cmd.name, trailing_text)
+                return
             if not trailing_text:
                 self.composer.clear()
                 self.composer.input.exit_slash_mode()
@@ -748,7 +776,7 @@ class ChatPanel(QWidget):
         if self._file_picker:
             self._file_picker.hide()
 
-        if self._visible_run():
+        if self._visible_run() or self._visible_compaction():
             self._ensure_conversation(draft["title_text"], self.model_combo.currentText())
             self._runtime_for(self.conv_id).queued.append(draft)
             self._update_queue_ui()
@@ -767,11 +795,15 @@ class ChatPanel(QWidget):
         self._enter_streaming()
 
         now = datetime.now().isoformat()
-        self.history.append({"role": "user", "content": content, "created_at": now})
+        user_msg = {"role": "user", "content": content, "created_at": now}
+        if draft.get("synthetic"):
+            user_msg["synthetic"] = draft["synthetic"]
+        self.history.append(user_msg)
         user_idx = len(self.history) - 1
         if self._render_start_index == user_idx:
             self._render_start_index = user_idx
-        self._add_bubble(content, is_user=True, history_index=user_idx, timestamp=now)
+        if is_visible_message(user_msg):
+            self._add_bubble(content, is_user=True, history_index=user_idx, timestamp=now)
         if draft.get("crew"):
             self._add_notice(_crew_notice_text(crew_metadata(draft["crew"], self._settings.load()), "joined"))
 
@@ -874,6 +906,7 @@ class ChatPanel(QWidget):
         thread.crew_chunk.connect(lambda meta, text, rid=run_id: self._on_crew_chunk(rid, meta, text))
         thread.crew_done.connect(lambda meta, text, rid=run_id: self._on_crew_done(rid, meta, text))
         thread.crew_error.connect(lambda meta, text, rid=run_id: self._on_crew_error(rid, meta, text))
+        thread.runtime_event.connect(lambda event, rid=run_id: self._on_runtime_event(rid, event))
         thread.done.connect(lambda full, rid=run_id: self._on_done(rid, full))
         thread.error.connect(lambda msg, rid=run_id: self._on_error(rid, msg))
         thread.start()
@@ -944,7 +977,7 @@ class ChatPanel(QWidget):
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
             "model":      self.model_combo.currentText(),
-            "messages":   [dict(m) for m in self.history[: idx + 1]],
+            "messages":   prepare_for_storage(self.history[: idx + 1]),
         }
         self.store.save(conv_id, data)
         self.saved.emit()
@@ -1056,6 +1089,11 @@ class ChatPanel(QWidget):
             if self._skill_picker:
                 self._skill_picker.hide()
             return
+        invocation = slash_invocation(text)
+        if invocation and invocation[1].strip():
+            if self._skill_picker:
+                self._skill_picker.hide()
+            return
         if self._skill_picker is None:
             self._skill_picker = SkillPicker(
                 load_skills(self.cwd), load_all_commands(self.cwd), parent=self,
@@ -1121,6 +1159,9 @@ class ChatPanel(QWidget):
         self.composer.focus_input()
 
     def _on_skill_selected(self, skill):
+        if _should_complete_slash_selection(self.composer.text(), skill.name):
+            self._complete_slash_item(skill)
+            return
         self.composer.set_skill(skill)
         self.composer.input.clear()
         self.composer.input.exit_slash_mode()
@@ -1128,16 +1169,40 @@ class ChatPanel(QWidget):
         self.composer.focus_input()
 
     def _on_command_selected(self, command):
+        if _should_complete_slash_selection(self.composer.text(), command.name):
+            self._complete_slash_item(command)
+            return
         self.composer.clear()
         self.composer.input.exit_slash_mode()
         self._skill_picker.hide()
         if getattr(command, "source", "builtin") == "builtin":
             self._run_builtin_command(command.name)
+        elif getattr(command, "executable", False):
+            self._run_extension_command(command.name, "")
         else:
             self._activate_extension_command(command)
 
     def _activate_extension_command(self, command):
         self.composer.set_skill(self._skill_from_extension_command(command))
+        self.composer.focus_input()
+
+    def _complete_slash_selection(self):
+        if not self._skill_picker:
+            return
+        current = self._skill_picker.current()
+        if not current:
+            return
+        _kind, item = current
+        self._complete_slash_item(item)
+
+    def _complete_slash_item(self, item):
+        name = getattr(item, "name", "")
+        if not name:
+            return
+        self.composer.input.complete_slash_command(name)
+        self.composer.input.exit_slash_mode()
+        if self._skill_picker:
+            self._skill_picker.hide()
         self.composer.focus_input()
 
     def _skill_from_extension_command(self, command):
@@ -1163,6 +1228,71 @@ class ChatPanel(QWidget):
             else:
                 self._add_notice("Reloaded skills and extensions.")
 
+    def _run_extension_command(self, name: str, args: str):
+        result, errors = run_extension_command(
+            self.cwd,
+            name,
+            args,
+            model=self.model_combo.currentText(),
+            history=copy.deepcopy(self.history),
+            conversation_id=self.conv_id or "",
+            runtime=self._runtime_command_api(),
+        )
+        if errors:
+            self._add_notice(f"Extension command failed: {errors[-1].splitlines()[-1]}")
+            return
+        if isinstance(result, str) and result.strip():
+            self._add_notice(result.strip())
+        elif isinstance(result, dict):
+            notice = str(result.get("notice") or result.get("message") or "").strip()
+            if notice:
+                self._add_notice(notice)
+
+    def _runtime_command_api(self) -> RuntimeCommandApi:
+        return RuntimeCommandApi(
+            show_notice=self._add_notice,
+            send_message=lambda text: self._send_or_queue_text(text, prefer_queue=False),
+            enqueue_message=lambda text: self._send_or_queue_text(text, prefer_queue=True),
+            compact_now=lambda force: self.compact_conversation(force=force),
+            compact_and_resume=self._compact_and_resume_from_command,
+        )
+
+    def _send_or_queue_text(self, text: str, *, prefer_queue: bool, synthetic: str = ""):
+        text = str(text or "").strip()
+        if not text:
+            return
+        draft = {
+            "content": build_user_content(text, [], []),
+            "title_text": text,
+            "skill": None,
+        }
+        if synthetic:
+            draft["synthetic"] = synthetic
+        if prefer_queue or self._visible_run() or self._visible_compaction():
+            self._ensure_conversation(text, self.model_combo.currentText())
+            self._runtime_for(self.conv_id).queued.append(draft)
+            self._update_queue_ui()
+            return
+        self._send_draft(draft)
+
+    def _compact_and_resume_from_command(self, resume_prompt: str, force: bool):
+        prompt = str(resume_prompt or "").strip()
+        if not prompt:
+            prompt = "Continue the active task from the compacted context."
+        if not self.history:
+            self._add_notice("Nothing to continue — start a conversation first.")
+            return
+        self._send_or_queue_runtime_text(prompt, "extension_resume")
+        if self._visible_run() or self._visible_compaction():
+            self._add_notice("Continuation queued for the current conversation.")
+            return
+        self.compact_conversation(force=force)
+        if not self._visible_compaction():
+            self._start_next_queued()
+
+    def _send_or_queue_runtime_text(self, text: str, synthetic: str):
+        self._send_or_queue_text(text, prefer_queue=True, synthetic=synthetic)
+
     def compact_conversation(self, force: bool = False):
         if self._visible_run() or self._visible_compaction():
             return
@@ -1182,7 +1312,6 @@ class ChatPanel(QWidget):
             else:
                 self._add_notice("Nothing to compact — recent messages already fit in context.")
             return
-        self._set_input_enabled(False)
         self._add_notice("Compacting conversation context…")
         conv_id = self.conv_id
         if not conv_id:
@@ -1196,7 +1325,7 @@ class ChatPanel(QWidget):
             history_snapshot=history_snapshot,
             data_snapshot=copy.deepcopy(self.conv_data) if self.conv_data else {"id": conv_id},
         )
-        self._sync_visible_runtime_refs()
+        self._refresh_runtime_controls()
         thread.done.connect(lambda compacted, cid=conv_id: self._on_compacted(cid, compacted))
         thread.error.connect(lambda msg, cid=conv_id: self._on_compaction_error(cid, msg))
         thread.start()
@@ -1343,6 +1472,26 @@ class ChatPanel(QWidget):
             self._add_tool_notice(f"Tool error: {message}")
         self._show_post_tool_thinking(run)
 
+    def _on_runtime_event(self, run_id: str, event: dict):
+        run = self._find_run(run_id)
+        if not run or run.conv_id != self.conv_id:
+            return
+        event_type = event.get("type")
+        if event_type == "notice":
+            text = str(event.get("text") or "").strip()
+            if text:
+                self._add_notice(text)
+        elif event_type == "compaction":
+            status = event.get("status")
+            if status == "compacted":
+                self._add_notice("Runtime extension compacted context before continuing.")
+            elif status == "unchanged":
+                self._add_notice("Runtime extension checked compaction; no cut was available.")
+        elif event_type == "compaction_failed":
+            self._add_notice(f"Runtime extension compaction failed: {event.get('error')}")
+        elif event_type == "blocked":
+            self._add_notice(str(event.get("text") or "Runtime extension blocked the request."))
+
     def _on_done(self, run_id: str, full: str):
         run = self._find_run(run_id)
         if not run:
@@ -1356,16 +1505,17 @@ class ChatPanel(QWidget):
             assistant_msg["crew"] = dict(run.crew)
         if run.thread.last_usage:
             assistant_msg["usage"] = dict(run.thread.last_usage)
-        run_history = copy.deepcopy(run.history_snapshot)
+        run_history = copy.deepcopy(run.thread.history)
+        if not _history_ends_with_assistant_text(run_history, full):
+            run_history.append(assistant_msg)
+        run_history = prepare_for_storage(run_history)
         run_data = copy.deepcopy(run.data_snapshot)
 
         if is_current:
-            self.history.append(assistant_msg)
+            self.history = run_history
             asst_idx = len(self.history) - 1
         else:
-            run_history.append(assistant_msg)
             if run.conv_id and run_data:
-                run_history = compact_ephemeral_attachments(run_history)
                 run_data["messages"] = run_history
                 run_data["updated_at"] = now
                 self.store.save(run.conv_id, run_data)
@@ -1410,7 +1560,7 @@ class ChatPanel(QWidget):
             self._add_notice(_crew_notice_text(run.crew, "left"))
 
         if is_current:
-            self.history = compact_ephemeral_attachments(self.history)
+            self.history = prepare_for_storage(self.history)
             if self.conv_data is not None:
                 self.conv_data["messages"] = self.history
             self._sync_visible_runtime_refs()
@@ -1436,19 +1586,19 @@ class ChatPanel(QWidget):
         self._runtime_for(conv_id).compaction = None
         if conv_id == self.conv_id:
             self._sync_visible_runtime_refs()
-            self.history = compact_ephemeral_attachments(compacted)
+            self.history = prepare_for_storage(compacted)
             if self.conv_data is not None:
                 self.conv_data["messages"] = self.history
             self._render_history_tail()
             self._scroll_to_bottom_later()
             self._add_notice("Context compacted — conversation continues.")
-            self._set_input_enabled(True)
             self._update_context_ui()
             self._save(touch_updated=True)
+            self._refresh_runtime_controls()
             self._start_next_queued()
         else:
             data = copy.deepcopy(compaction.data_snapshot)
-            data["messages"] = compact_ephemeral_attachments(compacted)
+            data["messages"] = prepare_for_storage(compacted)
             data["updated_at"] = datetime.now().isoformat()
             self.store.save(conv_id, data)
             self.saved.emit()
@@ -1479,7 +1629,7 @@ class ChatPanel(QWidget):
             return
         user_msgs = [
             m for m in self.history
-            if m.get("role") == "user" and m.get("synthetic") != "tool_results"
+            if m.get("role") == "user" and is_visible_message(m)
         ]
         if len(user_msgs) != 1:
             return
@@ -1583,7 +1733,7 @@ class ChatPanel(QWidget):
 
     def _save(self, *, touch_updated: bool = False):
         if self.conv_id and self.conv_data is not None:
-            self.conv_data["messages"]   = compact_ephemeral_attachments(self.history)
+            self.conv_data["messages"]   = prepare_for_storage(self.history)
             if touch_updated or not self.conv_data.get("updated_at"):
                 self.conv_data["updated_at"] = datetime.now().isoformat()
             self.store.save(self.conv_id, self.conv_data)
@@ -1765,6 +1915,9 @@ class ChatPanel(QWidget):
         i = len(self.history) - 1
         while i >= 0:
             msg = self.history[i]
+            if not is_visible_message(msg):
+                i -= 1
+                continue
             if msg["role"] == "user":
                 content = msg.get("content")
                 if isinstance(content, list) and content:
@@ -1868,10 +2021,7 @@ class ChatPanel(QWidget):
         if self._visible_run():
             self._enter_streaming()
         elif self._visible_compaction():
-            self.stop_btn.hide()
-            self.btn.setText("Send")
-            self._set_input_enabled(False)
-            self._update_queue_ui()
+            self._enter_compaction()
         else:
             self._exit_streaming()
 
@@ -1917,6 +2067,8 @@ class ChatPanel(QWidget):
 
     def _insert_history_bubble(self, history_index: int, *, at_top: bool = False):
         msg = self.history[history_index]
+        if not is_visible_message(msg):
+            return None
         bubble = self._make_bubble(
             msg["content"],
             is_user=(msg["role"] == "user"),
@@ -1991,6 +2143,16 @@ class ChatPanel(QWidget):
         self.composer.set_enabled(True)
         self.btn.setText("Send")
         self.btn.setStyleSheet(send_button_style())
+        self.stop_btn.hide()
+        self._update_queue_ui()
+        self.composer.focus_input()
+
+    def _enter_compaction(self):
+        self.jump_btn.hide()
+        self.composer.set_enabled(True)
+        self.btn.setText("Queue")
+        self.btn.setStyleSheet(send_button_style())
+        self.btn.setEnabled(True)
         self.stop_btn.hide()
         self._update_queue_ui()
         self.composer.focus_input()
@@ -2114,12 +2276,15 @@ class ChatPanel(QWidget):
         data = copy.deepcopy(base_data)
         history = copy.deepcopy(data.get("messages", []))
         now = datetime.now().isoformat()
-        history.append({"role": "user", "content": draft["content"], "created_at": now})
+        user_msg = {"role": "user", "content": draft["content"], "created_at": now}
+        if draft.get("synthetic"):
+            user_msg["synthetic"] = draft["synthetic"]
+        history.append(user_msg)
         data["messages"] = history
         data["updated_at"] = now
         model = data.get("model") or self.model_combo.currentText()
         persisted = copy.deepcopy(data)
-        persisted["messages"] = compact_ephemeral_attachments(history)
+        persisted["messages"] = prepare_for_storage(history)
         self.store.save(conv_id, persisted)
         self.saved.emit()
         self._start_assistant_run(
@@ -2212,6 +2377,14 @@ def _queue_preview(draft: dict) -> str:
     return text
 
 
+def _should_complete_slash_selection(text: str, name: str) -> bool:
+    invocation = slash_invocation(text)
+    if not invocation:
+        return False
+    typed, args = invocation
+    return not args.strip() and typed.casefold() != str(name or "").casefold()
+
+
 def _first_summoned_crew(text: str, settings: dict | None = None) -> CrewMember | None:
     members = summoned_members(text)
     for member in members:
@@ -2238,6 +2411,13 @@ def _latest_regenerable_assistant_index(history: list[dict]) -> int:
         return -1
     idx = len(history) - 1
     return idx if history[idx].get("role") == "assistant" else -1
+
+
+def _history_ends_with_assistant_text(history: list[dict], text: str) -> bool:
+    if not history:
+        return False
+    last = history[-1]
+    return last.get("role") == "assistant" and last.get("content") == text
 
 
 def _crew_notice_text(crew: CrewMember | dict, action: str) -> str:
@@ -2276,6 +2456,8 @@ def _crew_model_choice(
 
 
 def _message_render_bytes(msg: dict) -> int:
+    if not is_visible_message(msg):
+        return 0
     return len(content_preview(msg.get("content", "")).encode("utf-8", errors="replace"))
 
 

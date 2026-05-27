@@ -18,9 +18,11 @@ def apply_windows_caption(widget, theme: str | None = None) -> None:
     if sys.platform != "win32":
         return
 
-    from PyQt6.QtWidgets import QWidget
+    from PyQt6.QtWidgets import QDialog, QMainWindow, QWidget
 
     if not isinstance(widget, QWidget) or not widget.isWindow():
+        return
+    if not isinstance(widget, (QDialog, QMainWindow)):
         return
 
     from ui.theme import current_theme
@@ -61,7 +63,7 @@ def install_caption_sync(app) -> None:
         return
 
     from PyQt6.QtCore import QEvent, QObject
-    from PyQt6.QtWidgets import QWidget
+    from PyQt6.QtWidgets import QDialog, QMainWindow, QWidget
 
     class _CaptionFilter(QObject):
         def eventFilter(self, obj, event):
@@ -69,6 +71,7 @@ def install_caption_sync(app) -> None:
                 event.type() == QEvent.Type.Show
                 and isinstance(obj, QWidget)
                 and obj.isWindow()
+                and isinstance(obj, (QDialog, QMainWindow))
             ):
                 apply_windows_caption(obj)
             return False

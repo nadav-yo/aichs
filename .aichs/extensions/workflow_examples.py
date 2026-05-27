@@ -1,4 +1,8 @@
+EXTENSION_DESCRIPTION = "Adds demo workflow helpers: a ping tool, review command, context note, and guardrail hooks."
+
+
 def register(registry):
+    registry.metadata(description=EXTENSION_DESCRIPTION)
     registry.tool(
         name="workflow_ping",
         description=(

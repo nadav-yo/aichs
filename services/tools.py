@@ -24,6 +24,7 @@ from config import (
     MAX_TOOL_READ_BYTES,
 )
 from services.shell_tool import shell_tool_name
+from services.content import is_visible_message
 from services.tool_policy import resolve_path, validate_tool_paths
 from services.tool_registry import ToolContext, ToolRegistry, load_extensions
 
@@ -749,6 +750,8 @@ def _conversation_snippets(data: dict, query: str) -> list[str]:
     terms = _chat_search_terms(query)
     snippets = []
     for msg in data.get("messages", []):
+        if not is_visible_message(msg):
+            continue
         text = _message_text(msg.get("content", ""))
         folded = text.casefold()
         if not any(term in folded for term in terms):

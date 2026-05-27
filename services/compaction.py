@@ -1,3 +1,8 @@
+import hashlib
+import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
 import anthropic
 from openai import OpenAI
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -5,6 +10,11 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from config import SYSTEM_PROMPT
 from services.model_registry import context_window_tokens, get_model_config, resolve_api_key
 from services.content import content_length, content_preview
+from services.continuation import (
+    continuation_prompt,
+    parse_continuation_ledger,
+    render_continuation_ledger,
+)
 
 # API defaults when no provider/model contextWindow is configured (see model_registry).
 CONTEXT_WINDOWS = {"anthropic": 180_000, "openai-compatible": 100_000}
@@ -31,6 +41,16 @@ Preserve only durable, task-relevant context:
 
 Prefer concise bullets grouped by topic. Omit casual chatter, duplicate tool
 output, raw file contents, and anything that can be rediscovered cheaply."""
+
+
+@dataclass(frozen=True)
+class CompactionResult:
+    messages: list[dict]
+    summary: str
+    cut_index: int
+    status: str
+    proof: dict
+    artifact: dict | None = None
 
 
 def parse_compaction_token(value) -> int | None:
@@ -237,11 +257,25 @@ def _call_model(model: str, prompt: str, max_tokens: int) -> str:
         return resp.choices[0].message.content
 
 
-def compact(model: str, messages: list[dict], *, force: bool = False) -> list[dict]:
-    """Return a compacted history: summary synthetic turn + recent verbatim messages."""
+def compact_with_result(
+    model: str,
+    messages: list[dict],
+    *,
+    force: bool = False,
+    source: str = "core",
+    ledger: bool = False,
+) -> CompactionResult:
+    """Return compacted history plus provenance and optional continuation artifact."""
     cut = _find_cut_point(messages, model, force=force)
     if cut <= 0:
-        return messages
+        return CompactionResult(
+            messages=messages,
+            summary="",
+            cut_index=0,
+            status="unchanged",
+            proof=_compaction_proof(model, messages, 0, source, "unchanged"),
+            artifact=None,
+        )
 
     to_summarize = messages[:cut]
     to_keep      = messages[cut:]
@@ -250,17 +284,59 @@ def compact(model: str, messages: list[dict], *, force: bool = False) -> list[di
         f"{m['role'].upper()}: {content_preview(m['content'])}" for m in to_summarize
     )
     window = context_window_tokens(model)
+    prompt = continuation_prompt(transcript) if ledger else f"{SUMMARY_PROMPT}\n\n---\n{transcript}"
     summary = _call_model(
         model,
-        f"{SUMMARY_PROMPT}\n\n---\n{transcript}",
+        prompt,
         summary_max_tokens(window),
     )
+    artifact = None
+    rendered_summary = summary
+    if ledger:
+        validation = parse_continuation_ledger(summary)
+        if not validation.ok or validation.ledger is None:
+            raise ValueError(f"invalid continuation ledger: {'; '.join(validation.errors)}")
+        artifact = validation.ledger
+        rendered_summary = render_continuation_ledger(validation.ledger)
 
-    return [
-        {"role": "user",      "content": f"[Conversation summary]\n{summary}"},
+    compacted = [
+        {"role": "user",      "content": f"[Conversation summary]\n{rendered_summary}"},
         {"role": "assistant", "content": "Thank you for the context — I'm fully caught up."},
         *to_keep,
     ]
+    return CompactionResult(
+        messages=compacted,
+        summary=rendered_summary,
+        cut_index=cut,
+        status="compacted",
+        proof=_compaction_proof(model, messages, cut, source, "compacted"),
+        artifact=artifact,
+    )
+
+
+def compact(model: str, messages: list[dict], *, force: bool = False) -> list[dict]:
+    """Return a compacted history: summary synthetic turn + recent verbatim messages."""
+    return compact_with_result(model, messages, force=force).messages
+
+
+def _compaction_proof(
+    model: str,
+    messages: list[dict],
+    cut_index: int,
+    source: str,
+    status: str,
+) -> dict:
+    payload = json.dumps(messages[:cut_index], sort_keys=True, ensure_ascii=False, default=str)
+    return {
+        "version": "aicc-compaction/v1",
+        "source": source,
+        "status": status,
+        "model": model,
+        "cut_index": cut_index,
+        "message_count": len(messages),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "summary_input_sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+    }
 
 
 class CompactionThread(QThread):

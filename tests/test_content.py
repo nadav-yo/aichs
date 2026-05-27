@@ -6,8 +6,10 @@ from services.content import (
     content_text,
     file_blocks,
     image_blocks,
+    is_visible_message,
     prepare_for_anthropic,
     prepare_for_openai,
+    prepare_for_storage,
 )
 
 
@@ -143,6 +145,37 @@ def test_compact_ephemeral_attachments_removes_payloads():
     assert blocks[2]["type"] == "text"
     assert "Image attachment omitted" in blocks[2]["text"]
     assert content_length(compacted[0]["content"]) < content_length(messages[0]["content"])
+
+
+def test_prepare_for_storage_removes_runtime_only_messages():
+    messages = [
+        {"role": "user", "content": "real"},
+        {
+            "role": "user",
+            "synthetic": "tool_results",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "tu_1", "content": "missing"},
+                {"type": "text", "text": "Continue the active user task.", "internal": True},
+            ],
+        },
+        {"role": "user", "content": "guard instruction", "synthetic": "extension"},
+        {"role": "user", "content": "resume", "synthetic": "extension_resume"},
+        {"role": "user", "content": "anchor", "synthetic": "active_task"},
+    ]
+
+    stored = prepare_for_storage(messages)
+
+    assert [msg.get("synthetic") for msg in stored] == [None, "tool_results"]
+    assert stored[1]["content"] == [
+        {"type": "tool_result", "tool_use_id": "tu_1", "content": "missing"}
+    ]
+
+
+def test_is_visible_message_hides_runtime_internals():
+    assert is_visible_message({"role": "user", "content": "real"})
+    assert not is_visible_message({"role": "tool", "content": "result"})
+    assert not is_visible_message({"role": "user", "synthetic": "tool_results"})
+    assert not is_visible_message({"role": "user", "synthetic": "extension"})
 
 
 def test_prepare_file_block_notes_omitted_attachment():
