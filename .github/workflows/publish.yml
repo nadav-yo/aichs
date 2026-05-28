@@ -1,16 +1,22 @@
 name: publish
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, e.g. v0.2.1"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   pypi:
-    name: Publish to PyPI
+    name: Publish tag to PyPI
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -18,19 +24,77 @@ jobs:
       id-token: write
 
     steps:
-      - name: Check out repository
+      - name: Resolve tag
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            tag="${INPUT_TAG}"
+          else
+            tag="${REF_NAME}"
+          fi
+          case "${tag}" in
+            v*) ;;
+            *)
+              echo "publish.yml only publishes v* tags, got '${tag}'." >&2
+              exit 1
+              ;;
+          esac
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${tag#v}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out tag
         uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify tag checkout
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          actual="$(git describe --tags --exact-match)"
+          if [ "${actual}" != "${TAG}" ]; then
+            echo "Expected to build ${TAG}, checked out ${actual}." >&2
+            exit 1
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
-      - name: Install build backend
-        run: python -m pip install --upgrade build
+      - name: Install build tools
+        run: python -m pip install --upgrade build twine
 
       - name: Build distributions
         run: python -m build
+
+      - name: Verify distributions
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          python - <<'PY'
+          import glob
+          import os
+          import re
+          import sys
+
+          expected = os.environ["VERSION"]
+          files = [os.path.basename(path) for path in glob.glob("dist/*")]
+          if not files:
+              print("No distributions were built.", file=sys.stderr)
+              sys.exit(1)
+          pattern = re.compile(rf"^aichs-{re.escape(expected)}(?:\.tar\.gz|-)")
+          bad = [name for name in files if not pattern.match(name)]
+          if bad:
+              print(f"Built files do not match release version {expected}: {bad}", file=sys.stderr)
+              sys.exit(1)
+          PY
+          python -m twine check dist/*
 
       - name: Publish distributions
         uses: pypa/gh-action-pypi-publish@release/v1
