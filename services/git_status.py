@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from dataclasses import dataclass
+
+from services.subprocess_utils import run_no_window
 
 
 @dataclass(frozen=True)
@@ -17,7 +18,7 @@ class GitFileChange:
 
 def run_git(cmd: list[str], cwd: str, timeout: float = 5) -> str:
     try:
-        r = subprocess.run(
+        r = run_no_window(
             cmd,
             cwd=cwd,
             capture_output=True,

@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aichs"
+version = "0.1.0"
+description = "A minimal desktop agent studio for local repositories."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+  { name = "AI Choding Harness Studio" },
+]
+keywords = ["ai", "agent", "desktop", "pyqt"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Win32 (MS Windows)",
+  "Environment :: X11 Applications :: Qt",
+  "Environment :: MacOS X",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Software Development",
+]
+dependencies = [
+  "PyQt6==6.11.0",
+  "anthropic==0.104.1",
+  "openai==2.38.0",
+  "markdown==3.10.2",
+  "pygments==2.20.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/nadav-yo/aichs"
+Repository = "https://github.com/nadav-yo/aichs"
+Documentation = "https://github.com/nadav-yo/aichs/tree/main/docs"
+
+[project.scripts]
+aichs = "main:main"
+
+[tool.setuptools]
+include-package-data = true
+py-modules = ["app", "config", "main"]
+
+[tool.setuptools.packages.find]
+include = ["assets*", "services*", "storage*", "ui*"]
+
+[tool.setuptools.package-data]
+assets = [
+  "*.png",
+  "*.svg",
+  "avatars/*.svg",
+  "png/*.png",
+]
+
+[tool.setuptools.data-files]
+"share/aichs/docs" = [
+  "docs/*.md",
+]

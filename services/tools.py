@@ -25,6 +25,7 @@ from config import (
 )
 from services.shell_tool import shell_tool_name
 from services.content import is_visible_message
+from services.subprocess_utils import popen_no_window, run_no_window
 from services.tool_policy import resolve_path, validate_tool_paths
 from services.tool_registry import ToolContext, ToolRegistry, load_extensions
 
@@ -590,7 +591,7 @@ def _literal_newline_error(label: str, text: str) -> str | None:
 
 
 def _run_shell_command(command: str, cwd: str, on_line=None, cancel=None) -> str:
-    proc = subprocess.Popen(
+    proc = popen_no_window(
         _shell_command_args(command),
         cwd=cwd,
         env=_shell_env(),
@@ -908,7 +909,7 @@ def _search_files_with_rg(directory: Path, glob: str, pattern: str, cwd: str) ->
 
     search_root = _display_path(directory, cwd)
     try:
-        r = subprocess.run(
+        r = run_no_window(
             [
                 "rg",
                 "--line-number",

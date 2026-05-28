@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import difflib
 import os
-import subprocess
 
 from config import MAX_FILE_PREVIEW_BYTES
 from services.git_status import GitFileChange, is_git_repo, list_file_changes, run_git
+from services.subprocess_utils import run_no_window
 
 
 def _run_git(cmd: list[str], cwd: str) -> tuple[int, str]:
     try:
-        r = subprocess.run(
+        r = run_no_window(
             cmd,
             cwd=cwd,
             capture_output=True,

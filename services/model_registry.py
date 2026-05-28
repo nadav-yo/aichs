@@ -24,6 +24,8 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
+from services.subprocess_utils import no_window_creationflags, no_window_startupinfo
+
 _MODELS_PATH = Path.home() / ".aichs" / "models.json"
 _MODEL_ID_CONTEXT_SUFFIX = re.compile(r"\s@\s*\d+\s*$")
 
@@ -115,7 +117,13 @@ def resolve_api_key(spec: str) -> str:
     if spec.startswith("!"):
         try:
             result = subprocess.run(
-                spec[1:], shell=True, capture_output=True, text=True, timeout=10,
+                spec[1:],
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=no_window_creationflags(),
+                startupinfo=no_window_startupinfo(),
             )
             if result.returncode != 0:
                 warnings.warn(f"aichs: API key command failed ({spec[1:]!r}): {result.stderr.strip()}")

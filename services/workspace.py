@@ -1,10 +1,10 @@
 import os
 import sys
-import subprocess
 from pathlib import Path
 
 from config import IGNORED, MAX_TREE_ENTRIES_PER_DIR, SYSTEM_PROMPT
 from services.crew import crew_roster_prompt
+from services.subprocess_utils import run_no_window
 from services.tool_registry import extension_context_snippets
 from services.shell_tool import SHELL_TOOL_NAME
 
@@ -114,7 +114,7 @@ def _tree(base: str, path: str, prefix: str = "", depth: int = 0) -> list[str]:
 
 def _run(cmd: list, cwd: str) -> str:
     try:
-        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=5)
+        r = run_no_window(cmd, cwd=cwd, capture_output=True, text=True, timeout=5)
         return r.stdout.strip()
     except Exception:
         return ""

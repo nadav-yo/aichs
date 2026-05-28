@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from services.subprocess_utils import popen_no_window, run_no_window
 from services.tools import _shell_command_args, _shell_env, _strip_ansi
 
 
@@ -136,7 +137,7 @@ class ProcessManager:
                 self._stop_locked(key, force=True)
 
             stdin = subprocess.PIPE if allow_stdin else subprocess.DEVNULL
-            proc = subprocess.Popen(
+            proc = popen_no_window(
                 _process_args(command),
                 cwd=str(cwd_path),
                 env=_shell_env(),
@@ -145,7 +146,7 @@ class ProcessManager:
                 stdin=stdin,
                 text=True,
                 bufsize=1,
-                creationflags=_creationflags(),
+                process_group=True,
                 preexec_fn=_preexec_fn(),
             )
             managed = _ManagedProcess(
@@ -394,12 +395,6 @@ def _safe_name(value: str) -> str:
     return safe.strip("._-")
 
 
-def _creationflags() -> int:
-    if os.name == "nt":
-        return getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    return 0
-
-
 def _preexec_fn():
     if os.name == "nt":
         return None
@@ -411,11 +406,12 @@ def _terminate_process(proc: subprocess.Popen, *, force: bool) -> None:
         args = ["taskkill", "/PID", str(proc.pid), "/T"]
         if force:
             args.append("/F")
-        subprocess.run(
+        run_no_window(
             args,
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            process_group=False,
         )
         return
     try:

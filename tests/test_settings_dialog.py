@@ -1,6 +1,6 @@
 import services.model_registry as reg
 from storage.settings import SettingsStore
-from ui.widgets.settings_dialog import SettingsDialog
+from ui.widgets.settings_dialog import SettingsDialog, _ProviderDialog
 from ui.widgets.chat_panel import ChatPanel
 from PyQt6.QtWidgets import QAbstractItemView
 
@@ -24,6 +24,32 @@ def _provider_row(dialog: SettingsDialog, provider_id: str) -> int:
         if provider["id"] == provider_id:
             return row
     raise AssertionError(f"provider not found: {provider_id}")
+
+
+def test_provider_dialog_resizes_models_for_selected_provider_type(qapp):
+    styles = {"hint": "", "btn": "", "field": "", "label": ""}
+    dialog = _ProviderDialog(styles, set())
+    try:
+        dialog.show()
+        qapp.processEvents()
+
+        anthropic_height = dialog.models.height()
+        assert dialog.hint.geometry().top() > dialog.models.geometry().bottom()
+
+        dialog.kind.setCurrentIndex(dialog.kind.findData("openai"))
+        qapp.processEvents()
+        openai_height = dialog.models.height()
+        assert dialog.hint.geometry().top() > dialog.models.geometry().bottom()
+
+        dialog.kind.setCurrentIndex(dialog.kind.findData("custom"))
+        dialog.layout().activate()
+        qapp.processEvents()
+
+        assert anthropic_height < openai_height
+        assert dialog.models.height() < openai_height
+        assert dialog.hint.geometry().top() > dialog.models.geometry().bottom()
+    finally:
+        dialog.close()
 
 
 def test_model_order_drag_updates_provider_order_without_default_column(qapp, monkeypatch):

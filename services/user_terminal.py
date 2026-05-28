@@ -7,6 +7,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from services.subprocess_utils import popen_no_window
 from services.terminal_refs import build_terminal_summary
 from services.tools import _shell_command_args, _shell_env, _strip_ansi
 
@@ -54,7 +55,7 @@ def run_user_terminal_command(
     exit_code = 1
 
     try:
-        proc = subprocess.Popen(
+        proc = popen_no_window(
             _shell_command_args(command),
             cwd=cwd,
             env=_shell_env(),

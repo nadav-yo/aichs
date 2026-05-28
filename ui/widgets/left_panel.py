@@ -21,6 +21,7 @@ from ui.theme import (
 )
 from ui.widgets.conversation_panel import ConversationPanel
 from ui.widgets.git_panel import GitPanel
+from ui.widgets.docs_dialog import DocsDialog
 from ui.widgets.settings_dialog import SettingsDialog
 
 
@@ -339,11 +340,23 @@ class LeftPanel(QWidget):
 
         root.addWidget(tabs, 1)
 
+        footer = QWidget()
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(0, 0, 0, 0)
+        footer_layout.setSpacing(0)
+
+        self._docs_btn = QPushButton("?")
+        self._docs_btn.setToolTip("Documentation")
+        self._docs_btn.setFixedHeight(34)
+        self._docs_btn.clicked.connect(self.open_docs)
+        footer_layout.addWidget(self._docs_btn)
+
         self._settings_btn = QPushButton("⚙")
         self._settings_btn.setToolTip("Settings (⌘,)")
         self._settings_btn.setFixedHeight(34)
         self._settings_btn.clicked.connect(self.open_settings)
-        root.addWidget(self._settings_btn)
+        footer_layout.addWidget(self._settings_btn)
+        root.addWidget(footer)
 
         self._apply_styles()
 
@@ -351,6 +364,7 @@ class LeftPanel(QWidget):
         apply_flat_tab_style(self._tabs, "sidebarTabs")
         self._files_header.apply_appearance()
         self._git_header.apply_appearance()
+        self._docs_btn.setStyleSheet(sidebar_settings_button_style())
         self._settings_btn.setStyleSheet(sidebar_settings_button_style())
 
     def apply_appearance(self):
@@ -363,6 +377,9 @@ class LeftPanel(QWidget):
     def open_settings(self):
         if SettingsDialog(self._settings, self).exec():
             self.settings_changed.emit()
+
+    def open_docs(self):
+        DocsDialog(self).exec()
 
     def set_workspace(self, path: str):
         self._file_tree.set_root(path)

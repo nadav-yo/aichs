@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QTextEdit, QComboBox, QWidget, QFileDialog, QScrollArea, QSlider,
     QListWidget, QListWidgetItem, QStackedWidget, QFrame, QTableWidget,
     QTableWidgetItem, QHeaderView, QMessageBox, QToolButton, QStyle, QCheckBox,
-    QColorDialog, QTabWidget, QAbstractItemView,
+    QColorDialog, QTabWidget, QAbstractItemView, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
@@ -41,6 +41,11 @@ _NAV = [
 _BUILTIN_IDS = {"claude", "openai"}
 _MODEL_CONTEXT_SUFFIX = re.compile(r"\s@\s*(\d+)\s*$")
 _CUSTOM_DEFAULT_CONTEXT = 32_768
+_PROVIDER_MODEL_EDITOR_HEIGHTS = {
+    "anthropic": 112,
+    "openai": 132,
+    "custom": 88,
+}
 
 
 def _provider_title(provider_id: str) -> str:
@@ -389,7 +394,8 @@ class _ProviderDialog(QDialog):
         self._data = data or {}
         self._original_id = (data or {}).get("id", "")
         self.setWindowTitle("Provider")
-        self.resize(480, 520)
+        self.resize(480, 540)
+        self.setMinimumHeight(540)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 16, 18, 16)
@@ -420,7 +426,7 @@ class _ProviderDialog(QDialog):
 
         self.models = QTextEdit()
         self.models.setPlaceholderText("model-id\nmodel-id = Display Name")
-        self.models.setMinimumHeight(120)
+        self.models.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.models.setStyleSheet(styles["field"])
         self._field(root, "Models", self.models)
 
@@ -466,6 +472,7 @@ class _ProviderDialog(QDialog):
         self.setStyleSheet(f"QDialog {{ background:{p['BG2']}; }}")
 
     def _apply_kind_ui(self, kind: str):
+        self._set_models_height(kind)
         if kind == "custom":
             self.models.setPlaceholderText(
                 "llama3.1:8b = Llama 3.1 8B @ 32768\n"
@@ -487,6 +494,15 @@ class _ProviderDialog(QDialog):
                     "OpenAI context limits use built-in defaults. "
                     "Models are saved to ~/.aichs/models.json; API keys stay in settings."
                 )
+
+        if self.layout():
+            self.layout().invalidate()
+            self.layout().activate()
+
+    def _set_models_height(self, kind: str):
+        height = _PROVIDER_MODEL_EDITOR_HEIGHTS.get(kind, _PROVIDER_MODEL_EDITOR_HEIGHTS["custom"])
+        self.models.setFixedHeight(height)
+        self.models.updateGeometry()
 
     def _field(self, layout: QVBoxLayout, label: str, widget: QWidget):
         lbl = QLabel(label)
