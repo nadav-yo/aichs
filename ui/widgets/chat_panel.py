@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QPoint, QPointF, QSize, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
-from config import IGNORED, MAX_FILE_PREVIEW_BYTES, MAX_TOOL_READ_BYTES
+from config import CONV_DIR, IGNORED, MAX_FILE_PREVIEW_BYTES, MAX_TOOL_READ_BYTES
 from config import MODELS, MODEL_PROVIDER
 from storage.repository import ConversationStore
 from storage.settings import SettingsStore
@@ -60,6 +60,8 @@ from ui.theme import (
 )
 from services.skills import Skill, load_all as load_skills
 from services.shell_tool import is_shell_tool
+from services.terminal_refs import terminal_ref
+from services.user_terminal import UserTerminalThread
 from services.slash_commands import (
     load_all_commands,
     parse_builtin_command,
@@ -316,6 +318,7 @@ class ChatPanel(QWidget):
         self._active_terminal   = None
         self._runtimes: dict[str, _ConversationRuntime] = {}
         self._orphan_threads: list[QThread] = []
+        self._user_terminal_threads: list[UserTerminalThread] = []
         self._auto_scroll       = True
         self._programmatic_scroll = False
         self._history_prepend_enabled = True
@@ -415,6 +418,7 @@ class ChatPanel(QWidget):
         self._skill_picker: SkillPicker | None = None
         self._file_picker: FileMentionPicker | None = None
         self.composer.input.slash_changed.connect(self._on_slash_changed)
+        self.composer.input.terminal_changed.connect(self._on_terminal_hint_changed)
         self.composer.input.picker_next.connect(lambda: self._skill_picker and self._skill_picker.select_next())
         self.composer.input.picker_prev.connect(lambda: self._skill_picker and self._skill_picker.select_prev())
         self.composer.input.picker_confirm.connect(lambda: self._skill_picker and self._skill_picker.confirm())
@@ -715,9 +719,14 @@ class ChatPanel(QWidget):
     def send(self):
         text = self.composer.text()
         images = self.composer.strip.images()
-        files = _mentioned_files(self.cwd, text)
         if not text and not images:
             return
+
+        if text.startswith("!") and not images:
+            self._run_user_terminal_from_input(text)
+            return
+
+        files = _mentioned_files(self.cwd, text)
 
         cmd = parse_builtin_command(text) if text and not images else None
         if cmd:
@@ -811,6 +820,46 @@ class ChatPanel(QWidget):
         self._maybe_auto_title()
 
         self._start_assistant(skill=draft.get("skill"), crew=draft.get("crew"))
+        self._pin_to_bottom()
+
+    def _run_user_terminal_from_input(self, text: str):
+        command = text[1:].strip()
+        if not command:
+            self._add_notice("Type a command after ! to run it in the workspace.")
+            return
+        if self._visible_run() or self._visible_compaction():
+            self._add_notice("Finish the current response or compaction before running a terminal command.")
+            return
+
+        model = self.model_combo.currentText()
+        self._ensure_conversation(command, model)
+        self.composer.clear()
+        self.composer.input.exit_mention_mode()
+        self.composer.input.exit_slash_mode()
+        if self._skill_picker:
+            self._skill_picker.hide()
+        if self._file_picker:
+            self._file_picker.hide()
+
+        now = datetime.now().isoformat()
+        content = f"! {command}"
+        user_msg = {"role": "user", "content": content, "created_at": now}
+        self.history.append(user_msg)
+        user_idx = len(self.history) - 1
+        self._add_bubble(content, is_user=True, history_index=user_idx, timestamp=now)
+        self._add_tool_notice(f"Running command: {command}")
+        card = self._add_terminal_card()
+        self._save(touch_updated=True)
+
+        thread = UserTerminalThread(command, self.cwd, self)
+        conv_id = self.conv_id
+        thread.line.connect(lambda line, cid=conv_id, c=card: self._on_user_terminal_line(cid, c, line))
+        thread.done.connect(
+            lambda result, t=thread, cid=conv_id, c=card: self._on_user_terminal_done(t, cid, c, result)
+        )
+        thread.finished.connect(lambda t=thread: self._forget_user_terminal_thread(t))
+        self._user_terminal_threads.append(thread)
+        thread.start()
         self._pin_to_bottom()
 
     def _ensure_conversation(self, title_text: str, model: str):
@@ -1096,10 +1145,37 @@ class ChatPanel(QWidget):
             return
         if self._skill_picker is None:
             self._skill_picker = SkillPicker(
-                load_skills(self.cwd), load_all_commands(self.cwd), parent=self,
+                load_skills(self.cwd),
+                load_all_commands(self.cwd),
+                include_terminal=True,
+                parent=self,
             )
             self._skill_picker.skill_selected.connect(self._on_skill_selected)
             self._skill_picker.command_selected.connect(self._on_command_selected)
+            self._skill_picker.terminal_selected.connect(self._on_terminal_hint_selected)
+        self._skill_picker.filter(text)
+        if self._skill_picker.count() == 0:
+            self._skill_picker.hide()
+            return
+        self._position_skill_picker()
+        self._skill_picker.show()
+        self._skill_picker.raise_()
+
+    def _on_terminal_hint_changed(self, text: str):
+        if not text:
+            if self._skill_picker:
+                self._skill_picker.hide()
+            return
+        if self._skill_picker is None:
+            self._skill_picker = SkillPicker(
+                load_skills(self.cwd),
+                load_all_commands(self.cwd),
+                include_terminal=True,
+                parent=self,
+            )
+            self._skill_picker.skill_selected.connect(self._on_skill_selected)
+            self._skill_picker.command_selected.connect(self._on_command_selected)
+            self._skill_picker.terminal_selected.connect(self._on_terminal_hint_selected)
         self._skill_picker.filter(text)
         if self._skill_picker.count() == 0:
             self._skill_picker.hide()
@@ -1182,6 +1258,12 @@ class ChatPanel(QWidget):
         else:
             self._activate_extension_command(command)
 
+    def _on_terminal_hint_selected(self):
+        self.composer.input.complete_terminal_command()
+        if self._skill_picker:
+            self._skill_picker.hide()
+        self.composer.focus_input()
+
     def _activate_extension_command(self, command):
         self.composer.set_skill(self._skill_from_extension_command(command))
         self.composer.focus_input()
@@ -1192,7 +1274,10 @@ class ChatPanel(QWidget):
         current = self._skill_picker.current()
         if not current:
             return
-        _kind, item = current
+        kind, item = current
+        if kind == "terminal":
+            self._on_terminal_hint_selected()
+            return
         self._complete_slash_item(item)
 
     def _complete_slash_item(self, item):
@@ -1471,6 +1556,69 @@ class ChatPanel(QWidget):
             message = preview.removeprefix("[tool error]").strip()
             self._add_tool_notice(f"Tool error: {message}")
         self._show_post_tool_thinking(run)
+
+    def _on_user_terminal_done(
+        self,
+        thread: UserTerminalThread,
+        conv_id: str | None,
+        card: TerminalCard,
+        result: dict,
+    ):
+        if conv_id == self.conv_id:
+            try:
+                card.finish(
+                    int(result.get("exit_code") or 0),
+                    detail=_terminal_status_detail(result),
+                    ref=_terminal_result_ref(result),
+                )
+            except RuntimeError:
+                pass
+        if not conv_id:
+            return
+
+        now = datetime.now().isoformat()
+        msg = {
+            "role": "assistant",
+            "content": str(result.get("summary") or ""),
+            "created_at": now,
+            "synthetic": "terminal_result",
+            "terminal": {
+                "command": str(result.get("command") or ""),
+                "cwd": str(result.get("cwd") or ""),
+                "exit_code": int(result.get("exit_code") or 0),
+                "duration_s": float(result.get("duration_s") or 0.0),
+                "line_count": int(result.get("line_count") or 0),
+                "stored_line_count": int(result.get("stored_line_count") or 0),
+                "truncated": bool(result.get("truncated")),
+                "output": str(result.get("output") or ""),
+            },
+        }
+
+        if conv_id == self.conv_id:
+            self.history.append(msg)
+            self._save(touch_updated=True)
+            self._maybe_auto_title()
+        else:
+            data = self.store.load(str(CONV_DIR / f"{conv_id}.json"))
+            history = prepare_for_storage(data.get("messages", []))
+            history.append(msg)
+            data["messages"] = prepare_for_storage(history)
+            data["updated_at"] = now
+            self.store.save(conv_id, data)
+            self.saved.emit()
+
+    def _on_user_terminal_line(self, conv_id: str | None, card: TerminalCard, line: str):
+        if conv_id != self.conv_id:
+            return
+        try:
+            card.append_line(line)
+        except RuntimeError:
+            pass
+
+    def _forget_user_terminal_thread(self, thread: UserTerminalThread):
+        if thread in self._user_terminal_threads:
+            self._user_terminal_threads.remove(thread)
+        thread.deleteLater()
 
     def _on_runtime_event(self, run_id: str, event: dict):
         run = self._find_run(run_id)
@@ -1797,6 +1945,20 @@ class ChatPanel(QWidget):
         self._bottom()
         return card
 
+    def _add_terminal_result_card(self, msg: dict, *, at_top: bool = False) -> TerminalCard:
+        result = msg.get("terminal") if isinstance(msg.get("terminal"), dict) else {}
+        card = TerminalCard()
+        card.set_output(str(result.get("output") or ""))
+        card.finish(
+            int(result.get("exit_code") or 0),
+            detail=_terminal_status_detail(result),
+            ref=_terminal_result_ref(result),
+        )
+        insert_at = 1 if at_top and self._older_btn else 0 if at_top else self.msg_layout.count() - 1
+        self.msg_layout.insertWidget(insert_at, self._wrap_artifact(card))
+        self._bottom()
+        return card
+
     def _add_file_card(self, file_path: str):
         abs_path = str(
             Path(file_path) if Path(file_path).is_absolute() else Path(self.cwd) / file_path
@@ -2067,6 +2229,8 @@ class ChatPanel(QWidget):
 
     def _insert_history_bubble(self, history_index: int, *, at_top: bool = False):
         msg = self.history[history_index]
+        if msg.get("synthetic") == "terminal_result":
+            return self._add_terminal_result_card(msg, at_top=at_top)
         if not is_visible_message(msg):
             return None
         bubble = self._make_bubble(
@@ -2410,7 +2574,29 @@ def _latest_regenerable_assistant_index(history: list[dict]) -> int:
     if not history:
         return -1
     idx = len(history) - 1
+    while idx >= 0 and history[idx].get("synthetic") == "terminal_result":
+        idx -= 1
+    if idx < 0:
+        return -1
     return idx if history[idx].get("role") == "assistant" else -1
+
+
+def _terminal_status_detail(result: dict) -> str:
+    exit_code = int(result.get("exit_code") or 0)
+    duration = float(result.get("duration_s") or 0.0)
+    stored = int(result.get("stored_line_count") or 0)
+    total = int(result.get("line_count") or stored)
+    noun = "line" if stored == 1 else "lines"
+    if result.get("truncated") and total > stored:
+        line_text = f"{stored} of {total} {noun}"
+    else:
+        line_text = f"{stored} {noun}"
+    return f"exit {exit_code} · {duration:.1f}s · {line_text}"
+
+
+def _terminal_result_ref(result: dict) -> str:
+    stored = int(result.get("stored_line_count") or 0)
+    return terminal_ref(1, max(1, stored))
 
 
 def _history_ends_with_assistant_text(history: list[dict], text: str) -> bool:

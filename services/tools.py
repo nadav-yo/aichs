@@ -388,11 +388,7 @@ def _read_text_limited(path: Path, max_bytes: int) -> str:
 
 
 def _normalize_read_line(line: str) -> str:
-    if line.endswith("\r\n"):
-        line = line[:-2]
-    elif line.endswith("\r"):
-        line = line[:-1]
-    return line + "\n"
+    return line.rstrip("\r\n") + "\n"
 
 
 def _read_text_lines(path: Path, offset: int, limit: int, max_bytes: int) -> str:

@@ -10,6 +10,7 @@ from PyQt6.QtGui import (
 
 from config import MAX_INLINE_IMAGE_DIMENSION
 from services.content import encode_image
+from services.terminal_refs import TERMINAL_REF_MIME
 from ui.theme import (
     composer_reference_colors, composer_shell_style, composer_style,
     chat_font_pt, palette, ACCENT,
@@ -71,6 +72,7 @@ class MessageInput(QTextEdit):
     edit_last_requested = pyqtSignal()
     image_pasted        = pyqtSignal(QImage)
     slash_changed       = pyqtSignal(str)   # "/" + typed text, or "" when leaving slash mode
+    terminal_changed    = pyqtSignal(str)   # "!" when showing terminal command help, or "" when leaving
     mention_changed     = pyqtSignal(str)   # "@" + typed text, or "" when leaving file mention mode
     picker_next         = pyqtSignal()
     picker_prev         = pyqtSignal()
@@ -86,6 +88,7 @@ class MessageInput(QTextEdit):
         self.setAcceptRichText(False)
         self.setFixedHeight(46)
         self._in_slash_mode = False
+        self._in_terminal_mode = False
         self._in_mention_mode = False
         self._mention_start = -1
         self._enter_to_send = False
@@ -111,12 +114,22 @@ class MessageInput(QTextEdit):
         text = self.toPlainText()
         if text.startswith("/"):
             self._in_slash_mode = True
+            if self._in_terminal_mode:
+                self._in_terminal_mode = False
+                self.terminal_changed.emit("")
             self.slash_changed.emit(text)
         elif self._in_slash_mode:
             self._in_slash_mode = False
             self.slash_changed.emit("")
 
-        query = "" if self._in_slash_mode else self._current_mention_query(text)
+        if text == "!":
+            self._in_terminal_mode = True
+            self.terminal_changed.emit(text)
+        elif self._in_terminal_mode:
+            self._in_terminal_mode = False
+            self.terminal_changed.emit("")
+
+        query = "" if self._in_slash_mode or self._in_terminal_mode else self._current_mention_query(text)
         if query:
             self._in_mention_mode = True
             self.mention_changed.emit(query)
@@ -136,6 +149,9 @@ class MessageInput(QTextEdit):
 
     def exit_slash_mode(self):
         self._in_slash_mode = False
+
+    def exit_terminal_mode(self):
+        self._in_terminal_mode = False
 
     def exit_mention_mode(self):
         self._in_mention_mode = False
@@ -181,6 +197,16 @@ class MessageInput(QTextEdit):
         cursor = self.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.setTextCursor(cursor)
+
+    def complete_terminal_command(self):
+        if self.toPlainText() != "!":
+            return
+        self.setPlainText("! ")
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.setTextCursor(cursor)
+        self.exit_terminal_mode()
+        self.terminal_changed.emit("")
 
     def keyPressEvent(self, event):
         if self._in_mention_mode:
@@ -239,6 +265,21 @@ class MessageInput(QTextEdit):
                 event.accept()
                 return
 
+        if self._in_terminal_mode:
+            key = event.key()
+            if key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+                event.accept()
+                return
+            if key in (Qt.Key.Key_Tab, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.picker_complete.emit()
+                event.accept()
+                return
+            if key == Qt.Key.Key_Escape:
+                self._in_terminal_mode = False
+                self.terminal_changed.emit("")
+                event.accept()
+                return
+
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             mods = event.modifiers()
             if self._enter_to_send:
@@ -260,6 +301,11 @@ class MessageInput(QTextEdit):
         super().keyPressEvent(event)
 
     def insertFromMimeData(self, source):
+        if source.hasFormat(TERMINAL_REF_MIME):
+            ref = bytes(source.data(TERMINAL_REF_MIME)).decode("utf-8", errors="replace").strip()
+            if ref:
+                self.textCursor().insertText(ref)
+                return
         if source.hasImage():
             image = source.imageData()
             if isinstance(image, QImage):

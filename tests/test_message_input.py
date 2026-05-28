@@ -3,6 +3,7 @@ from pathlib import Path
 from PyQt6.QtCore import QEvent, QPointF, QMimeData, QUrl, Qt
 from PyQt6.QtGui import QDropEvent, QImage, QKeyEvent, QTextCursor
 
+from services.terminal_refs import TERMINAL_REF_MIME
 from ui.widgets.message_input import ComposerWidget, _images_from_mime, _slash_has_args
 
 
@@ -67,6 +68,17 @@ def test_drop_non_image_url_does_not_insert_text(qapp, tmp_path):
     assert not composer.strip.has_images()
 
 
+def test_paste_terminal_ref_prefers_hidden_reference(qapp):
+    composer = ComposerWidget()
+    mime = QMimeData()
+    mime.setText("d----          27/05/2026    23:59                .aichs")
+    mime.setData(TERMINAL_REF_MIME, b"!term[27:27]")
+
+    composer.input.insertFromMimeData(mime)
+
+    assert composer.input.toPlainText() == "!term[27:27]"
+
+
 def test_slash_has_args():
     assert _slash_has_args("/continue status")
     assert _slash_has_args("  /guard   status  ")
@@ -91,6 +103,39 @@ def test_tab_completes_slash_picker_without_inserting_tab(qapp):
     assert completed == [True]
     assert composer.input.toPlainText() == "/conti"
     assert event.isAccepted()
+
+
+def test_bang_shows_terminal_picker_and_tab_completes(qapp):
+    composer = ComposerWidget()
+    changed = []
+    completed = []
+    composer.input.terminal_changed.connect(changed.append)
+    composer.input.picker_complete.connect(lambda: completed.append(True))
+    composer.input.setPlainText("!")
+
+    event = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_Tab,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    composer.input.keyPressEvent(event)
+    composer.input.complete_terminal_command()
+
+    assert changed[0] == "!"
+    assert completed == [True]
+    assert composer.input.toPlainText() == "! "
+    assert changed[-1] == ""
+
+
+def test_terminal_picker_hides_after_command_text(qapp):
+    composer = ComposerWidget()
+    changed = []
+    composer.input.terminal_changed.connect(changed.append)
+
+    composer.input.setPlainText("!")
+    composer.input.setPlainText("!dir")
+
+    assert changed == ["!", ""]
 
 
 def test_tab_completes_mention_picker(qapp):

@@ -2,6 +2,7 @@ import base64
 import copy
 
 from services.crew import crew_name_from_metadata
+from services.terminal_refs import expand_terminal_refs
 
 _HIDDEN_SYNTHETIC_MESSAGES = {"tool_results", "active_task", "extension", "extension_resume"}
 _TRANSIENT_SYNTHETIC_MESSAGES = {"active_task", "extension", "extension_resume"}
@@ -235,10 +236,31 @@ def _content_for_model(msg: dict):
 
 
 def _model_context_messages(messages: list[dict]) -> list[dict]:
-    return [
-        msg for idx, msg in enumerate(messages)
-        if not _is_synthesized_crew_bubble(messages, idx)
-    ]
+    out = []
+    terminal_messages = []
+    for idx, msg in enumerate(messages):
+        if _is_synthesized_crew_bubble(messages, idx):
+            continue
+        visible_msg = copy.deepcopy(msg)
+        if visible_msg.get("synthetic") == "terminal_result":
+            terminal_messages.append(visible_msg)
+        elif visible_msg.get("role") == "user":
+            expanded = expand_terminal_refs(content_text(visible_msg.get("content", "")), terminal_messages)
+            if expanded:
+                visible_msg["content"] = _append_model_text(
+                    visible_msg.get("content", ""),
+                    f"Referenced terminal output:\n\n{expanded}",
+                )
+        out.append(visible_msg)
+    return out
+
+
+def _append_model_text(content, text: str):
+    if isinstance(content, str):
+        return f"{content}\n\n{text}" if content else text
+    if isinstance(content, list):
+        return content + [{"type": "text", "text": text}]
+    return f"{content}\n\n{text}"
 
 
 def _is_synthesized_crew_bubble(messages: list[dict], idx: int) -> bool:

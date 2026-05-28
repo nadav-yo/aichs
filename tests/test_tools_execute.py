@@ -43,6 +43,16 @@ class TestReadFile:
         assert "[read: lines 2-3 of 5]" in out
         assert "more lines follow" in out
 
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+    def test_reads_line_range_normalizes_lf_and_crlf(self, cwd, workspace, newline):
+        path = workspace / "lines.txt"
+        path.write_bytes(
+            newline.join(["line1", "line2", "line3", "line4", "line5", ""]).encode("utf-8")
+        )
+        out = execute("read_file", {"path": "lines.txt", "offset": 2, "limit": 2}, cwd)
+        assert out.startswith("line2\nline3\n")
+        assert "\n\nline3" not in out
+
     def test_offset_past_eof(self, cwd, workspace):
         path = workspace / "short.txt"
         path.write_text("only\n", encoding="utf-8")

@@ -12,12 +12,21 @@ _ROLE_DATA = Qt.ItemDataRole.UserRole + 1
 class SkillPicker(QFrame):
     skill_selected = pyqtSignal(object)   # Skill
     command_selected = pyqtSignal(object) # SlashCommand
+    terminal_selected = pyqtSignal()
     dismissed      = pyqtSignal()
 
-    def __init__(self, skills: list[Skill], commands: list[SlashCommand] | None = None, parent=None):
+    def __init__(
+        self,
+        skills: list[Skill],
+        commands: list[SlashCommand] | None = None,
+        *,
+        include_terminal: bool = False,
+        parent=None,
+    ):
         super().__init__(parent)
         self._all = skills
         self._commands = commands or []
+        self._include_terminal = include_terminal
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         p = palette()
@@ -45,6 +54,16 @@ class SkillPicker(QFrame):
         self.filter("")
 
     def filter(self, query: str):
+        if query == "!" and self._include_terminal:
+            self._list.clear()
+            item = QListWidgetItem("!  —  Execute terminal commands")
+            item.setData(_ROLE_KIND, "terminal")
+            item.setData(_ROLE_DATA, None)
+            self._list.addItem(item)
+            self._list.setCurrentRow(0)
+            self.setFixedHeight(52)
+            return
+
         q = query.lstrip("/").lower().strip()
         self._list.clear()
         for cmd in self._commands:
@@ -94,5 +113,7 @@ class SkillPicker(QFrame):
         self.hide()
         if kind == "command":
             self.command_selected.emit(data)
+        elif kind == "terminal":
+            self.terminal_selected.emit()
         else:
             self.skill_selected.emit(data)

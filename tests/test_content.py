@@ -11,6 +11,7 @@ from services.content import (
     prepare_for_openai,
     prepare_for_storage,
 )
+from services.terminal_refs import build_terminal_summary, expand_terminal_refs
 
 
 def test_build_user_content_text_only():
@@ -197,3 +198,69 @@ def test_prepare_file_block_notes_omitted_attachment():
 
     anthropic = prepare_for_anthropic(messages)
     assert "content omitted after the original turn" in anthropic[0]["content"][1]["text"]
+
+
+def test_terminal_summary_uses_reference_not_full_context():
+    output = "\n".join(f"line {i}" for i in range(1, 51))
+    summary = build_terminal_summary({
+        "command": "pytest -q",
+        "exit_code": 0,
+        "duration_s": 1.2,
+        "line_count": 50,
+        "stored_line_count": 50,
+        "output": output,
+    })
+
+    assert "Output reference: !term[1:50]" in summary
+    assert "Command: pytest -q" in summary
+    assert "line 1" not in summary
+    assert "line 31" not in summary
+
+
+def test_terminal_refs_expand_into_model_context():
+    messages = [
+        {
+            "role": "assistant",
+            "synthetic": "terminal_result",
+            "content": "Terminal summary\nReference: !term[1:4]",
+            "terminal": {
+                "command": "pytest -q",
+                "output": "one\ntwo\nthree\nfour",
+                "stored_line_count": 4,
+            },
+        },
+        {"role": "user", "content": "explain !term[2:3]"},
+    ]
+
+    anthropic = prepare_for_anthropic(messages)
+    assert "one" not in anthropic[1]["content"]
+    assert "two\nthree" in anthropic[1]["content"]
+    assert "from command: pytest -q" in anthropic[1]["content"]
+
+
+def test_terminal_refs_expand_exact_line_without_shift():
+    messages = [
+        {
+            "role": "assistant",
+            "synthetic": "terminal_result",
+            "content": "Terminal summary\nOutput reference: !term[1:2]",
+            "terminal": {
+                "command": "dir",
+                "output": (
+                    "-a---          25/05/2026    13:53            223 pytest.ini\n"
+                    "-a---          27/05/2026    23:02           3736 README.md"
+                ),
+                "stored_line_count": 2,
+            },
+        },
+        {"role": "user", "content": "can you read this file? !term[2:2]"},
+    ]
+
+    anthropic = prepare_for_anthropic(messages)
+
+    assert "README.md" in anthropic[1]["content"]
+    assert "pytest.ini" not in anthropic[1]["content"]
+
+
+def test_expand_terminal_refs_without_previous_terminal_is_empty():
+    assert expand_terminal_refs("see !term[1:2]", []) == ""

@@ -34,6 +34,18 @@ def test_skill_picker_current_skill(qapp):
     assert data.name == "review"
 
 
+def test_skill_picker_terminal_hint(qapp):
+    picker = SkillPicker(skills=[], commands=[], include_terminal=True)
+    picker.filter("!")
+
+    current = picker.current()
+
+    assert current is not None
+    kind, data = current
+    assert kind == "terminal"
+    assert data is None
+
+
 def test_should_complete_slash_selection_only_for_partial_tokens():
     assert _should_complete_slash_selection("/conti", "continue")
     assert not _should_complete_slash_selection("/continue", "continue")
