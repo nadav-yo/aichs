@@ -20,6 +20,7 @@ from services.tools import (
     _iter_search_paths,
     _list_files,
     _read_text_limited,
+    _read_project_chat,
     _run_shell_command,
     _search_project_chats,
     _search_files,
@@ -363,6 +364,40 @@ class TestSearchProjectChats:
         monkeypatch.setattr("services.tools.config.CONV_DIR", tmp_path / "missing")
         assert "(no saved conversations)" in _search_project_chats("playwright", cwd)
         assert "requires a query" in execute("search_project_chats", {"query": ""}, cwd)
+
+    def test_read_project_chat_exact_reference(self, cwd, workspace, tmp_path, monkeypatch):
+        conv_dir = tmp_path / "conversations"
+        conv_dir.mkdir()
+        monkeypatch.setattr("services.tools.config.CONV_DIR", conv_dir)
+        self._write_chat(
+            conv_dir,
+            "exact",
+            cwd=str(workspace),
+            title="Exact notes",
+            messages=[
+                {"role": "user", "content": "old setup"},
+                {"role": "user", "content": "first decision"},
+                {"role": "assistant", "content": "second answer"},
+            ],
+        )
+
+        out = execute("read_project_chat", {"conversation_id": "exact", "max_messages": 2}, cwd)
+
+        assert "Conversation: Exact notes" in out
+        assert "ID: exact" in out
+        assert "old setup" not in out
+        assert "user: first decision" in out
+        assert "assistant: second answer" in out
+
+    def test_read_project_chat_guards_missing_and_other_workspace(self, cwd, workspace, tmp_path, monkeypatch):
+        conv_dir = tmp_path / "conversations"
+        conv_dir.mkdir()
+        monkeypatch.setattr("services.tools.config.CONV_DIR", conv_dir)
+        self._write_chat(conv_dir, "other", cwd=str(tmp_path / "other"))
+
+        assert "requires a conversation_id" in execute("read_project_chat", {"conversation_id": ""}, cwd)
+        assert "belongs to another workspace" in _read_project_chat("other", cwd)
+        assert "Conversation not found" in _read_project_chat("missing", cwd)
 
 
 class TestRegistryApi:

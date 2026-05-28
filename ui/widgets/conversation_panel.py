@@ -2,13 +2,15 @@ from datetime import datetime, date
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QApplication,
     QListWidget, QListWidgetItem, QLabel, QLineEdit, QMenu, QSizePolicy,
+    QAbstractItemView,
 )
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QEvent
-from PyQt6.QtGui import QAction, QFontMetrics, QPainter, QPalette
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QEvent, QMimeData
+from PyQt6.QtGui import QAction, QDrag, QFontMetrics, QPainter, QPalette
 
 from storage.repository import ConversationStore
+from services.chat_drag import AICHS_CHAT_DROP_MIME, chat_drop_payload, chat_drop_text
 from services.export import export_conversation_file
 from ui.theme import (
     palette, meta_font_pt, chat_font_pt, app_font,
@@ -17,6 +19,7 @@ from ui.theme import (
 
 _ROLE_PATH = Qt.ItemDataRole.UserRole
 _ROLE_CONV_ID = Qt.ItemDataRole.UserRole + 1
+_ROLE_TITLE = Qt.ItemDataRole.UserRole + 2
 
 
 class TitleLabel(QLabel):
@@ -107,6 +110,8 @@ class ConversationItem(QWidget):
         self.customContextMenuRequested.connect(self._context_menu)
         self._title = title
         self._pinned = pinned
+        self._drag_start = None
+        self._drag_data: dict | None = None
 
         row = QHBoxLayout(self)
         row.setContentsMargins(9, 7, 6, 7)
@@ -149,9 +154,38 @@ class ConversationItem(QWidget):
         self.apply_appearance()
         self._sync_delete_visibility()
 
+    def set_drag_data(self, conv_id: str, title: str):
+        self._drag_data = {
+            "id": str(conv_id or "").strip(),
+            "title": _normalize_title(title or self._title) or "Untitled",
+        }
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.title_lbl.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not self._drag_data or not self._drag_start:
+            super().mouseMoveEvent(event)
+            return
+        if not event.buttons() & Qt.MouseButton.LeftButton:
+            super().mouseMoveEvent(event)
+            return
+        distance = (event.position().toPoint() - self._drag_start).manhattanLength()
+        if distance < QApplication.startDragDistance():
+            super().mouseMoveEvent(event)
+            return
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(AICHS_CHAT_DROP_MIME, chat_drop_payload([self._drag_data]))
+        mime.setText(chat_drop_text([self._drag_data]))
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.CopyAction)
 
     def apply_appearance(self):
         p = palette()
@@ -233,6 +267,30 @@ def _conversation_item_height() -> int:
     return 7 + 7 + title_fm.lineSpacing() + 1 + date_fm.lineSpacing()
 
 
+class _ConversationList(QListWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.setDefaultDropAction(Qt.DropAction.CopyAction)
+
+    def mimeData(self, items: list[QListWidgetItem]) -> QMimeData:
+        chats = []
+        for item in items:
+            conv_id = str(item.data(_ROLE_CONV_ID) or "").strip()
+            if not conv_id:
+                continue
+            chats.append({
+                "id": conv_id,
+                "title": str(item.data(_ROLE_TITLE) or "Untitled").strip() or "Untitled",
+            })
+        mime = QMimeData()
+        if chats:
+            mime.setData(AICHS_CHAT_DROP_MIME, chat_drop_payload(chats))
+            mime.setText(chat_drop_text(chats))
+        return mime
+
+
 class ConversationPanel(QWidget):
     selected = pyqtSignal(str)
     new_chat = pyqtSignal()
@@ -262,7 +320,7 @@ class ConversationPanel(QWidget):
         self.no_results.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.no_results.hide()
 
-        self.list = QListWidget()
+        self.list = _ConversationList()
         self.list.itemClicked.connect(self._on_item_clicked)
         self.list.viewport().installEventFilter(self)
         root.addWidget(self.list)
@@ -342,10 +400,12 @@ class ConversationPanel(QWidget):
             conv_id = str(data.get("id") or Path(path).stem)
             item.setData(_ROLE_PATH, str(path))
             item.setData(_ROLE_CONV_ID, conv_id)
+            item.setData(_ROLE_TITLE, title)
             item.setSizeHint(QSize(0, _conversation_item_height()))
             self.list.addItem(item)
 
             widget = ConversationItem(title, date_str, pinned=data.get("pinned", False))
+            widget.set_drag_data(conv_id, title)
             widget.delete_requested.connect(lambda p=str(path): self._delete(p))
             widget.rename_requested.connect(lambda t, p=str(path): self._rename(p, t))
             widget.pin_requested.connect(lambda p=str(path): self._toggle_pin(p))

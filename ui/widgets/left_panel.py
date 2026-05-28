@@ -1,13 +1,16 @@
 import os
+from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QPushButton, QHBoxLayout, QLabel, QMenu, QSizePolicy, QStyleFactory,
+    QAbstractItemView,
 )
-from PyQt6.QtCore import pyqtSignal, Qt, QFileSystemWatcher, QTimer
+from PyQt6.QtCore import pyqtSignal, Qt, QFileSystemWatcher, QTimer, QMimeData
 from PyQt6.QtGui import QColor, QAction
 
 from config import IGNORED, MAX_TREE_ENTRIES_PER_DIR
+from services.chat_drag import AICHS_FILE_DROP_MIME, file_drop_payload, file_drop_text
 from services.git_status import list_file_changes
 from storage.repository import ConversationStore
 from storage.settings import SettingsStore
@@ -99,6 +102,9 @@ class FileTree(QTreeWidget):
         self.setAnimated(False)
         self.setAllColumnsShowFocus(False)
         self.setStyle(QStyleFactory.create("Fusion"))
+        self.setDragEnabled(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.setDefaultDropAction(Qt.DropAction.CopyAction)
         self._apply_tree_style()
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._context_menu)
@@ -129,6 +135,23 @@ class FileTree(QTreeWidget):
         path = item.data(0, Qt.ItemDataRole.UserRole)
         if path and os.path.isfile(path):
             self.file_opened.emit(path)
+
+    def mimeData(self, items: list[QTreeWidgetItem]) -> QMimeData:
+        refs = []
+        root = Path(self.root_path).resolve()
+        for item in items:
+            path = item.data(0, Qt.ItemDataRole.UserRole)
+            if not path or not os.path.isfile(path):
+                continue
+            try:
+                refs.append(Path(path).resolve().relative_to(root).as_posix())
+            except (OSError, ValueError):
+                continue
+        mime = QMimeData()
+        if refs:
+            mime.setData(AICHS_FILE_DROP_MIME, file_drop_payload(refs))
+            mime.setText(file_drop_text(refs))
+        return mime
 
     def _context_menu(self, pos):
         menu = QMenu(self)

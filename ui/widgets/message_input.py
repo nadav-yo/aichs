@@ -9,6 +9,17 @@ from PyQt6.QtGui import (
 )
 
 from config import MAX_INLINE_IMAGE_DIMENSION
+from services.chat_drag import (
+    AICHS_CHAT_DROP_MIME,
+    AICHS_COMMIT_DROP_MIME,
+    AICHS_FILE_DROP_MIME,
+    chat_drop_text,
+    commit_drop_text,
+    file_drop_text,
+    parse_chat_drop,
+    parse_commit_drop,
+    parse_file_drop,
+)
 from services.content import encode_image
 from services.file_ref_clipboard import AICHS_MESSAGE_COPY_MIME, parse_file_refs_payload
 from services.terminal_refs import TERMINAL_REF_MIME
@@ -50,6 +61,14 @@ def _mime_has_attachments(mime) -> bool:
     if mime.hasUrls():
         return any(url.toLocalFile() for url in mime.urls())
     return False
+
+
+def _mime_has_chat_refs(mime) -> bool:
+    return (
+        mime.hasFormat(AICHS_FILE_DROP_MIME)
+        or mime.hasFormat(AICHS_COMMIT_DROP_MIME)
+        or mime.hasFormat(AICHS_CHAT_DROP_MIME)
+    )
 
 
 def _images_from_mime(mime) -> list[QImage]:
@@ -94,6 +113,7 @@ class MessageInput(QTextEdit):
         self._mention_start = -1
         self._enter_to_send = False
         self._pasted_file_refs: list[str] = []
+        self._pasted_chat_refs: list[dict] = []
         self.setAcceptDrops(True)
         self._reference_highlighter = _ReferenceHighlighter(self.document())
         self._apply_style()
@@ -164,8 +184,14 @@ class MessageInput(QTextEdit):
         self._pasted_file_refs.clear()
         return refs
 
+    def take_pasted_chat_refs(self) -> list[dict]:
+        refs = list(self._pasted_chat_refs)
+        self._pasted_chat_refs.clear()
+        return refs
+
     def clear_pasted_file_refs(self):
         self._pasted_file_refs.clear()
+        self._pasted_chat_refs.clear()
 
     def insert_file_mention(self, rel_path: str):
         token = f'@"{rel_path}"' if any(ch.isspace() for ch in rel_path) else f"@{rel_path}"
@@ -184,6 +210,49 @@ class MessageInput(QTextEdit):
         self.setTextCursor(cursor)
         self.exit_mention_mode()
         self.mention_changed.emit("")
+
+    def insert_reference_text(self, text: str):
+        text = str(text or "").strip()
+        if not text:
+            return
+        cursor = self.textCursor()
+        current = self.toPlainText()
+        pos = cursor.position()
+        prefix = "" if pos == 0 or current[pos - 1].isspace() else " "
+        suffix = "" if pos < len(current) and current[pos].isspace() else " "
+        cursor.insertText(prefix + text + suffix)
+        self.setTextCursor(cursor)
+
+    def insert_refs_from_mime(self, mime) -> bool:
+        if mime.hasFormat(AICHS_FILE_DROP_MIME):
+            text = file_drop_text(parse_file_drop(mime.data(AICHS_FILE_DROP_MIME)))
+            if text:
+                self.insert_reference_text(text)
+                return True
+        if mime.hasFormat(AICHS_COMMIT_DROP_MIME):
+            text = commit_drop_text(parse_commit_drop(mime.data(AICHS_COMMIT_DROP_MIME)))
+            if text:
+                self.insert_reference_text(text)
+                return True
+        if mime.hasFormat(AICHS_CHAT_DROP_MIME):
+            refs = parse_chat_drop(mime.data(AICHS_CHAT_DROP_MIME))
+            text = chat_drop_text(refs)
+            if text:
+                self._remember_chat_refs(refs)
+                self.insert_reference_text(text)
+                return True
+        return False
+
+    def _remember_chat_refs(self, refs: list[dict]):
+        seen = {ref.get("id") for ref in self._pasted_chat_refs}
+        for ref in refs:
+            conv_id = str(ref.get("id") or "").strip()
+            if conv_id and conv_id not in seen:
+                seen.add(conv_id)
+                self._pasted_chat_refs.append({
+                    "id": conv_id,
+                    "title": str(ref.get("title") or "Untitled").strip() or "Untitled",
+                })
 
     def add_file_mention(self, rel_path: str):
         token = f'@"{rel_path}"' if any(ch.isspace() for ch in rel_path) else f"@{rel_path}"
@@ -311,6 +380,8 @@ class MessageInput(QTextEdit):
         super().keyPressEvent(event)
 
     def insertFromMimeData(self, source):
+        if self.insert_refs_from_mime(source):
+            return
         if source.hasFormat(TERMINAL_REF_MIME):
             ref = bytes(source.data(TERMINAL_REF_MIME)).decode("utf-8", errors="replace").strip()
             if ref:
@@ -332,19 +403,24 @@ class MessageInput(QTextEdit):
         super().insertFromMimeData(source)
 
     def dragEnterEvent(self, event: QDragEnterEvent):
-        if _mime_has_attachments(event.mimeData()):
+        if _mime_has_chat_refs(event.mimeData()) or _mime_has_attachments(event.mimeData()):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event):
-        if _mime_has_attachments(event.mimeData()):
+        if _mime_has_chat_refs(event.mimeData()) or _mime_has_attachments(event.mimeData()):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event: QDropEvent):
         mime = event.mimeData()
+        if _mime_has_chat_refs(mime):
+            self._move_cursor_to_drop(event)
+            if self.insert_refs_from_mime(mime):
+                event.acceptProposedAction()
+                return
         images = _images_from_mime(mime)
         if images:
             for image in images:
@@ -355,6 +431,13 @@ class MessageInput(QTextEdit):
             event.acceptProposedAction()
             return
         super().dropEvent(event)
+
+    def _move_cursor_to_drop(self, event: QDropEvent):
+        try:
+            pos = event.position().toPoint()
+        except AttributeError:
+            pos = event.pos()
+        self.setTextCursor(self.cursorForPosition(pos))
 
 
 class _Thumb(QWidget):
@@ -542,6 +625,9 @@ class ComposerWidget(QWidget):
     def take_pasted_file_refs(self) -> list[str]:
         return self.input.take_pasted_file_refs()
 
+    def take_pasted_chat_refs(self) -> list[dict]:
+        return self.input.take_pasted_chat_refs()
+
     def apply_appearance(self):
         self._shell.setStyleSheet(composer_shell_style())
         self.input.apply_appearance()
@@ -551,10 +637,15 @@ class ComposerWidget(QWidget):
             self.set_skill(self._active_skill)
 
     def dragEnterEvent(self, event: QDragEnterEvent):
-        if _mime_has_attachments(event.mimeData()):
+        if _mime_has_chat_refs(event.mimeData()) or _mime_has_attachments(event.mimeData()):
             event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent):
+        if _mime_has_chat_refs(event.mimeData()):
+            if self.input.insert_refs_from_mime(event.mimeData()):
+                event.acceptProposedAction()
+                self.focus_input()
+                return
         for image in _images_from_mime(event.mimeData()):
             self.strip.add_image(image)
         if event.mimeData().hasUrls() or event.mimeData().hasImage():

@@ -326,6 +326,30 @@ def _register_builtin_tools(registry: ToolRegistry) -> None:
         parallel_safe=True,
         source="builtin",
     )
+    registry.tool(
+        name="read_project_chat",
+        description=(
+            "Read one exact saved aichs conversation for this project by conversation_id. "
+            "Use this for dropped chat references; returns a compact transcript."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Exact saved conversation id from a dropped chat reference.",
+                },
+                "max_messages": {
+                    "type": "integer",
+                    "description": "Maximum visible messages to include (default 20, max 50).",
+                },
+            },
+            "required": ["conversation_id"],
+        },
+        execute=_execute_read_project_chat,
+        parallel_safe=True,
+        source="builtin",
+    )
 
 
 def _execute_read_file(ctx: ToolContext, inputs: dict) -> str:
@@ -373,6 +397,14 @@ def _execute_search_project_chats(ctx: ToolContext, inputs: dict) -> str:
         str(inputs.get("query") or ""),
         ctx.cwd,
         inputs.get("limit"),
+    )
+
+
+def _execute_read_project_chat(ctx: ToolContext, inputs: dict) -> str:
+    return _read_project_chat(
+        str(inputs.get("conversation_id") or ""),
+        ctx.cwd,
+        inputs.get("max_messages"),
     )
 
 
@@ -727,6 +759,72 @@ def _search_project_chats(query: str, cwd: str, limit=None) -> str:
                 lines.append(f"   - {snippet}")
         else:
             lines.append("   - Title matched; no message snippet found.")
+    return _trim_output("\n".join(lines))
+
+
+def _read_project_chat(conversation_id: str, cwd: str, max_messages=None) -> str:
+    wanted = str(conversation_id or "").strip()
+    if not wanted:
+        return "[tool error] read_project_chat requires a conversation_id."
+    try:
+        limit = int(max_messages) if max_messages is not None else 20
+    except (TypeError, ValueError):
+        limit = 20
+    limit = max(1, min(50, limit))
+
+    conv_dir = Path(config.CONV_DIR)
+    if not conv_dir.exists():
+        return "(no saved conversations)"
+
+    cwd_path = Path(cwd).resolve()
+    found = None
+    for path in sorted(conv_dir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        conv_id = str(data.get("id") or path.stem)
+        if conv_id != wanted and path.stem != wanted:
+            continue
+        scope = _conversation_project_scope(data, cwd_path)
+        if scope is None:
+            return f"[tool error] Conversation {wanted!r} belongs to another workspace."
+        found = (path, data, scope)
+        break
+
+    if found is None:
+        return f"[tool error] Conversation not found: {wanted}"
+
+    path, data, scope = found
+    title = str(data.get("title") or "Untitled")
+    updated = str(data.get("updated_at") or data.get("created_at") or "unknown date")
+    scope_note = "current project" if scope == "project" else "legacy unscoped"
+    lines = [
+        f"Conversation: {title}",
+        f"ID: {data.get('id') or path.stem}",
+        f"Updated: {updated}",
+        f"Scope: {scope_note}",
+        "",
+        "Visible transcript:",
+    ]
+    visible_messages = [
+        msg for msg in data.get("messages", [])
+        if is_visible_message(msg)
+    ]
+    selected = visible_messages[-limit:]
+    omitted = len(visible_messages) - len(selected)
+    count = 0
+    if omitted > 0:
+        lines.append(f"[showing most recent {len(selected)} of {len(visible_messages)} visible messages]")
+    for msg in selected:
+        role = str(msg.get("role") or "message")
+        text = re.sub(r"\s+", " ", _message_text(msg.get("content", ""))).strip()
+        if len(text) > 900:
+            text = text[:897].rstrip() + "..."
+        lines.append(f"- {role}: {text}")
+        count += 1
+    if count == 0:
+        lines.append("- (no visible messages)")
     return _trim_output("\n".join(lines))
 
 

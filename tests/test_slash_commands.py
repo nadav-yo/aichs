@@ -4,6 +4,7 @@ from services.slash_commands import (
     BUILTIN_COMMANDS,
     load_all_commands,
     parse_builtin_command,
+    parse_builtin_prompt_command,
     parse_extension_command,
     slash_invocation,
 )
@@ -11,7 +12,7 @@ from services.slash_commands import (
 
 def test_builtin_names():
     names = {cmd.name for cmd in BUILTIN_COMMANDS}
-    assert names == {"compact", "reload"}
+    assert names == {"archivist", "compact", "reload"}
 
 
 @pytest.mark.parametrize(
@@ -20,6 +21,7 @@ def test_builtin_names():
         ("/compact", "compact"),
         ("/RELOAD extra", "reload"),
         ("  /compact  ", "compact"),
+        ("/archivist notes", None),
         ("/unknown", None),
         ("not a command", None),
         ("/", None),
@@ -28,6 +30,14 @@ def test_builtin_names():
 )
 def test_parse_builtin_command(text, expected):
     assert parse_builtin_command(text) == expected
+
+
+def test_parse_builtin_prompt_command():
+    cmd = parse_builtin_prompt_command("/archivist what did we decide?")
+    assert cmd is not None
+    assert cmd.name == "archivist"
+    assert cmd.tools == ["search_project_chats", "read_project_chat"]
+    assert parse_builtin_prompt_command("/compact") is None
 
 
 @pytest.mark.parametrize(
@@ -46,7 +56,7 @@ def test_slash_invocation(text, expected):
 
 def test_load_all_commands_includes_builtins(workspace):
     names = {c.name for c in load_all_commands(str(workspace)) if c.source == "builtin"}
-    assert names == {"compact", "reload"}
+    assert names == {"archivist", "compact", "reload"}
 
 
 def test_load_all_commands_includes_extension(workspace_with_extension):

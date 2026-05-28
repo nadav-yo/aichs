@@ -4,7 +4,7 @@ import copy
 from services.crew import crew_name_from_metadata
 from services.terminal_refs import expand_terminal_refs
 
-_HIDDEN_SYNTHETIC_MESSAGES = {"tool_results", "active_task", "extension", "extension_resume"}
+_HIDDEN_SYNTHETIC_MESSAGES = {"tool_results", "active_task", "extension", "extension_resume", "chat_refs"}
 _TRANSIENT_SYNTHETIC_MESSAGES = {"active_task", "extension", "extension_resume"}
 _ACTIVE_TASK_PREFIX = "Continue the active user task."
 

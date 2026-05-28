@@ -65,6 +65,7 @@ from services.user_terminal import UserTerminalThread
 from services.slash_commands import (
     load_all_commands,
     parse_builtin_command,
+    parse_builtin_prompt_command,
     parse_extension_command,
     slash_invocation,
 )
@@ -726,6 +727,11 @@ class ChatPanel(QWidget):
             if hasattr(self.composer, "take_pasted_file_refs")
             else []
         )
+        pasted_chat_refs = (
+            self.composer.take_pasted_chat_refs()
+            if hasattr(self.composer, "take_pasted_chat_refs")
+            else []
+        )
 
         if text.startswith("!") and not images:
             self._run_user_terminal_from_input(text)
@@ -747,6 +753,22 @@ class ChatPanel(QWidget):
                 self._file_picker.hide()
             self._run_builtin_command(cmd)
             return
+
+        builtin_prompt_cmd = parse_builtin_prompt_command(text) if text and not images else None
+        if builtin_prompt_cmd:
+            invocation = slash_invocation(text)
+            trailing_text = invocation[1] if invocation else ""
+            if not trailing_text:
+                self.composer.clear()
+                self.composer.input.exit_slash_mode()
+                self.composer.input.exit_mention_mode()
+                if self._skill_picker:
+                    self._skill_picker.hide()
+                self._activate_extension_command(builtin_prompt_cmd)
+                return
+            text = trailing_text
+            files = _message_files(self.cwd, text, pasted_file_refs)
+            self.composer.set_skill(self._skill_from_command(builtin_prompt_cmd))
 
         ext_cmd = parse_extension_command(text, self.cwd) if text and not images else None
         if ext_cmd:
@@ -779,6 +801,7 @@ class ChatPanel(QWidget):
             "title_text": text or "Image",
             "skill": self.composer.active_skill(),
             "crew": _first_summoned_crew(text, self._settings.load()),
+            "chat_refs": pasted_chat_refs,
         }
 
         self.composer.clear()
@@ -818,6 +841,13 @@ class ChatPanel(QWidget):
             self._render_start_index = user_idx
         if is_visible_message(user_msg):
             self._add_bubble(content, is_user=True, history_index=user_idx, timestamp=now)
+        chat_ref_context = _chat_ref_context(draft.get("chat_refs"))
+        if chat_ref_context:
+            self.history.append({
+                "role": "user",
+                "content": chat_ref_context,
+                "synthetic": "chat_refs",
+            })
         if draft.get("crew"):
             self._add_notice(_crew_notice_text(crew_metadata(draft["crew"], self._settings.load()), "joined"))
 
@@ -1256,7 +1286,7 @@ class ChatPanel(QWidget):
         self.composer.clear()
         self.composer.input.exit_slash_mode()
         self._skill_picker.hide()
-        if getattr(command, "source", "builtin") == "builtin":
+        if getattr(command, "source", "builtin") == "builtin" and getattr(command, "executable", False):
             self._run_builtin_command(command.name)
         elif getattr(command, "executable", False):
             self._run_extension_command(command.name, "")
@@ -1296,6 +1326,9 @@ class ChatPanel(QWidget):
         self.composer.focus_input()
 
     def _skill_from_extension_command(self, command):
+        return self._skill_from_command(command)
+
+    def _skill_from_command(self, command):
         skill = Skill(
             name=command.name,
             description=command.description,
@@ -2449,6 +2482,13 @@ class ChatPanel(QWidget):
         if draft.get("synthetic"):
             user_msg["synthetic"] = draft["synthetic"]
         history.append(user_msg)
+        chat_ref_context = _chat_ref_context(draft.get("chat_refs"))
+        if chat_ref_context:
+            history.append({
+                "role": "user",
+                "content": chat_ref_context,
+                "synthetic": "chat_refs",
+            })
         data["messages"] = history
         data["updated_at"] = now
         model = data.get("model") or self.model_combo.currentText()
@@ -2707,16 +2747,43 @@ def _message_files(cwd: str, text: str, hidden_refs: list[str] | None = None) ->
     return _files_for_refs(cwd, refs)
 
 
+def _chat_ref_context(refs: list[dict] | None) -> str:
+    cleaned = []
+    seen = set()
+    for ref in refs or []:
+        if not isinstance(ref, dict):
+            continue
+        conv_id = str(ref.get("id") or "").strip()
+        if not conv_id or conv_id in seen:
+            continue
+        seen.add(conv_id)
+        title = " ".join(str(ref.get("title") or "Untitled").split()) or "Untitled"
+        cleaned.append((conv_id, title))
+    if not cleaned:
+        return ""
+    lines = [
+        "[Hidden chat references from drag/drop]",
+        "Use read_project_chat with these exact conversation_id values if the referenced chat contents are needed.",
+    ]
+    for conv_id, title in cleaned:
+        lines.append(f"- {title} (conversation_id: {conv_id})")
+    return "\n".join(lines)
+
+
 def _files_for_refs(cwd: str, refs: list[str]) -> list[dict]:
     root = Path(cwd).resolve()
     seen: set[str] = set()
     files: list[dict] = []
     for raw in refs:
-        if not raw or raw in seen:
+        lookup = str(raw or "").replace("\\", "/")
+        if not lookup:
             continue
-        seen.add(raw)
+        key = lookup.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
         try:
-            path = (root / raw).resolve()
+            path = (root / lookup).resolve()
             path.relative_to(root)
         except (OSError, ValueError):
             continue

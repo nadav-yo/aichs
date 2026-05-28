@@ -62,6 +62,7 @@ def test_chat_thread_exposes_ask_crew_tool_by_default(workspace, qapp):
     names = {t["name"] for t in thread._tools_anthropic()}
     assert ASK_CREW_TOOL_NAME in names
     assert "search_project_chats" not in names
+    assert "read_project_chat" not in names
 
     crew_thread = ChatThread(
         "claude-sonnet-4-6",
@@ -86,6 +87,7 @@ def test_archivist_gets_project_chat_memory_tool(workspace, qapp):
     )
     names = {t["name"] for t in thread._tools_anthropic()}
     assert "search_project_chats" in names
+    assert "read_project_chat" in names
 
 
 def test_emit_chunk_buffering(qapp, workspace):

@@ -4,6 +4,14 @@ from PyQt6.QtCore import QEvent, QPointF, QMimeData, QUrl, Qt
 from PyQt6.QtGui import QDropEvent, QImage, QKeyEvent, QTextCursor
 
 from services.file_ref_clipboard import AICHS_MESSAGE_COPY_MIME, file_refs_payload
+from services.chat_drag import (
+    AICHS_CHAT_DROP_MIME,
+    AICHS_COMMIT_DROP_MIME,
+    AICHS_FILE_DROP_MIME,
+    chat_drop_payload,
+    commit_drop_payload,
+    file_drop_payload,
+)
 from services.terminal_refs import TERMINAL_REF_MIME
 from ui.widgets.message_input import (
     ComposerWidget,
@@ -97,6 +105,44 @@ def test_paste_aichs_message_adds_visible_file_mention_and_records_refs(qapp):
     assert composer.input.toPlainText() == "@services\\git_diff.py: 77%"
     assert composer.take_pasted_file_refs() == ["services\\git_diff.py"]
     assert composer.take_pasted_file_refs() == []
+
+
+def test_drop_file_ref_inserts_visible_mention(qapp):
+    composer = ComposerWidget()
+    mime = QMimeData()
+    mime.setData(AICHS_FILE_DROP_MIME, file_drop_payload(["src/main.py"]))
+
+    composer.input.dropEvent(_drop_event(mime))
+
+    assert composer.input.toPlainText() == "@src/main.py "
+
+
+def test_drop_commit_ref_inserts_commit_text(qapp):
+    composer = ComposerWidget()
+    mime = QMimeData()
+    mime.setData(
+        AICHS_COMMIT_DROP_MIME,
+        commit_drop_payload([{"hash": "abc1234", "subject": "initial commit"}]),
+    )
+
+    composer.input.dropEvent(_drop_event(mime))
+
+    assert composer.input.toPlainText() == "commit abc1234 (initial commit) "
+
+
+def test_drop_chat_ref_summons_archivist_and_records_hidden_ref(qapp):
+    composer = ComposerWidget()
+    mime = QMimeData()
+    mime.setData(
+        AICHS_CHAT_DROP_MIME,
+        chat_drop_payload([{"id": "conv1", "title": "Viewport picking"}]),
+    )
+
+    composer.input.dropEvent(_drop_event(mime))
+
+    assert composer.input.toPlainText() == '@Archivist using chat "Viewport picking", '
+    assert composer.take_pasted_chat_refs() == [{"id": "conv1", "title": "Viewport picking"}]
+    assert composer.take_pasted_chat_refs() == []
 
 
 def test_visible_file_mentions_do_not_absorb_punctuation():

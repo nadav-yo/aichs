@@ -16,9 +16,23 @@ class SlashCommand:
     capabilities: list[str] | None = None
 
 
+_ARCHIVIST_PROMPT = (
+    "Act as Archivist for this turn. Focus on saved chat memory, durable decisions, "
+    "open threads, and context worth carrying forward. Use read_project_chat for exact "
+    "dropped chat references and search_project_chats for fuzzy memory lookup. Keep the "
+    "answer concise and cite conversation titles or ids when useful."
+)
+
+
 BUILTIN_COMMANDS: list[SlashCommand] = [
-    SlashCommand("compact", "Summarize older messages to free context"),
-    SlashCommand("reload", "Reload skills and extensions"),
+    SlashCommand("compact", "Summarize older messages to free context", executable=True),
+    SlashCommand("reload", "Reload skills and extensions", executable=True),
+    SlashCommand(
+        "archivist",
+        "Use saved chat memory and exact dropped chat references",
+        prompt=_ARCHIVIST_PROMPT,
+        tools=["search_project_chats", "read_project_chat"],
+    ),
 ]
 
 
@@ -30,8 +44,21 @@ def parse_builtin_command(text: str) -> str | None:
     if not name:
         return None
     for cmd in BUILTIN_COMMANDS:
-        if cmd.name == name:
+        if cmd.name == name and cmd.executable:
             return cmd.name
+    return None
+
+
+def parse_builtin_prompt_command(text: str) -> SlashCommand | None:
+    t = text.strip()
+    if not t.startswith("/"):
+        return None
+    name = t[1:].split()[0] if len(t) > 1 else ""
+    if not name:
+        return None
+    for cmd in BUILTIN_COMMANDS:
+        if cmd.name == name and not cmd.executable:
+            return cmd
     return None
 
 

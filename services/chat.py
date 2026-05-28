@@ -40,7 +40,7 @@ from services.usage import merge_usage, normalize_usage
 _MAX_PARALLEL = 8
 _MAX_CREW_CALLS_PER_TURN = 2
 _ACTIVE_TASK_PREVIEW_CHARS = 500
-_CREW_ONLY_TOOLS = {"search_project_chats"}
+_CREW_ONLY_TOOLS = {"search_project_chats", "read_project_chat"}
 _CHUNK_EMIT_INTERVAL_SEC = 0.10
 _CHUNK_EMIT_MAX_CHARS = 512
 

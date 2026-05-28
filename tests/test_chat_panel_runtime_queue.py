@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from ui.widgets.chat_panel import ChatPanel, _history_ends_with_assistant_text, _message_files
+from ui.widgets.chat_panel import ChatPanel, _chat_ref_context, _history_ends_with_assistant_text, _message_files
 
 
 class _Button:
@@ -152,3 +152,14 @@ def test_message_files_keeps_sentence_punctuation_outside_bare_refs(workspace):
     assert len(files) == 1
     assert files[0]["path"] == "services\\chat.py"
     assert files[0]["content"] == "content"
+
+
+def test_chat_ref_context_dedupes_and_names_exact_tool():
+    text = _chat_ref_context([
+        {"id": "c1", "title": "  Viewport   Picking "},
+        {"id": "c1", "title": "Duplicate"},
+    ])
+
+    assert "read_project_chat" in text
+    assert "Viewport Picking (conversation_id: c1)" in text
+    assert text.count("conversation_id: c1") == 1

@@ -177,6 +177,7 @@ def test_is_visible_message_hides_runtime_internals():
     assert not is_visible_message({"role": "tool", "content": "result"})
     assert not is_visible_message({"role": "user", "synthetic": "tool_results"})
     assert not is_visible_message({"role": "user", "synthetic": "extension"})
+    assert not is_visible_message({"role": "user", "synthetic": "chat_refs"})
 
 
 def test_prepare_file_block_notes_omitted_attachment():
