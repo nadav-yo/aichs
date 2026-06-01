@@ -1,7 +1,11 @@
+import math
 import re
 from pathlib import Path
 
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QFrame
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QFrame,
+    QSizePolicy,
+)
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import (
     QImage, QPixmap, QDragEnterEvent, QDropEvent, QTextCursor,
@@ -30,6 +34,8 @@ from ui.theme import (
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _REFERENCE_RE = re.compile(r'(?<!\S)@(?:"[^"]+"|[^\s@]*[^\s@.,:;!?)\]}])')
+_INPUT_MIN_HEIGHT = 46
+_INPUT_MAX_LINES = 8
 
 
 class _ReferenceHighlighter(QSyntaxHighlighter):
@@ -106,7 +112,11 @@ class MessageInput(QTextEdit):
         super().__init__(parent)
         self.setPlaceholderText("Message…")
         self.setAcceptRichText(False)
-        self.setFixedHeight(46)
+        self.setMinimumHeight(_INPUT_MIN_HEIGHT)
+        self.setFixedHeight(_INPUT_MIN_HEIGHT)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._in_slash_mode = False
         self._in_terminal_mode = False
         self._in_mention_mode = False
@@ -118,16 +128,20 @@ class MessageInput(QTextEdit):
         self._reference_highlighter = _ReferenceHighlighter(self.document())
         self._apply_style()
         self.textChanged.connect(self._on_text_changed)
+        self.document().documentLayout().documentSizeChanged.connect(self._update_height)
+        self._update_height()
 
     def _apply_style(self):
         self.setStyleSheet(composer_style())
 
     def apply_font_size(self, font_pt: int | None = None):
         self.setStyleSheet(composer_style(font_pt))
+        self._update_height()
 
     def apply_appearance(self):
         self.setStyleSheet(composer_style())
         self._reference_highlighter.apply_appearance()
+        self._update_height()
 
     def set_enter_to_send(self, enabled: bool):
         self._enter_to_send = enabled
@@ -159,6 +173,43 @@ class MessageInput(QTextEdit):
             self._in_mention_mode = False
             self._mention_start = -1
             self.mention_changed.emit("")
+
+    def _update_height(self, *_args):
+        line_height = max(1, self.fontMetrics().lineSpacing())
+        frame = self.frameWidth() * 2
+        max_height = max(
+            _INPUT_MIN_HEIGHT,
+            _INPUT_MIN_HEIGHT + line_height * (_INPUT_MAX_LINES - 2),
+        )
+        explicit_lines = self.document().blockCount()
+        visual_lines = self._visual_line_count()
+        doc_height = math.ceil(self.document().documentLayout().documentSize().height()) + frame
+        target = (
+            _INPUT_MIN_HEIGHT
+            if explicit_lines <= 2 and visual_lines <= 3
+            else max(_INPUT_MIN_HEIGHT, min(max_height, doc_height))
+        )
+        self.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            if visual_lines > _INPUT_MAX_LINES or doc_height > max_height
+            else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        if self.height() != target:
+            self.setFixedHeight(target)
+            self.updateGeometry()
+
+    def _visual_line_count(self) -> int:
+        lines = 0
+        block = self.document().begin()
+        while block.isValid():
+            layout = block.layout()
+            lines += max(1, layout.lineCount() if layout else 0)
+            block = block.next()
+        return max(1, lines)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_height()
 
     def _current_mention_query(self, text: str) -> str:
         pos = self.textCursor().position()

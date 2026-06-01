@@ -1,8 +1,6 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from services.chat import ChatThread
 
 
@@ -67,6 +65,56 @@ def test_loop_openai_text_only(workspace, qapp):
     assert text == "yo"
     assert thread.last_usage["cached_input_tokens"] == 80
     assert thread.last_usage["output_tokens"] == 5
+
+
+def _openai_stream(*deltas):
+    stream = MagicMock()
+    stream.__enter__ = lambda s: s
+    stream.__exit__ = lambda *a: None
+    chunks = []
+    for delta in deltas:
+        chunk = MagicMock()
+        chunk.choices = [SimpleNamespace(delta=delta)]
+        chunk.usage = None
+        chunks.append(chunk)
+    stream.__iter__ = lambda s: iter(chunks)
+    return stream
+
+
+def test_loop_openai_strips_chatml_token_content_before_native_tool_call(workspace, qapp):
+    thread = ChatThread(
+        "gpt-5.4-nano",
+        [{"role": "user", "content": "list files"}],
+        "sys",
+        str(workspace),
+    )
+    chunks = []
+    thread.chunk.connect(chunks.append)
+    tool_call = SimpleNamespace(
+        index=0,
+        id="call_1",
+        function=SimpleNamespace(
+            name="list_files",
+            arguments='{"directory": ".", "glob": "*.py"}',
+        ),
+    )
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = [
+        _openai_stream(SimpleNamespace(content="\n\n<|im_end|>\n", tool_calls=[tool_call])),
+        _openai_stream(SimpleNamespace(content="done", tool_calls=None)),
+    ]
+
+    with patch("services.chat.OpenAI", return_value=mock_client), patch(
+        "services.chat.resolve_api_key", return_value="k"
+    ), patch("services.chat.run_extension_hooks"):
+        text = thread._loop_openai()
+
+    assert text == "done"
+    assert chunks == ["done"]
+    assert thread.history[1]["role"] == "assistant"
+    assert thread.history[1]["content"] is None
+    assert thread.history[1]["tool_calls"][0]["id"] == "call_1"
 
 
 def test_cancel_during_run(workspace, qapp):

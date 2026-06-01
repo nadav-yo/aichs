@@ -82,6 +82,29 @@ def test_drop_non_image_url_does_not_insert_text(qapp, tmp_path):
     assert not composer.strip.has_images()
 
 
+def test_message_input_grows_after_two_lines(qapp):
+    composer = ComposerWidget()
+    composer.resize(420, composer.sizeHint().height())
+    composer.show()
+    qapp.processEvents()
+    base_height = composer.input.height()
+
+    composer.input.setPlainText("one\ntwo")
+    qapp.processEvents()
+    two_line_height = composer.input.height()
+
+    composer.input.setPlainText("one\ntwo\nthree")
+    qapp.processEvents()
+    three_line_height = composer.input.height()
+
+    composer.input.clear()
+    qapp.processEvents()
+
+    assert two_line_height == base_height
+    assert three_line_height > base_height
+    assert composer.input.height() == base_height
+
+
 def test_paste_terminal_ref_prefers_hidden_reference(qapp):
     composer = ComposerWidget()
     mime = QMimeData()

@@ -1686,10 +1686,17 @@ class ChatPanel(QWidget):
                 self._add_notice(text)
         elif event_type == "compaction":
             status = event.get("status")
+            source = event.get("source")
             if status == "compacted":
-                self._add_notice("Runtime extension compacted context before continuing.")
+                if source == "auto-preflight":
+                    self._add_notice("Auto-compacted context before sending the next request.")
+                else:
+                    self._add_notice("Runtime extension compacted context before continuing.")
             elif status == "unchanged":
-                self._add_notice("Runtime extension checked compaction; no cut was available.")
+                if source == "auto-preflight":
+                    self._add_notice("Checked context size; no safe compaction cut was available.")
+                else:
+                    self._add_notice("Runtime extension checked compaction; no cut was available.")
         elif event_type == "compaction_failed":
             self._add_notice(f"Runtime extension compaction failed: {event.get('error')}")
         elif event_type == "blocked":

@@ -200,3 +200,63 @@ def test_compaction_directive_failure_stops(workspace, qapp):
     with patch("services.chat.compact_with_result", side_effect=ValueError("bad ledger")):
         assert thread._apply_runtime_directives(ctx) is False
     assert events[0]["type"] == "compaction_failed"
+
+
+def test_preflight_compacts_oversized_request(workspace, qapp):
+    thread = ChatThread(
+        "claude-sonnet-4-6",
+        [{"role": "user", "content": "old"}, {"role": "assistant", "content": "older"}],
+        "sys",
+        str(workspace),
+    )
+    compacted = [{"role": "user", "content": "[Conversation summary]\nsummary"}]
+    result = CompactionResult(
+        messages=compacted,
+        summary="summary",
+        cut_index=2,
+        status="compacted",
+        proof={"version": "aicc-compaction/v1"},
+    )
+    events = []
+    thread.runtime_event.connect(events.append)
+
+    with patch("services.chat.context_window_tokens", return_value=100), patch(
+        "services.chat.compaction_threshold", return_value=50
+    ), patch("services.chat._estimate_model_request_tokens", side_effect=[60, 20]), patch(
+        "services.chat.compact_with_result", return_value=result
+    ) as compact_call:
+        thread._ensure_context_budget("openai-compatible", [])
+
+    compact_call.assert_called_once()
+    assert thread.history == compacted
+    assert events[0]["source"] == "auto-preflight"
+    assert events[0]["status"] == "compacted"
+
+
+def test_preflight_blocks_when_context_still_exceeds_window(workspace, qapp):
+    thread = ChatThread(
+        "claude-sonnet-4-6",
+        [{"role": "user", "content": "old"}],
+        "sys",
+        str(workspace),
+    )
+    result = CompactionResult(
+        messages=list(thread.history),
+        summary="",
+        cut_index=0,
+        status="unchanged",
+        proof={"version": "aicc-compaction/v1"},
+    )
+
+    with patch("services.chat.context_window_tokens", return_value=100), patch(
+        "services.chat.compaction_threshold", return_value=50
+    ), patch("services.chat._estimate_model_request_tokens", return_value=120), patch(
+        "services.chat.compact_with_result", return_value=result
+    ):
+        try:
+            thread._ensure_context_budget("openai-compatible", [])
+        except ValueError as exc:
+            assert "estimated prompt is 120 tokens" in str(exc)
+            assert "model window is 100" in str(exc)
+        else:
+            raise AssertionError("expected oversized context to be blocked")

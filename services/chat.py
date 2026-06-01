@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,8 +23,8 @@ from services.crew import (
     get_crew_member,
 )
 from services.crew_context import crew_context_window
-from services.compaction import compact_with_result
-from services.model_registry import get_model_config, resolve_api_key
+from services.compaction import compact_with_result, compaction_threshold
+from services.model_registry import context_window_tokens, get_model_config, resolve_api_key
 from services.content import content_preview, prepare_for_anthropic, prepare_for_openai
 from services.tool_policy import ConversationToolPolicy, ToolApprovalBus, resolve_path
 from services.shell_tool import is_shell_tool
@@ -43,6 +44,9 @@ _ACTIVE_TASK_PREVIEW_CHARS = 500
 _CREW_ONLY_TOOLS = {"search_project_chats", "read_project_chat"}
 _CHUNK_EMIT_INTERVAL_SEC = 0.10
 _CHUNK_EMIT_MAX_CHARS = 512
+_CHATML_CONTROL_TOKEN_RE = re.compile(
+    r"<\|im_end\|>|<\|im_start\|>(?:system|user|assistant|tool)?",
+)
 
 
 class ChatThread(QThread):
@@ -200,11 +204,13 @@ class ChatThread(QThread):
             turn_text = ""
             if not self._run_runtime_hook("before_model_request"):
                 break
+            tools = self._tools_anthropic()
+            self._ensure_context_budget("anthropic", tools)
             with client.messages.stream(
                 model=self.model,
                 max_tokens=4096,
                 system=self.system,
-                tools=self._tools_anthropic(),
+                tools=tools,
                 messages=prepare_for_anthropic(self.history),
             ) as stream:
                 for text in stream.text_stream:
@@ -275,6 +281,8 @@ class ChatThread(QThread):
             pending: dict[int, dict] = {}
             if not self._run_runtime_hook("before_model_request"):
                 break
+            tools = self._tools_openai()
+            self._ensure_context_budget("openai-compatible", tools)
             msgs = [{"role": "system", "content": self.system}] + prepare_for_openai(self.history)
             if msgs and msgs[0].get("role") == "system":
                 msgs[0]["content"] = self.system
@@ -282,7 +290,7 @@ class ChatThread(QThread):
             request = {
                 "model": self.model,
                 "messages": msgs,
-                "tools": self._tools_openai(),
+                "tools": tools,
                 "stream": True,
             }
             if cfg.provider_id == "openai" and not cfg.base_url:
@@ -300,8 +308,10 @@ class ChatThread(QThread):
                         continue
                     delta = chunk.choices[0].delta
                     if delta.content:
-                        self._emit_chunk(delta.content)
-                        turn_text += delta.content
+                        content = _sanitize_chatml_content(delta.content)
+                        if content:
+                            turn_text += content
+                            self._emit_chunk(content)
                     for tc in delta.tool_calls or []:
                         slot = pending.setdefault(tc.index, {"id": "", "name": "", "args": ""})
                         if tc.id:
@@ -359,6 +369,34 @@ class ChatThread(QThread):
         self.system = ctx.system
         self.history = ctx.history
         return self._apply_runtime_directives(ctx)
+
+    def _ensure_context_budget(self, provider: str, tools: list) -> None:
+        estimate = _estimate_model_request_tokens(provider, self.system, self.history, tools)
+        window = context_window_tokens(self.model)
+        if estimate <= compaction_threshold(window):
+            return
+
+        result = compact_with_result(
+            self.model,
+            self.history,
+            source="auto-preflight",
+        )
+        self.runtime_event.emit({
+            "type": "compaction",
+            "status": result.status,
+            "source": "auto-preflight",
+            "proof": result.proof,
+        })
+        if result.status == "compacted":
+            self.history = list(result.messages)
+            estimate = _estimate_model_request_tokens(provider, self.system, self.history, tools)
+
+        if estimate > window:
+            raise ValueError(
+                f"Context is too large for {self.model}: estimated prompt is "
+                f"{estimate:,} tokens, model window is {window:,}. "
+                "Compact the conversation or reduce attached/context content."
+            )
 
     def _apply_runtime_directives(self, ctx: HookContext) -> bool:
         for directive in ctx.directives:
@@ -712,6 +750,27 @@ def _serialize_anthropic(content) -> list:
             out.append({"type": "tool_use", "id": block.id,
                         "name": block.name, "input": dict(block.input)})
     return out
+
+
+def _estimate_model_request_tokens(provider: str, system: str, history: list[dict], tools: list) -> int:
+    messages = (
+        prepare_for_anthropic(history)
+        if provider == "anthropic"
+        else prepare_for_openai(history)
+    )
+    payload = {
+        "system": system,
+        "messages": messages,
+        "tools": tools,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, default=str)
+    return max(1, len(raw.encode("utf-8")) // 4)
+
+
+def _sanitize_chatml_content(text: str) -> str:
+    """Drop chat-template sentinels if a local provider leaks them as content."""
+    cleaned = _CHATML_CONTROL_TOKEN_RE.sub("", text)
+    return "" if not cleaned.strip() else cleaned
 
 
 def _active_task_preview(history: list[dict]) -> str:
