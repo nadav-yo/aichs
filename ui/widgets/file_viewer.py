@@ -1,23 +1,33 @@
 import os
 from pathlib import Path
 
+import markdown as _md
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QFrame, QTabWidget,
-    QScrollArea, QLabel, QSizePolicy, QCheckBox, QPushButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPlainTextEdit, QFrame, QTabWidget,
+    QScrollArea, QLabel, QSizePolicy, QCheckBox, QPushButton, QTextBrowser, QLineEdit,
 )
-from PyQt6.QtCore import pyqtSignal, Qt
-from PyQt6.QtGui import QColor, QKeySequence, QPainter, QPixmap, QShortcut
+from PyQt6.QtCore import pyqtSignal, Qt, QSize, QUrl
+from PyQt6.QtGui import (
+    QColor, QKeySequence, QPainter, QPixmap, QShortcut, QSyntaxHighlighter,
+    QTextCharFormat, QTextCursor, QTextFormat,
+)
+from pygments.formatters import HtmlFormatter
+from pygments.lexers import get_lexer_for_filename, guess_lexer, TextLexer
+from pygments.token import Token
 
 from config import MAX_FILE_PREVIEW_BYTES
-from services.diff_html import inline_new_file_diff_to_html
+from services.diff_html import changed_new_line_numbers
 from services.git_diff import can_diff_against_head, diff_against_head
 from services.git_status import is_git_repo
-from services.highlight import for_path, for_language
 from services.tool_policy import path_in_repo
 from storage.settings import FILE_EDITOR_AUTO_SAVE_KEY
-from ui.theme import ACCENT, palette, mono_font, meta_font_pt, apply_flat_tab_style
+from ui.theme import (
+    ACCENT, MONO_FONT_CSS, current_theme, palette, mono_font, meta_font_pt,
+    markdown_css, apply_flat_tab_style,
+)
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"}
+_MARKDOWN_EXTS = {".md", ".markdown", ".mdown", ".mkdn"}
 _BINARY_PREVIEW_EXTS = {
     ".7z",
     ".bz2",
@@ -42,12 +52,12 @@ _BINARY_PREVIEW_EXTS = {
 
 
 class _TextMinimap(QWidget):
-    """Tiny overview strip that mirrors and controls a QTextEdit."""
+    """Tiny overview strip that mirrors and controls a plain text editor."""
 
     _WIDTH = 86
     _MIN_THUMB_HEIGHT = 28
 
-    def __init__(self, editor: QTextEdit, parent=None):
+    def __init__(self, editor: QPlainTextEdit, parent=None):
         super().__init__(parent)
         self._editor = editor
         self.setFixedWidth(self._WIDTH)
@@ -112,11 +122,22 @@ class _TextMinimap(QWidget):
                 x = 4 + min(24, indent * 2)
                 usable = max(8, width - x - 8)
                 line_w = max(4, int(usable * min(1.0, len(stripped) / 100)))
-                painter.fillRect(x, y, line_w, line_h, self._line_color(stripped, p))
+                painter.fillRect(x, y, line_w, line_h, self._line_color(stripped, p, index + 1))
             index += 1
             block = block.next()
 
-    def _line_color(self, text: str, p: dict) -> QColor:
+    def _line_color(self, text: str, p: dict, line_number: int) -> QColor:
+        changed_lines = getattr(self._editor, "_changed_lines", set())
+        if line_number in changed_lines:
+            color = QColor(p["SUCCESS"])
+            color.setAlpha(150)
+            return color
+        color_for_line = getattr(self._editor, "minimap_color_for_line", None)
+        if color_for_line is not None:
+            color = color_for_line(text)
+            if color is not None:
+                color.setAlpha(130)
+                return color
         if text.startswith("+"):
             color = QColor(p["SUCCESS"])
             color.setAlpha(130)
@@ -230,13 +251,308 @@ class _ImageViewer(QScrollArea):
         self._label.setPixmap(scaled)
 
 
-class _FileTextEdit(QTextEdit):
+def _lexer_for_content(path: str, content: str):
+    try:
+        return get_lexer_for_filename(path, stripnl=False)
+    except Exception:
+        try:
+            return guess_lexer(content)
+        except Exception:
+            return TextLexer(stripnl=False)
+
+
+class _PygmentsHighlighter(QSyntaxHighlighter):
+    def __init__(self, document, path: str = "", content: str = ""):
+        super().__init__(document)
+        self._path = path
+        self._content_sample = content[:4096]
+        self._lexer = _lexer_for_content(path, self._content_sample)
+        self._formats: dict[object, QTextCharFormat] = {}
+        self._style = None
+        self.apply_appearance()
+
+    def set_source(self, path: str, content: str):
+        sample = content[:4096]
+        if path == self._path and sample == self._content_sample:
+            return
+        self._path = path
+        self._content_sample = sample
+        self._lexer = _lexer_for_content(path, sample)
+        self.rehighlight()
+
+    def apply_appearance(self):
+        style_name = "default" if current_theme() == "light" else "monokai"
+        self._style = HtmlFormatter(style=style_name).style
+        self._formats.clear()
+        self.rehighlight()
+
+    def highlightBlock(self, text: str):
+        if not text:
+            return
+        try:
+            tokens = self._lexer.get_tokens_unprocessed(text)
+        except Exception:
+            return
+        for index, token, value in tokens:
+            if value:
+                self.setFormat(index, len(value), self._format_for_token(token))
+
+    def _format_for_token(self, token) -> QTextCharFormat:
+        cached = self._formats.get(token)
+        if cached is not None:
+            return cached
+        fmt = QTextCharFormat()
+        if self._style is not None:
+            style = self._style.style_for_token(token)
+            color = style.get("color")
+            if color:
+                fmt.setForeground(QColor(f"#{color}"))
+            bgcolor = style.get("bgcolor")
+            if bgcolor:
+                fmt.setBackground(QColor(f"#{bgcolor}"))
+            if style.get("bold"):
+                fmt.setFontWeight(600)
+            if style.get("italic"):
+                fmt.setFontItalic(True)
+            if style.get("underline"):
+                fmt.setFontUnderline(True)
+        self._formats[token] = fmt
+        return fmt
+
+    def minimap_color_for_line(self, text: str) -> QColor | None:
+        if not text:
+            return None
+        try:
+            tokens = self._lexer.get_tokens_unprocessed(text)
+        except Exception:
+            return None
+        for _index, token, value in tokens:
+            if not value or not value.strip() or token in Token.Text:
+                continue
+            color = self._style_color_for_token(token)
+            if color is not None:
+                return color
+        return self._style_color_for_token(Token.Text)
+
+    def _style_color_for_token(self, token) -> QColor | None:
+        if self._style is None:
+            return None
+        style = self._style.style_for_token(token)
+        color = style.get("color")
+        return QColor(f"#{color}") if color else None
+
+
+class _LineNumberArea(QWidget):
+    def __init__(self, editor: "_FileTextEdit"):
+        super().__init__(editor)
+        self._editor = editor
+
+    def sizeHint(self):
+        return QSize(self._editor.line_number_area_width(), 0)
+
+    def paintEvent(self, event):
+        self._editor.line_number_area_paint_event(event)
+
+
+class _FileTextEdit(QPlainTextEdit):
     edit_requested = pyqtSignal()
+    cancel_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._line_number_area = _LineNumberArea(self)
+        self._syntax_highlighter = _PygmentsHighlighter(self.document())
+        self._changed_lines: set[int] = set()
+
+        self.blockCountChanged.connect(self._update_line_number_area_width)
+        self.updateRequest.connect(self._update_line_number_area)
+        self.cursorPositionChanged.connect(self._update_extra_selections)
+        self._update_line_number_area_width(0)
+
+    def configure_syntax(self, path: str, content: str):
+        self._syntax_highlighter.set_source(path, content)
+
+    def minimap_color_for_line(self, text: str) -> QColor | None:
+        return self._syntax_highlighter.minimap_color_for_line(text)
+
+    def apply_appearance(self):
+        p = palette()
+        self.setFont(mono_font())
+        self.setStyleSheet(
+            f"QPlainTextEdit {{ background:{p['BG3']}; color:{p['TEXT']};"
+            f"border:none; selection-background-color:{ACCENT};"
+            f"font-family:{MONO_FONT_CSS}; }}"
+        )
+        self._syntax_highlighter.apply_appearance()
+        self._update_line_number_area_width(0)
+        self._line_number_area.update()
+        self._update_extra_selections()
+
+    def set_changed_lines(self, lines: set[int]):
+        self._changed_lines = set(lines)
+        self._update_extra_selections()
+        self._line_number_area.update()
+
+    def goto_line(self, line_no: int, column: int = 0):
+        block = self.document().findBlockByNumber(max(0, line_no - 1))
+        if not block.isValid():
+            block = self.document().lastBlock()
+        cursor = QTextCursor(block)
+        cursor.movePosition(
+            QTextCursor.MoveOperation.Right,
+            QTextCursor.MoveMode.MoveAnchor,
+            max(0, column),
+        )
+        self.setTextCursor(cursor)
+        self.centerCursor()
+        self.setFocus()
+
+    def select_range(self, start: int, length: int, *, focus: bool = True):
+        cursor = self.textCursor()
+        cursor.setPosition(max(0, start))
+        cursor.setPosition(max(0, start + length), QTextCursor.MoveMode.KeepAnchor)
+        self.setTextCursor(cursor)
+        self.centerCursor()
+        if focus:
+            self.setFocus()
+
+    def release_resources(self):
+        highlighter = getattr(self, "_syntax_highlighter", None)
+        if highlighter is not None:
+            try:
+                highlighter.setDocument(None)
+            except RuntimeError:
+                pass
+
+    def line_number_area_width(self) -> int:
+        digits = len(str(max(1, self.blockCount())))
+        return 12 + self.fontMetrics().horizontalAdvance("9") * digits
+
+    def line_number_area_paint_event(self, event):
+        p = palette()
+        painter = QPainter(self._line_number_area)
+        painter.fillRect(event.rect(), QColor(p["BG2"]))
+
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = int(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom = top + int(self.blockBoundingRect(block).height())
+        current = self.textCursor().blockNumber()
+        width = self._line_number_area.width()
+        height = self.fontMetrics().height()
+
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                painter.setPen(QColor(p["TEXT"] if block_number == current else p["TEXT_DIM"]))
+                painter.drawText(
+                    0, top, width - 6, height,
+                    Qt.AlignmentFlag.AlignRight,
+                    str(block_number + 1),
+                )
+            block = block.next()
+            top = bottom
+            bottom = top + int(self.blockBoundingRect(block).height())
+            block_number += 1
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        cr = self.contentsRect()
+        self._line_number_area.setGeometry(
+            cr.left(), cr.top(), self.line_number_area_width(), cr.height()
+        )
+
+    def setReadOnly(self, ro: bool):
+        super().setReadOnly(ro)
+        self._update_extra_selections()
 
     def mousePressEvent(self, event):
         if self.isReadOnly():
             self.edit_requested.emit()
         super().mousePressEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape and not self.isReadOnly():
+            self.cancel_requested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _update_line_number_area_width(self, _block_count):
+        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
+
+    def _update_line_number_area(self, rect, dy):
+        if dy:
+            self._line_number_area.scroll(0, dy)
+        else:
+            self._line_number_area.update(0, rect.y(), self._line_number_area.width(), rect.height())
+        if rect.contains(self.viewport().rect()):
+            self._update_line_number_area_width(0)
+
+    def _update_extra_selections(self):
+        selections = []
+        p = palette()
+
+        current_line = QTextEdit.ExtraSelection()
+        line_color = QColor(p["SELECTION"])
+        line_color.setAlpha(90)
+        current_line.format.setBackground(line_color)
+        current_line.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+        current_line.cursor = self.textCursor()
+        current_line.cursor.clearSelection()
+        selections.append(current_line)
+
+        changed_color = QColor(p["SUCCESS_BG"])
+        for line in sorted(self._changed_lines):
+            block = self.document().findBlockByNumber(line - 1)
+            if not block.isValid():
+                continue
+            selection = QTextEdit.ExtraSelection()
+            selection.format.setBackground(changed_color)
+            selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+            selection.cursor = self.textCursor()
+            selection.cursor.setPosition(block.position())
+            selection.cursor.clearSelection()
+            selections.append(selection)
+
+        self.setExtraSelections(selections)
+
+
+class _MarkdownPreview(QTextBrowser):
+    edit_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setOpenExternalLinks(False)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+
+    def apply_appearance(self):
+        p = palette()
+        self.setStyleSheet(
+            f"QTextBrowser {{ background:{p['BG3']}; color:{p['TEXT']};"
+            f"border:none; padding:14px 18px; }}"
+        )
+
+    def set_markdown(self, text: str, base_path: str):
+        parent = str(Path(base_path).parent)
+        self.document().setBaseUrl(QUrl.fromLocalFile(parent + os.sep))
+        self.setHtml(_markdown_preview_html(text))
+
+    def mousePressEvent(self, event):
+        self.edit_requested.emit()
+        super().mousePressEvent(event)
+
+
+def _markdown_preview_html(text: str) -> str:
+    body = _md.markdown(text, extensions=["fenced_code", "nl2br", "tables", "toc"])
+    p = palette()
+    css = (
+        markdown_css()
+        + f"body {{ background:{p['BG3']}; padding:0; }}"
+        + "table { border-collapse:collapse; margin:8px 0; }"
+        + f"th,td {{ border:1px solid {p['BORDER']}; padding:5px 8px; }}"
+        + f"th {{ background:{p['BG2']}; }}"
+    )
+    return f"<style>{css}</style>{body}"
 
 
 class _TextFileTab(QWidget):
@@ -263,11 +579,13 @@ class _TextFileTab(QWidget):
         self._diff_text = diff_text
         self._file_backed = not path.startswith("\0")
         self._editable = self._file_backed and editable
+        self._markdown = self._file_backed and Path(path).suffix.lower() in _MARKDOWN_EXTS
         self._read_only_reason = read_only_reason
         self._auto_save = auto_save
         self._dirty = False
         self._rendering = False
         self._edit_mode = False
+        self._force_text_view = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -294,17 +612,43 @@ class _TextFileTab(QWidget):
         bar.addWidget(self._save_btn)
         root.addLayout(bar)
 
+        self._find_bar = QFrame()
+        find_layout = QHBoxLayout(self._find_bar)
+        find_layout.setContentsMargins(8, 4, 8, 4)
+        find_layout.setSpacing(6)
+        self._find_query = QLineEdit()
+        self._find_query.setPlaceholderText("Find in file")
+        self._find_query.textChanged.connect(self._on_find_query_changed)
+        self._find_query.returnPressed.connect(self._find_next)
+        find_layout.addWidget(self._find_query, 1)
+        self._find_status = QLabel()
+        find_layout.addWidget(self._find_status)
+        self._find_prev_btn = QPushButton("Prev")
+        self._find_prev_btn.clicked.connect(lambda _checked=False: self._find_previous())
+        find_layout.addWidget(self._find_prev_btn)
+        self._find_next_btn = QPushButton("Next")
+        self._find_next_btn.clicked.connect(lambda _checked=False: self._find_next())
+        find_layout.addWidget(self._find_next_btn)
+        self._find_close_btn = QPushButton("Close")
+        self._find_close_btn.clicked.connect(lambda _checked=False: self._hide_find())
+        find_layout.addWidget(self._find_close_btn)
+        self._find_bar.hide()
+        root.addWidget(self._find_bar)
+
         self._editor = _FileTextEdit()
-        self._editor.setAcceptRichText(False)
         self._editor.setFrameShape(QFrame.Shape.NoFrame)
-        self._editor.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self._editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self._editor.edit_requested.connect(self._enter_edit_mode)
+        self._editor.cancel_requested.connect(self._cancel_edit)
         self._editor.textChanged.connect(self._on_text_changed)
+        self._preview = _MarkdownPreview()
+        self._preview.edit_requested.connect(self._enter_edit_mode)
         self._minimap = _TextMinimap(self._editor)
 
         view = QHBoxLayout()
         view.setContentsMargins(0, 0, 0, 0)
         view.setSpacing(0)
+        view.addWidget(self._preview, 1)
         view.addWidget(self._editor, 1)
         view.addWidget(self._minimap)
         root.addLayout(view, 1)
@@ -312,6 +656,12 @@ class _TextFileTab(QWidget):
         self._save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         self._save_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._save_shortcut.activated.connect(self._save)
+        self._cancel_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self._cancel_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._cancel_shortcut.activated.connect(self._cancel_edit)
+        self._find_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
+        self._find_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._find_shortcut.activated.connect(self._show_find)
 
         self.apply_appearance()
         self._render()
@@ -332,6 +682,19 @@ class _TextFileTab(QWidget):
         self._status.setStyleSheet(
             f"QLabel {{ color:{p['TEXT_DIM']}; font-size:{meta}px; background:transparent; }}"
         )
+        self._find_bar.setStyleSheet(
+            f"QFrame {{ background:{p['BG2']}; border-top:1px solid {p['BORDER_SUBTLE']};"
+            f"border-bottom:1px solid {p['BORDER_SUBTLE']}; }}"
+        )
+        self._find_query.setStyleSheet(
+            f"QLineEdit {{ background:{p['BG3']}; color:{p['TEXT']};"
+            f"border:1px solid {p['BORDER']}; border-radius:6px;"
+            f"padding:4px 8px; font-size:{meta}px; }}"
+            f"QLineEdit:focus {{ border:1px solid {ACCENT}; }}"
+        )
+        self._find_status.setStyleSheet(
+            f"QLabel {{ color:{p['TEXT_DIM']}; font-size:{meta}px; background:transparent; }}"
+        )
         secondary = (
             f"QPushButton {{ background:{p['BG3']}; color:{p['TEXT']};"
             f"border:1px solid {p['BORDER']}; border-radius:4px;"
@@ -348,10 +711,11 @@ class _TextFileTab(QWidget):
         )
         self._revert_btn.setStyleSheet(secondary)
         self._save_btn.setStyleSheet(primary)
-        self._editor.setFont(mono_font())
-        self._editor.setStyleSheet(
-            f"QTextEdit {{ background:{p['BG3']}; color:{p['TEXT']}; border:none; }}"
-        )
+        self._find_prev_btn.setStyleSheet(secondary)
+        self._find_next_btn.setStyleSheet(secondary)
+        self._find_close_btn.setStyleSheet(secondary)
+        self._editor.apply_appearance()
+        self._preview.apply_appearance()
         self._minimap.apply_appearance()
         self._sync_actions()
         self._render()
@@ -372,6 +736,7 @@ class _TextFileTab(QWidget):
         self._read_only_reason = read_only_reason
         self._set_dirty(False)
         self._edit_mode = False
+        self._force_text_view = False
         self._diff_toggle.setChecked(bool(diff_text))
         self._diff_toggle.setVisible(diff_text is not None)
         self._render()
@@ -385,8 +750,18 @@ class _TextFileTab(QWidget):
         if not self._editable or self._is_showing_diff():
             return
         self._edit_mode = True
+        self._force_text_view = False
         self._render()
         self._editor.setFocus()
+
+    def _cancel_edit(self):
+        if not self._edit_mode or self._is_showing_diff():
+            return
+        if self._dirty and not self._auto_save:
+            self._revert()
+            return
+        self._edit_mode = False
+        self._render()
 
     def _on_text_changed(self):
         if (
@@ -406,26 +781,111 @@ class _TextFileTab(QWidget):
     def _is_showing_diff(self) -> bool:
         return self._diff_toggle.isChecked() and bool(self._diff_text)
 
+    def _is_markdown_preview(self) -> bool:
+        return (
+            self._markdown
+            and not self._edit_mode
+            and not self._force_text_view
+            and not self._is_showing_diff()
+        )
+
     def _render(self):
         self._rendering = True
         self._editor.blockSignals(True)
-        if self._is_showing_diff():
+        self._editor.configure_syntax(self._lang_hint, self._content)
+        if self._editor.toPlainText() != self._content:
+            self._editor.setPlainText(self._content)
+        if self._is_markdown_preview():
+            self._preview.set_markdown(self._content, self._path)
+            self._preview.show()
+            self._editor.hide()
+            self._minimap.hide()
             self._editor.setReadOnly(True)
-            self._editor.setHtml(inline_new_file_diff_to_html(self._diff_text, self._content))
+            self._editor.set_changed_lines(set())
+        elif self._is_showing_diff():
+            self._preview.hide()
+            self._editor.show()
+            self._minimap.show()
+            self._editor.setReadOnly(True)
+            self._editor.set_changed_lines(changed_new_line_numbers(self._diff_text or ""))
         else:
+            self._preview.hide()
+            self._editor.show()
+            self._minimap.show()
+            self._editor.set_changed_lines(set())
             self._editor.setReadOnly(not (self._editable and self._edit_mode))
-            if self._editable and self._edit_mode:
-                self._editor.setPlainText(self._content)
-            else:
-                self._editor.setHtml(
-                    for_path(self._content, self._lang_hint)
-                    if self._lang_hint
-                    else for_language(self._content, "")
-                )
         self._editor.blockSignals(False)
         self._rendering = False
         self._sync_actions()
         self._minimap.update()
+
+    def goto_line(self, line_no: int, column: int = 0):
+        self._show_editor_for_navigation()
+        self._editor.goto_line(line_no, column)
+
+    def _show_find(self):
+        self._show_editor_for_navigation()
+        self._find_bar.show()
+        cursor = self._editor.textCursor()
+        if cursor.hasSelection():
+            self._find_query.setText(cursor.selectedText())
+        self._find_query.setFocus()
+        self._find_query.selectAll()
+        self._find_next(wrap=False)
+
+    def _hide_find(self):
+        self._find_bar.hide()
+        self._find_status.clear()
+        if self._force_text_view and self._markdown and not self._edit_mode:
+            self._force_text_view = False
+            self._render()
+        else:
+            self._editor.setFocus()
+
+    def _show_editor_for_navigation(self):
+        if self._is_showing_diff():
+            self._diff_toggle.setChecked(False)
+        if self._is_markdown_preview():
+            self._force_text_view = True
+            self._render()
+
+    def _on_find_query_changed(self, _text: str):
+        self._find_match(forward=True, wrap=False, restart=True)
+
+    def _find_next(self, *, wrap: bool = True):
+        self._find_match(forward=True, wrap=wrap, restart=False)
+
+    def _find_previous(self):
+        self._find_match(forward=False, wrap=True, restart=False)
+
+    def _find_match(self, *, forward: bool, wrap: bool, restart: bool):
+        query = self._find_query.text()
+        if not query:
+            self._find_status.clear()
+            return
+        text = self._editor.toPlainText()
+        folded_text = text.casefold()
+        folded_query = query.casefold()
+        cursor = self._editor.textCursor()
+        if forward:
+            if restart:
+                start = 0
+            else:
+                start = cursor.selectionEnd() if cursor.hasSelection() else cursor.position()
+            pos = folded_text.find(folded_query, start)
+            if pos < 0 and wrap:
+                pos = folded_text.find(folded_query)
+        else:
+            start = cursor.selectionStart() if cursor.hasSelection() else cursor.position()
+            pos = folded_text.rfind(folded_query, 0, start)
+            if pos < 0 and wrap:
+                pos = folded_text.rfind(folded_query)
+        if pos < 0:
+            self._find_status.setText("No matches")
+            return
+        self._editor.select_range(pos, len(query), focus=False)
+        self._find_query.setFocus()
+        self._find_status.setText(_find_match_status(text, folded_query, pos))
 
     def _save(self, *, auto: bool = False):
         if not self._editable or self._is_showing_diff():
@@ -493,6 +953,8 @@ class _TextFileTab(QWidget):
             self._set_status(self._read_only_reason)
         elif showing_diff:
             self._set_status("Diff preview")
+        elif self._is_markdown_preview():
+            self._set_status("Markdown preview")
         elif (
             self._editable
             and not self._edit_mode
@@ -516,6 +978,13 @@ class _TextFileTab(QWidget):
         self.dirty_changed.emit(dirty)
         if dirty:
             self._set_status("Unsaved changes")
+
+    def release_resources(self):
+        self._editor.release_resources()
+
+    def closeEvent(self, event):
+        self.release_resources()
+        super().closeEvent(event)
 
 
 class FileViewerPanel(QWidget):
@@ -601,6 +1070,7 @@ class FileViewerPanel(QWidget):
         path: str,
         repo_root: str | None = None,
         diff_text: str | None = None,
+        line_no: int | None = None,
     ):
         if repo_root:
             self._repo_root = repo_root
@@ -637,6 +1107,8 @@ class FileViewerPanel(QWidget):
             widget = self._tabs.widget(idx)
             if isinstance(widget, _TextFileTab):
                 widget.update_content(content, diff_text, editable, read_only_reason)
+                if line_no is not None:
+                    widget.goto_line(line_no)
             self._tabs.setCurrentIndex(idx)
             return
 
@@ -650,6 +1122,8 @@ class FileViewerPanel(QWidget):
             auto_save=self._auto_save,
         )
         self._add_tab_widget(path, os.path.basename(path), tab)
+        if line_no is not None:
+            tab.goto_line(line_no)
 
     def open_content(self, content: str, title: str):
         key = f"\0{title}"
@@ -660,17 +1134,26 @@ class FileViewerPanel(QWidget):
         self._add_text_tab(key, title, content)
 
     def _on_tab_close_requested(self, index: int):
+        widget = self._tabs.widget(index)
         self._tabs.removeTab(index)
+        self._delete_tab_widget(widget)
         if self._tabs.count() == 0:
             self.all_closed.emit()
 
     def close_current_tab(self) -> bool:
         if self._tabs.count() == 0:
             return False
+        widget = self._tabs.currentWidget()
         self._tabs.removeTab(self._tabs.currentIndex())
+        self._delete_tab_widget(widget)
         if self._tabs.count() == 0:
             self.all_closed.emit()
         return True
+
+    def closeEvent(self, event):
+        for i in range(self._tabs.count()):
+            self._release_tab_widget(self._tabs.widget(i))
+        super().closeEvent(event)
 
     def _load_auto_save(self) -> bool:
         if self._settings is None:
@@ -692,6 +1175,27 @@ class FileViewerPanel(QWidget):
         if dirty:
             tooltip = f"Unsaved changes - {base}"
         self._tabs.setTabToolTip(idx, tooltip)
+
+    def _delete_tab_widget(self, widget: QWidget | None):
+        self._release_tab_widget(widget)
+        if widget is not None:
+            widget.deleteLater()
+
+    def _release_tab_widget(self, widget: QWidget | None):
+        if isinstance(widget, _TextFileTab):
+            widget.release_resources()
+
+
+def _find_match_status(text: str, folded_query: str, pos: int) -> str:
+    starts = []
+    start = text.casefold().find(folded_query)
+    while start >= 0:
+        starts.append(start)
+        start = text.casefold().find(folded_query, start + max(1, len(folded_query)))
+    if not starts:
+        return "No matches"
+    current = starts.index(pos) + 1 if pos in starts else 1
+    return f"{current} of {len(starts)}"
 
 
 def _read_text_preview(path: str) -> str:

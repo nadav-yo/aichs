@@ -48,7 +48,7 @@ _CHATML_CONTROL_TOKEN_RE = re.compile(
     r"<\|im_end\|>|<\|im_start\|>(?:system|user|assistant|tool)?",
 )
 
-
+# This is a comment
 class ChatThread(QThread):
     chunk       = pyqtSignal(str)
     tool_called = pyqtSignal(str, dict)

@@ -1,6 +1,8 @@
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 
 from storage.settings import FILE_EDITOR_AUTO_SAVE_KEY
+from ui.theme import palette
 from ui.widgets.file_viewer import (
     FileViewerPanel,
     _TextFileTab,
@@ -109,11 +111,12 @@ def test_file_viewer_opens_formatted_and_save_returns_to_view(qapp, workspace):
     assert tab._editor.isReadOnly() is True
     assert tab._status.text() == "Formatted view"
     assert "print" in tab._editor.toPlainText()
-    assert "color:" in tab._editor.toHtml()
+    assert tab._editor._syntax_highlighter is not None
     assert hasattr(tab, "_edit_btn") is False
 
     tab._editor.edit_requested.emit()
     assert tab._editor.isReadOnly() is False
+    assert tab._editor._syntax_highlighter is not None
     tab._editor.setPlainText("print('formatted save')\n")
     tab._save()
 
@@ -121,8 +124,149 @@ def test_file_viewer_opens_formatted_and_save_returns_to_view(qapp, workspace):
     assert panel._tabs.tabText(0) == "main.py"
     assert tab._edit_mode is False
     assert tab._editor.isReadOnly() is True
-    assert "color:" in tab._editor.toHtml()
+    assert tab._editor.toPlainText() == "print('formatted save')\n"
+    assert tab._editor._syntax_highlighter is not None
     panel.close()
+
+
+def test_file_viewer_open_file_can_jump_to_line(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    path.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace), line_no=3)
+    tab = panel._tabs.widget(0)
+
+    assert tab._editor.textCursor().blockNumber() == 2
+    panel.close()
+
+
+def test_text_file_tab_local_find_selects_match(qapp):
+    tab = _TextFileTab("demo.py", "one\nneedle\ntwo needle\n", "", None)
+
+    tab._show_find()
+    tab._find_query.setText("needle")
+
+    assert tab._find_bar.isHidden() is False
+    assert tab._editor.textCursor().selectedText() == "needle"
+    assert tab._find_status.text() == "1 of 2"
+
+    tab._find_next()
+    assert tab._find_status.text() == "2 of 2"
+    assert tab._find_shortcut.key().toString() == "Ctrl+F"
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
+def test_text_file_tab_local_find_keeps_focus_while_typing(qapp):
+    tab = _TextFileTab("demo.py", "API docs\napplication\n", "", None)
+    tab.show()
+    qapp.processEvents()
+
+    tab._show_find()
+    tab._find_query.setText("A")
+    qapp.processEvents()
+    tab._find_query.insert("PI")
+
+    assert tab._find_query.text() == "API"
+    assert tab._find_query.hasFocus()
+    assert tab._editor.toPlainText() == "API docs\napplication\n"
+    assert tab._editor.textCursor().selectedText() == "API"
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
+def test_file_viewer_diff_mode_marks_changed_lines(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    content = "print('hi')\nprint('there')\n"
+    path.write_text(content, encoding="utf-8")
+    diff_text = (
+        "--- a/src/main.py\n"
+        "+++ b/src/main.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " print('hi')\n"
+        "+print('there')\n"
+    )
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace), diff_text=diff_text)
+    tab = panel._tabs.widget(0)
+
+    assert tab._editor.isReadOnly() is True
+    assert tab._editor.toPlainText() == content
+    assert tab._editor._changed_lines == {2}
+    assert tab._status.text() == "Diff preview"
+    panel.close()
+
+
+def test_file_viewer_markdown_uses_preview_until_edit(qapp, workspace):
+    path = workspace / "README.md"
+    path.write_text("# Hello\n\n| A | B |\n|---|---|\n| 1 | 2 |\n", encoding="utf-8")
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace))
+    tab = panel._tabs.widget(0)
+
+    assert tab._status.text() == "Markdown preview"
+    assert tab._preview.isVisibleTo(tab)
+    assert tab._editor.isHidden()
+    assert "<h1" in tab._preview.toHtml().lower()
+    assert "<table" in tab._preview.toHtml().lower()
+
+    tab._preview.edit_requested.emit()
+    assert tab._editor.isVisibleTo(tab)
+    assert tab._preview.isHidden()
+    assert tab._editor.isReadOnly() is False
+
+    tab._editor.setPlainText("# Saved\n")
+    tab._save()
+
+    assert path.read_text(encoding="utf-8") == "# Saved\n"
+    assert tab._status.text() == "Markdown preview"
+    assert tab._preview.isVisibleTo(tab)
+    assert tab._editor.isHidden()
+    assert "Saved" in tab._preview.toPlainText()
+    panel.close()
+
+
+def test_file_viewer_escape_discards_markdown_edit_and_returns_to_preview(qapp, workspace):
+    path = workspace / "README.md"
+    original = "# Original\n"
+    path.write_text(original, encoding="utf-8")
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace))
+    tab = panel._tabs.widget(0)
+    tab._preview.edit_requested.emit()
+    tab._editor.setPlainText("# Unsaved\n")
+    assert tab._dirty is True
+
+    tab._cancel_shortcut.activated.emit()
+
+    assert path.read_text(encoding="utf-8") == original
+    assert tab._dirty is False
+    assert panel._tabs.tabText(0) == "README.md"
+    assert tab._edit_mode is False
+    assert tab._status.text() == "Reverted"
+    assert tab._preview.isVisibleTo(tab)
+    assert tab._editor.isHidden()
+    assert "Original" in tab._preview.toPlainText()
+    panel.close()
+
+
+def test_file_viewer_line_number_gutter_expands(qapp):
+    short = _TextFileTab("short.py", "x\n", "", None)
+    long = _TextFileTab("long.py", "\n".join(str(i) for i in range(120)), "", None)
+
+    assert long._editor.line_number_area_width() > short._editor.line_number_area_width()
+
+    short.close()
+    long.close()
+    short.deleteLater()
+    long.deleteLater()
+    qapp.processEvents()
 
 
 def test_file_viewer_keeps_truncated_preview_read_only(qapp, workspace, monkeypatch):
@@ -157,6 +301,25 @@ def test_text_file_tab_minimap_scrolls_editor(qapp):
     tab._minimap._scroll_to_y(tab._minimap.height())
 
     assert scroll.value() > scroll.minimum()
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
+def test_text_file_tab_minimap_uses_syntax_colors(qapp):
+    tab = _TextFileTab("demo.py", "def hello():\n    return 'world'\n", "", None)
+    p = palette()
+
+    syntax_color = tab._minimap._line_color("def hello():", p, 1)
+    fallback_color = tab._minimap._line_color("plain text", p, 1)
+    tab._editor.set_changed_lines({1})
+    changed_color = tab._minimap._line_color("def hello():", p, 1)
+
+    assert syntax_color.name() != QColor(p["TEXT_DIM"]).name()
+    assert syntax_color.alpha() == 130
+    assert fallback_color.alpha() == 130
+    assert changed_color.name() == QColor(p["SUCCESS"]).name()
+    assert changed_color.alpha() == 150
     tab.close()
     tab.deleteLater()
     qapp.processEvents()

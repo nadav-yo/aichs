@@ -6,12 +6,15 @@ from PyQt6.QtGui import QShortcut, QKeySequence
 
 from storage.repository import ConversationStore
 from storage.settings import SettingsStore
+from services.key_bindings import shortcut_sequences
 from services.palette import PaletteContext, build_palette_items
 from ui.theme import apply_app_theme, current_theme
 from ui.widgets.left_panel import LeftPanel
 from ui.widgets.chat_panel import ChatPanel
 from ui.widgets.file_viewer import FileViewerPanel
 from ui.widgets.command_palette import CommandPalette
+from ui.widgets.file_search_dialog import FileSearchDialog
+from ui.widgets.text_search_dialog import TextSearchDialog
 
 
 def _startup_workspace(
@@ -104,27 +107,40 @@ class MainWindow(QMainWindow):
 
     def _setup_shortcuts(self):
         ctx = Qt.ShortcutContext.WindowShortcut
+        saved = self._settings.load()
+        self._shortcut_handles = []
 
         new_chat = QShortcut(QKeySequence.StandardKey.New, self)
         new_chat.setContext(ctx)
         new_chat.activated.connect(self._new_conversation)
+        self._shortcut_handles.append(new_chat)
 
         close_tab = QShortcut(QKeySequence.StandardKey.Close, self)
         close_tab.setContext(ctx)
         close_tab.activated.connect(self._close_viewer_tab)
+        self._shortcut_handles.append(close_tab)
 
         settings = QShortcut(QKeySequence.StandardKey.Preferences, self)
         settings.setContext(ctx)
         settings.activated.connect(self._left.open_settings)
+        self._shortcut_handles.append(settings)
 
         stop = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         stop.setContext(ctx)
         stop.activated.connect(self._stop_streaming_if_active)
+        self._shortcut_handles.append(stop)
 
-        for seq in ("Ctrl+K", "Meta+K"):
-            palette_sc = QShortcut(QKeySequence(seq), self)
-            palette_sc.setContext(ctx)
-            palette_sc.activated.connect(self._open_command_palette)
+        self._bind_shortcut_action("command_palette", self._open_command_palette, saved)
+        self._bind_shortcut_action("file_search", self._open_file_search, saved)
+        self._bind_shortcut_action("text_search", self._open_text_search, saved)
+
+    def _bind_shortcut_action(self, action: str, callback, saved: dict):
+        ctx = Qt.ShortcutContext.WindowShortcut
+        for seq in shortcut_sequences(action, saved):
+            shortcut = QShortcut(QKeySequence(seq), self)
+            shortcut.setContext(ctx)
+            shortcut.activated.connect(callback)
+            self._shortcut_handles.append(shortcut)
 
     def _open_command_palette(self):
         ctx = PaletteContext(
@@ -141,6 +157,16 @@ class MainWindow(QMainWindow):
             on_set_model=self._chat.set_model,
         )
         CommandPalette(build_palette_items(ctx), parent=self).exec()
+
+    def _open_file_search(self):
+        FileSearchDialog(os.getcwd(), self._open_file, parent=self).exec()
+
+    def _open_text_search(self):
+        TextSearchDialog(
+            os.getcwd(),
+            lambda path, line_no: self._open_file(path, line_no=line_no),
+            parent=self,
+        ).exec()
 
     def _new_conversation(self):
         self._chat.new_conversation()
@@ -193,8 +219,19 @@ class MainWindow(QMainWindow):
         self._chat.apply_appearance()
         self._viewer.apply_appearance()
 
-    def _open_file(self, path: str, diff_text: str | None = None):
-        self._viewer.open_file(path, repo_root=os.getcwd(), diff_text=diff_text)
+    def _open_file(
+        self,
+        path: str,
+        diff_text: str | None = None,
+        *,
+        line_no: int | None = None,
+    ):
+        self._viewer.open_file(
+            path,
+            repo_root=os.getcwd(),
+            diff_text=diff_text,
+            line_no=line_no,
+        )
         self._viewer.show()
         total = self._inner.height()
         self._inner.setSizes([total * 2 // 3, total // 3])

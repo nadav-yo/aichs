@@ -73,6 +73,10 @@ def inline_new_file_diff_to_html(
     )
 
 
+def changed_new_line_numbers(unified_diff: str) -> set[int]:
+    return _changed_new_line_numbers(unified_diff)
+
+
 def _theme_name(theme: str | None = None) -> str:
     return theme or current_theme()
 
