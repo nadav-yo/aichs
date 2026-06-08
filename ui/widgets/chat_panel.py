@@ -1941,6 +1941,9 @@ class ChatPanel(QWidget):
         if model in MODEL_PROVIDER:
             self._set_model(model)
 
+    def current_model(self) -> str:
+        return self.model_combo.currentText()
+
     def _save(self, *, touch_updated: bool = False):
         if self.conv_id and self.conv_data is not None:
             self.conv_data["messages"]   = prepare_for_storage(self.history)

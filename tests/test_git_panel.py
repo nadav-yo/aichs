@@ -1,6 +1,15 @@
+import subprocess
+
 from services.git_status import GitCommandResult
 from ui.theme import ACCENT, palette
-from ui.widgets.git_panel import GitPanel, _git_action_button_style, _git_action_button_text
+from ui.widgets.git_panel import (
+    GitPanel,
+    _ROLE_REF_BADGES,
+    _commit_ref_badges,
+    _git_action_button_style,
+    _git_action_button_text,
+    _parse_commit_log_line,
+)
 
 
 def test_git_action_button_style_has_balanced_rule_boundaries(qapp):
@@ -30,6 +39,29 @@ def test_git_action_button_style_uses_each_theme_palette(qapp):
         assert p["SUCCESS"] in style
 
 
+def test_parse_commit_log_line_accepts_decorations():
+    parsed = _parse_commit_log_line(
+        "abcdef123456\x1fabcdef1\x1fHEAD -> main, origin/main\x1finitial"
+    )
+
+    assert parsed == (
+        "abcdef123456",
+        "abcdef1",
+        ["HEAD -> main", "origin/main"],
+        "initial",
+    )
+    assert _commit_ref_badges(parsed[2]) == [("HEAD", "head"), ("origin/main", "origin")]
+
+
+def test_parse_commit_log_line_keeps_legacy_mock_shape():
+    assert _parse_commit_log_line("abcdef123456\x1fabcdef1\x1finitial") == (
+        "abcdef123456",
+        "abcdef1",
+        [],
+        "initial",
+    )
+
+
 def test_git_action_button_text_adds_count_only_when_present():
     assert _git_action_button_text("↑", 0) == "↑"
     assert _git_action_button_text("↑", 2) == "↑ (2)"
@@ -53,6 +85,33 @@ def test_git_action_buttons_use_directional_labels(qapp, workspace, monkeypatch)
     assert panel._pull_btn.accessibleName() == "Pull"
     assert panel._push_btn.text() == "↑"
     assert panel._push_btn.accessibleName() == "Push"
+
+
+def test_git_panel_passes_current_model_getter_to_changes(qapp, workspace):
+    panel = GitPanel(str(workspace), current_model_getter=lambda: "model-a")
+
+    assert panel._changes._current_model_getter() == "model-a"
+
+
+def test_git_log_marks_origin_ref(qapp, git_repo, tmp_path):
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=git_repo, check=True)
+    subprocess.run(["git", "push", "-u", "origin", branch], cwd=git_repo, check=True)
+
+    panel = GitPanel(str(git_repo))
+    item = panel.log.item(0)
+
+    assert ("HEAD", "head") in item.data(_ROLE_REF_BADGES)
+    assert (f"origin/{branch}", "origin") in item.data(_ROLE_REF_BADGES)
+    assert f"origin/{branch}" in item.toolTip()
 
 
 def test_git_log_push_button_follows_ahead_state(qapp, workspace, monkeypatch):

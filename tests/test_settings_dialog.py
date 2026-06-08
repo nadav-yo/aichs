@@ -1,4 +1,5 @@
 import services.model_registry as reg
+from services.commit_message import COMMIT_MESSAGE_PROMPT_ADDITION_KEY
 from storage.settings import (
     FILE_EDITOR_AUTO_SAVE_KEY,
     TRASH_RETENTION_DAYS_KEY,
@@ -188,6 +189,29 @@ def test_trash_retention_setting_is_saved(qapp):
     dialog._save()
 
     assert store.load()[TRASH_RETENTION_DAYS_KEY] == 30
+
+
+def test_commit_message_guidance_setting_is_saved_and_reloaded(qapp):
+    store = SettingsStore()
+    dialog = SettingsDialog(store)
+
+    assert dialog.commit_message_guidance.toPlainText() == ""
+    dialog.commit_message_guidance.setPlainText("Keep commits short.")
+    dialog._save()
+
+    assert store.load()[COMMIT_MESSAGE_PROMPT_ADDITION_KEY] == "Keep commits short."
+    reloaded = SettingsDialog(store)
+    assert reloaded.commit_message_guidance.toPlainText() == "Keep commits short."
+
+
+def test_empty_commit_message_guidance_is_saved_as_optional_noop(qapp):
+    store = SettingsStore()
+    dialog = SettingsDialog(store)
+
+    dialog.commit_message_guidance.setPlainText("   ")
+    dialog._save()
+
+    assert store.load()[COMMIT_MESSAGE_PROMPT_ADDITION_KEY] == ""
 
 
 def test_provider_order_drag_is_saved_and_reloaded(qapp, monkeypatch):

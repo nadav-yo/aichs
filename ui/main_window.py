@@ -56,7 +56,12 @@ class MainWindow(QMainWindow):
 
         self._outer = QSplitter(Qt.Orientation.Horizontal)
 
-        self._left = LeftPanel(store, repo, settings=self._settings)
+        self._left = LeftPanel(
+            store,
+            repo,
+            settings=self._settings,
+            current_model_getter=lambda: self._chat.current_model(),
+        )
         self._left.setMinimumWidth(150)
         self._left.setMaximumWidth(400)
 

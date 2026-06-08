@@ -14,6 +14,7 @@ from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 
 from config import MODELS, SYSTEM_PROMPT
 from services import model_registry
+from services.commit_message import COMMIT_MESSAGE_PROMPT_ADDITION_KEY
 from services.crew import all_crew, crew_settings
 from services.model_registry import (
     api_default_context_window,
@@ -885,6 +886,15 @@ class SettingsDialog(QDialog):
         layout.addWidget(trash_hint)
 
         layout.addWidget(self._section_separator())
+        self.commit_message_guidance = QTextEdit()
+        self.commit_message_guidance.setPlaceholderText(
+            "Optional. Example: Keep messages short. Use Jira issue keys when obvious."
+        )
+        self.commit_message_guidance.setMaximumHeight(76)
+        self.commit_message_guidance.setStyleSheet(self._field_style)
+        self._field(layout, "Commit message guidance", self.commit_message_guidance)
+
+        layout.addWidget(self._section_separator())
         self.human_portrait = _PortraitPicker(
             "human", "Your avatar", saved.get("avatar_human", "human"), self._styles,
         )
@@ -1339,6 +1349,9 @@ class SettingsDialog(QDialog):
             bool(saved.get(FILE_EDITOR_AUTO_SAVE_KEY, False))
         )
         self.trash_retention_spin.setValue(trash_retention_days(saved))
+        self.commit_message_guidance.setPlainText(
+            str(saved.get(COMMIT_MESSAGE_PROMPT_ADDITION_KEY, ""))
+        )
 
         compaction = saved.get("compaction") if isinstance(saved.get("compaction"), dict) else {}
         reserve = compaction.get("reserve_tokens", compaction.get("reserveTokens"))
@@ -1451,6 +1464,7 @@ class SettingsDialog(QDialog):
             "enter_to_send": self.enter_to_send_check.isChecked(),
             FILE_EDITOR_AUTO_SAVE_KEY: self.file_editor_auto_save_check.isChecked(),
             TRASH_RETENTION_DAYS_KEY: self.trash_retention_spin.value(),
+            COMMIT_MESSAGE_PROMPT_ADDITION_KEY: self.commit_message_guidance.toPlainText().strip(),
             "default_models": default_models,
             "provider_order": [provider["id"] for provider in self._providers],
             "crew": crew,

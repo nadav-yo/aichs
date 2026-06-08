@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Callable
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QTabWidget, QTreeWidget, QTreeWidgetItem,
@@ -289,8 +290,15 @@ class LeftPanel(QWidget):
     file_attach      = pyqtSignal(str)
     settings_changed = pyqtSignal()
 
-    def __init__(self, store: ConversationStore, root_path: str,
-                 settings: SettingsStore | None = None, parent=None):
+    def __init__(
+        self,
+        store: ConversationStore,
+        root_path: str,
+        settings: SettingsStore | None = None,
+        parent=None,
+        *,
+        current_model_getter: Callable[[], str] | None = None,
+    ):
         super().__init__(parent)
         self._settings = settings or SettingsStore()
 
@@ -321,7 +329,11 @@ class LeftPanel(QWidget):
         files_layout.addWidget(self._files_header)
         files_layout.addWidget(self._file_tree, 1)
 
-        self._git = GitPanel(root_path)
+        self._git = GitPanel(
+            root_path,
+            settings=self._settings,
+            current_model_getter=current_model_getter,
+        )
         self._git.file_open.connect(self.file_open)
 
         git_wrap = QWidget()

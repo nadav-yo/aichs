@@ -25,6 +25,10 @@ class GitFileChange:
     label: str
     rel_path: str
     abs_path: str
+    staged: bool = False
+    unstaged: bool = True
+    staged_label: str = ""
+    unstaged_label: str = ""
 
 
 def run_git(cmd: list[str], cwd: str, timeout: float = 5) -> str:
@@ -38,7 +42,7 @@ def run_git(cmd: list[str], cwd: str, timeout: float = 5) -> str:
             errors="replace",
             timeout=timeout,
         )
-        return (r.stdout or "").strip()
+        return (r.stdout or "").rstrip()
     except Exception:
         return ""
 
@@ -111,6 +115,42 @@ def parse_status_line(line: str) -> tuple[str, str, str]:
     return code, label, path
 
 
+def status_stage_flags(code: str) -> tuple[bool, bool, str, str]:
+    """Return staged/unstaged flags and per-section labels for a short-status code."""
+    code = (code or "  ")[:2].ljust(2)
+    if code == "??":
+        return False, True, "", "?"
+    index, worktree = code[0], code[1]
+    staged = index not in (" ", "?")
+    unstaged = worktree not in (" ", "?")
+    return staged, unstaged, _status_char_label(index), _status_char_label(worktree)
+
+
+def _status_char_label(ch: str) -> str:
+    return "" if ch == " " else (ch or "").strip()
+
+
+def _change_from_status_line(repo_path: str, line: str) -> GitFileChange | None:
+    code, label, path = parse_status_line(line)
+    if path.endswith("/"):
+        return None
+    abs_path = path if os.path.isabs(path) else os.path.join(repo_path, path)
+    abs_path = os.path.normpath(os.path.abspath(abs_path))
+    if os.path.isdir(abs_path):
+        return None
+    staged, unstaged, staged_label, unstaged_label = status_stage_flags(code)
+    return GitFileChange(
+        code=code,
+        label=label,
+        rel_path=path,
+        abs_path=abs_path,
+        staged=staged,
+        unstaged=unstaged,
+        staged_label=staged_label,
+        unstaged_label=unstaged_label,
+    )
+
+
 def list_file_changes(repo_path: str) -> list[GitFileChange]:
     """Uncommitted file changes (same filters as the Git tab)."""
     status = run_git(["git", "status", "--short", "-uall"], repo_path)
@@ -119,12 +159,64 @@ def list_file_changes(repo_path: str) -> list[GitFileChange]:
 
     changes: list[GitFileChange] = []
     for line in status.splitlines():
-        code, label, path = parse_status_line(line)
-        if path.endswith("/"):
-            continue
-        abs_path = path if os.path.isabs(path) else os.path.join(repo_path, path)
-        abs_path = os.path.normpath(os.path.abspath(abs_path))
-        if os.path.isdir(abs_path):
-            continue
-        changes.append(GitFileChange(code=code, label=label, rel_path=path, abs_path=abs_path))
+        change = _change_from_status_line(repo_path, line)
+        if change:
+            changes.append(change)
     return changes
+
+
+def stage_files(repo_path: str, rel_paths: list[str]) -> GitCommandResult:
+    paths = repo_relative_paths(repo_path, rel_paths)
+    if not paths:
+        return GitCommandResult(returncode=1, stdout="", stderr="No files selected.")
+    return run_git_command(["git", "add", "--", *paths], repo_path)
+
+
+def unstage_files(repo_path: str, rel_paths: list[str]) -> GitCommandResult:
+    paths = repo_relative_paths(repo_path, rel_paths)
+    if not paths:
+        return GitCommandResult(returncode=1, stdout="", stderr="No files selected.")
+    return run_git_command(["git", "restore", "--staged", "--", *paths], repo_path)
+
+
+def stash_files(repo_path: str, rel_paths: list[str], message: str) -> GitCommandResult:
+    paths = repo_relative_paths(repo_path, rel_paths)
+    if not paths:
+        return GitCommandResult(returncode=1, stdout="", stderr="No files selected.")
+    msg = str(message or "").strip() or "AICHS stash"
+    return run_git_command(["git", "stash", "push", "-u", "-m", msg, "--", *paths], repo_path)
+
+
+def commit_staged(repo_path: str, summary: str, body: str = "") -> GitCommandResult:
+    title = str(summary or "").strip()
+    if not title:
+        return GitCommandResult(returncode=1, stdout="", stderr="Commit summary is required.")
+    cmd = ["git", "commit", "-m", title]
+    detail = str(body or "").strip()
+    if detail:
+        cmd += ["-m", detail]
+    return run_git_command(cmd, repo_path, timeout=120)
+
+
+def repo_relative_paths(repo_path: str, rel_paths: list[str]) -> list[str]:
+    root = os.path.normpath(os.path.abspath(repo_path))
+    safe: list[str] = []
+    seen: set[str] = set()
+    for raw in rel_paths:
+        path = str(raw or "").strip().replace("\\", "/")
+        if not path:
+            continue
+        abs_path = path if os.path.isabs(path) else os.path.join(root, path)
+        abs_path = os.path.normpath(os.path.abspath(abs_path))
+        try:
+            common = os.path.commonpath([root, abs_path])
+        except ValueError:
+            continue
+        if common != root:
+            continue
+        rel = os.path.relpath(abs_path, root).replace("\\", "/")
+        if rel.startswith("../") or rel == ".." or rel in seen:
+            continue
+        seen.add(rel)
+        safe.append(rel)
+    return safe

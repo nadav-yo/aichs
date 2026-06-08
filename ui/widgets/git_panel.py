@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -30,6 +32,7 @@ from services.git_status import (
     run_git,
     run_git_command,
 )
+from storage.settings import SettingsStore
 from ui.theme import (
     ACCENT,
     git_changes_list_style,
@@ -45,6 +48,7 @@ _ROLE_HASH = Qt.ItemDataRole.UserRole
 _ROLE_SUBJECT = Qt.ItemDataRole.UserRole + 1
 _ROLE_SHORT_HASH = Qt.ItemDataRole.UserRole + 2
 _ROLE_FILE_DIFF = Qt.ItemDataRole.UserRole + 3
+_ROLE_REF_BADGES = Qt.ItemDataRole.UserRole + 4
 _LOG_SEP = "\x1f"
 
 
@@ -64,6 +68,7 @@ class _CommitLogDelegate(QStyledItemDelegate):
 
         short_hash = str(index.data(_ROLE_SHORT_HASH) or "").strip()
         subject = str(index.data(_ROLE_SUBJECT) or "").strip()
+        badges = index.data(_ROLE_REF_BADGES) or []
         if not short_hash:
             short_hash = str(index.data(_ROLE_HASH) or "").strip()[:7]
 
@@ -79,8 +84,11 @@ class _CommitLogDelegate(QStyledItemDelegate):
         painter.setPen(QColor(hash_color))
         painter.drawText(rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, short_hash)
 
+        subject_x = rect.x() + hash_width + gap
+        if badges:
+            subject_x = self._draw_ref_badges(painter, option, badges, subject_x)
+
         if subject:
-            subject_x = rect.x() + hash_width + gap
             subject_rect = QRect(subject_x, rect.y(), max(0, rect.right() - subject_x + 1), rect.height())
             subject_metrics = QFontMetrics(option.font)
             subject_text = subject_metrics.elidedText(
@@ -96,6 +104,43 @@ class _CommitLogDelegate(QStyledItemDelegate):
                 subject_text,
             )
         painter.restore()
+
+    def _draw_ref_badges(self, painter, option, badges, x: int) -> int:
+        p = palette()
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        badge_font = QFont(option.font)
+        point_size = badge_font.pointSize()
+        if point_size > 0:
+            badge_font.setPointSize(max(8, point_size - 1))
+        badge_font.setWeight(QFont.Weight.DemiBold)
+        metrics = QFontMetrics(badge_font)
+        painter.setFont(badge_font)
+
+        row_rect = option.rect.adjusted(6, 0, -6, 0)
+        gap = max(4, metrics.horizontalAdvance(" "))
+        for label, kind in badges:
+            label = str(label or "").strip()
+            if not label:
+                continue
+            badge_width = metrics.horizontalAdvance(label) + 10
+            if x + badge_width > row_rect.right():
+                break
+            badge_height = min(row_rect.height() - 4, metrics.height() + 4)
+            badge_y = row_rect.y() + (row_rect.height() - badge_height) // 2
+            badge_rect = QRect(x, badge_y, badge_width, badge_height)
+            bg, border, fg = _commit_ref_badge_colors(str(kind or ""), selected, p)
+            painter.setPen(QColor(border))
+            painter.setBrush(QColor(bg))
+            painter.drawRoundedRect(badge_rect, 4, 4)
+            painter.setPen(QColor(fg))
+            painter.drawText(
+                badge_rect.adjusted(5, 0, -5, 0),
+                Qt.AlignmentFlag.AlignCenter,
+                label,
+            )
+            x += badge_width + gap
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        return x + gap
 
     def sizeHint(self, option, index):
         size = super().sizeHint(option, index)
@@ -207,7 +252,14 @@ class _CommitDiffDialog(QDialog):
 class GitPanel(QWidget):
     file_open = pyqtSignal(str)
 
-    def __init__(self, repo_path: str, parent=None):
+    def __init__(
+        self,
+        repo_path: str,
+        parent=None,
+        *,
+        settings: SettingsStore | None = None,
+        current_model_getter: Callable[[], str] | None = None,
+    ):
         super().__init__(parent)
         self.repo_path = repo_path
 
@@ -217,8 +269,13 @@ class GitPanel(QWidget):
 
         splitter = QSplitter(Qt.Orientation.Vertical)
 
-        self._changes = GitChangesList(repo_path)
+        self._changes = GitChangesList(
+            repo_path,
+            settings=settings,
+            current_model_getter=current_model_getter,
+        )
         self._changes.file_open.connect(self.file_open.emit)
+        self._changes.git_changed.connect(self._on_changes_changed)
 
         log_wrap = QWidget()
         ll = QVBoxLayout(log_wrap)
@@ -287,6 +344,10 @@ class GitPanel(QWidget):
         self._refresh_log()
         self._update_git_action_state()
 
+    def _on_changes_changed(self):
+        self._refresh_log()
+        self._update_git_action_state()
+
     def _pull(self):
         self._run_git_action("Pull", ["git", "pull", "--ff-only"])
 
@@ -308,19 +369,24 @@ class GitPanel(QWidget):
     def _refresh_log(self):
         self.log.clear()
         for raw in run_git(
-            ["git", "log", "--format=%H%x1f%h%x1f%s", "-40"],
+            ["git", "log", "--decorate=short", "--format=%H%x1f%h%x1f%D%x1f%s", "-40"],
             self.repo_path,
         ).splitlines():
             parsed = _parse_commit_log_line(raw)
             if not parsed:
                 continue
-            full_hash, short_hash, subject = parsed
+            full_hash, short_hash, refs, subject = parsed
+            badges = _commit_ref_badges(refs)
             text = f"{short_hash} {subject}" if subject else short_hash
             item = QListWidgetItem(text)
-            item.setToolTip("Drag this commit into chat.")
+            tooltip = "Drag this commit into chat."
+            if badges:
+                tooltip += "\nRefs: " + ", ".join(label for label, _kind in badges)
+            item.setToolTip(tooltip)
             item.setData(_ROLE_HASH, full_hash)
             item.setData(_ROLE_SUBJECT, subject)
             item.setData(_ROLE_SHORT_HASH, short_hash)
+            item.setData(_ROLE_REF_BADGES, badges)
             self.log.addItem(item)
 
     def _update_git_action_state(self):
@@ -376,14 +442,54 @@ class GitPanel(QWidget):
         self.refresh()
 
 
-def _parse_commit_log_line(line: str) -> tuple[str, str, str] | None:
-    parts = str(line or "").split(_LOG_SEP, 2)
-    if len(parts) != 3:
+def _parse_commit_log_line(line: str) -> tuple[str, str, list[str], str] | None:
+    parts = str(line or "").split(_LOG_SEP, 3)
+    if len(parts) == 3:
+        full_hash, short_hash, subject = (part.strip() for part in parts)
+        refs: list[str] = []
+    elif len(parts) == 4:
+        full_hash, short_hash, refs_text, subject = (part.strip() for part in parts)
+        refs = _parse_commit_refs(refs_text)
+    else:
         return None
-    full_hash, short_hash, subject = (part.strip() for part in parts)
     if not full_hash:
         return None
-    return full_hash, short_hash or full_hash[:7], subject
+    return full_hash, short_hash or full_hash[:7], refs, subject
+
+
+def _parse_commit_refs(refs_text: str) -> list[str]:
+    return [ref.strip() for ref in str(refs_text or "").split(",") if ref.strip()]
+
+
+def _commit_ref_badges(refs: list[str]) -> list[tuple[str, str]]:
+    badges: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for ref in refs:
+        label = ""
+        kind = "branch"
+        if ref == "HEAD":
+            label = "HEAD"
+            kind = "head"
+        elif ref.startswith("HEAD -> "):
+            label = "HEAD"
+            kind = "head"
+        elif ref.startswith("origin/"):
+            label = ref
+            kind = "origin"
+        if label and label not in seen:
+            seen.add(label)
+            badges.append((label, kind))
+    return badges
+
+
+def _commit_ref_badge_colors(kind: str, selected: bool, p: dict) -> tuple[str, str, str]:
+    if selected:
+        return p["BG2"], p["SELECTION_TEXT"], p["SELECTION_TEXT"]
+    if kind == "origin":
+        return p["SUCCESS_BG"], p["SUCCESS_BORDER"], p["SUCCESS"]
+    if kind == "head":
+        return p["SELECTION"], ACCENT, p["SELECTION_TEXT"]
+    return p["BG3"], p["BORDER"], p["TEXT_DIM"]
 
 
 def _git_action_button_text(symbol: str, count: int) -> str:
