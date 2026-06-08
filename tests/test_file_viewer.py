@@ -1,6 +1,7 @@
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QTextCursor
+from PyQt6.QtCore import QPoint, QPointF, Qt
+from PyQt6.QtGui import QColor, QGuiApplication, QTextCursor
 
+from services.file_editor_refs import AICHS_EDITOR_REF_MIME, parse_editor_refs
 from storage.settings import FILE_EDITOR_AUTO_SAVE_KEY
 from tests.conftest import write_extension
 from ui.theme import palette
@@ -8,6 +9,7 @@ from ui.widgets.file_viewer import (
     FileViewerPanel,
     _FileTextEdit,
     _TextFileTab,
+    _diagnostic_details,
     _read_text_preview,
     _read_text_preview_details,
 )
@@ -143,6 +145,20 @@ def test_file_viewer_open_file_can_jump_to_line(qapp, workspace):
     panel.close()
 
 
+def test_file_viewer_refresh_file_updates_open_editor(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace))
+    tab = panel._tabs.widget(0)
+    path.write_text("print('agent edit')\n", encoding="utf-8")
+
+    assert panel.refresh_file("src/main.py", repo_root=str(workspace)) is True
+    assert tab._editor.toPlainText() == "print('agent edit')\n"
+    assert tab._dirty is False
+    panel.close()
+
+
 def test_text_file_tab_local_find_selects_match(qapp):
     tab = _TextFileTab("demo.py", "one\nneedle\ntwo needle\n", "", None)
 
@@ -231,6 +247,61 @@ def test_file_text_edit_does_not_complete_read_only(qapp):
     qapp.processEvents()
 
 
+def test_file_text_edit_selection_mime_includes_editor_ref(qapp, workspace):
+    editor = _FileTextEdit()
+    path = workspace / "src" / "main.py"
+    editor.configure_reference(str(path), str(workspace))
+    editor.setPlainText("one\ntwo\nthree\n")
+    cursor = editor.textCursor()
+    cursor.setPosition(4)
+    cursor.setPosition(13, QTextCursor.MoveMode.KeepAnchor)
+    editor.setTextCursor(cursor)
+
+    mime = editor._mime_data_for_selection()
+
+    assert mime is not None
+    assert mime.text() == "two\nthree"
+    assert parse_editor_refs(mime.data(AICHS_EDITOR_REF_MIME)) == [{
+        "path": "src/main.py",
+        "start_line": 2,
+        "end_line": 3,
+        "text": "two\nthree",
+    }]
+
+    editor.copy()
+    clipboard = QGuiApplication.clipboard().mimeData()
+    assert clipboard.text() == "two\nthree"
+    assert parse_editor_refs(clipboard.data(AICHS_EDITOR_REF_MIME))[0]["path"] == "src/main.py"
+    editor.close()
+    editor.deleteLater()
+    qapp.processEvents()
+
+
+def test_file_text_edit_drag_mime_uses_lightweight_reference_text(qapp, workspace):
+    editor = _FileTextEdit()
+    path = workspace / "src" / "main.py"
+    editor.configure_reference(str(path), str(workspace))
+    editor.setPlainText("one\ntwo\nthree\n")
+    cursor = editor.textCursor()
+    cursor.setPosition(0)
+    cursor.setPosition(len(editor.toPlainText()), QTextCursor.MoveMode.KeepAnchor)
+    editor.setTextCursor(cursor)
+
+    mime = editor._mime_data_for_drag()
+
+    assert mime is not None
+    assert mime.text() == "@src/main.py:1-3"
+    assert parse_editor_refs(mime.data(AICHS_EDITOR_REF_MIME)) == [{
+        "path": "src/main.py",
+        "start_line": 1,
+        "end_line": 3,
+        "text": "",
+    }]
+    editor.close()
+    editor.deleteLater()
+    qapp.processEvents()
+
+
 def test_file_text_edit_diagnostic_markers_expand_gutter(qapp):
     from services.language_features import Diagnostic
 
@@ -246,6 +317,143 @@ def test_file_text_edit_diagnostic_markers_expand_gutter(qapp):
     editor.close()
     editor.deleteLater()
     qapp.processEvents()
+
+
+def test_file_text_edit_diagnostic_marker_hover_shows_details(qapp):
+    from services.language_features import Diagnostic
+
+    class _HoverEvent:
+        def __init__(self, widget, pos: QPoint):
+            self._widget = widget
+            self._pos = pos
+
+        def position(self):
+            return QPointF(self._pos)
+
+        def globalPosition(self):
+            return QPointF(self._widget.mapToGlobal(self._pos))
+
+    editor = _FileTextEdit()
+    editor.resize(260, 120)
+    editor.setPlainText("one\ntwo\n")
+    editor.show()
+    qapp.processEvents()
+    editor.set_diagnostics([
+        Diagnostic(
+            path="demo.py",
+            line=2,
+            column=4,
+            severity="warning",
+            source="ruff",
+            code="F841",
+            message="Local variable app is assigned to but never used",
+        ),
+    ])
+
+    block = editor.document().findBlockByNumber(1)
+    top = int(editor.blockBoundingGeometry(block).translated(editor.contentOffset()).top())
+    marker_y = top + max(2, (editor.fontMetrics().height() - 7) // 2)
+    pos = QPoint(7, marker_y + 3)
+
+    assert editor._diagnostic_line_at_gutter_pos(pos) == 2
+
+    editor.line_number_area_mouse_move_event(_HoverEvent(editor._line_number_area, pos))
+
+    assert editor._hovered_diagnostic_line == 2
+    assert editor._line_number_area.cursor().shape() == Qt.CursorShape.PointingHandCursor
+    assert "line 2:5 warning [ruff F841]" in editor._line_number_area.toolTip()
+    assert "Local variable app" in editor._line_number_area.toolTip()
+
+    editor.line_number_area_leave_event(None)
+
+    assert editor._hovered_diagnostic_line is None
+    assert editor._line_number_area.toolTip() == ""
+    editor.close()
+    editor.deleteLater()
+    qapp.processEvents()
+
+
+def test_text_file_tab_right_click_diagnostic_marker_drafts_fix_request(qapp, workspace):
+    from services.language_features import Diagnostic
+
+    class _MouseEvent:
+        def __init__(self, widget, pos: QPoint, button):
+            self._widget = widget
+            self._pos = pos
+            self._button = button
+            self.accepted = False
+
+        def button(self):
+            return self._button
+
+        def position(self):
+            return QPointF(self._pos)
+
+        def globalPosition(self):
+            return QPointF(self._widget.mapToGlobal(self._pos))
+
+        def accept(self):
+            self.accepted = True
+
+    path = workspace / "src" / "main.py"
+    tab = _TextFileTab(str(path), "one\ntwo\n", str(workspace), None)
+    tab.resize(320, 180)
+    tab.show()
+    qapp.processEvents()
+    tab._set_diagnostics([
+        Diagnostic(
+            path=str(path),
+            line=2,
+            column=4,
+            severity="warning",
+            source="ruff",
+            code="F841",
+            message="Local variable app is assigned to but never used",
+        ),
+    ])
+    drafted = []
+    tab.diagnostic_fix_requested.connect(lambda text, refs: drafted.append((text, refs)))
+
+    block = tab._editor.document().findBlockByNumber(1)
+    top = int(tab._editor.blockBoundingGeometry(block).translated(tab._editor.contentOffset()).top())
+    marker_y = top + max(2, (tab._editor.fontMetrics().height() - 7) // 2)
+    event = _MouseEvent(
+        tab._editor._line_number_area,
+        QPoint(7, marker_y + 3),
+        Qt.MouseButton.RightButton,
+    )
+
+    tab._editor.line_number_area_mouse_press_event(event)
+
+    assert event.accepted is True
+    assert drafted
+    assert "Please fix this diagnostic in @src/main.py:2." in drafted[0][0]
+    assert "Diagnostic tool: ruff F841" in drafted[0][0]
+    assert "Local variable app is assigned to but never used" in drafted[0][0]
+    assert drafted[0][1] == ["src/main.py"]
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
+def test_diagnostic_details_limits_output():
+    from services.language_features import Diagnostic
+
+    details = _diagnostic_details([
+        Diagnostic(
+            path="demo.py",
+            line=i + 1,
+            column=0,
+            severity="warning",
+            source="ruff",
+            code=f"R{i}",
+            message=f"issue {i}",
+        )
+        for i in range(10)
+    ])
+
+    assert "line 1:1 warning [ruff R0]: issue 0" in details
+    assert "... and 2 more" in details
 
 
 def test_file_viewer_applies_extension_diagnostics(qapp, workspace):

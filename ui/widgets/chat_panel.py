@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QComboBox, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QPoint, QPointF, QSize, QTimer, pyqtSignal, QThread
-from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap, QTextCursor
 
 from config import IGNORED, MAX_FILE_PREVIEW_BYTES, MAX_TOOL_READ_BYTES
 from config import MODELS, MODEL_PROVIDER
@@ -300,6 +300,7 @@ class ChatPanel(QWidget):
     open_code    = pyqtSignal(str, str)   # content, title
     open_file    = pyqtSignal(str, object)
     file_written = pyqtSignal(str)
+    file_write_completed = pyqtSignal(str)
 
     def __init__(self, store: ConversationStore, cwd: str = "",
                  settings: SettingsStore | None = None, parent=None):
@@ -640,6 +641,27 @@ class ChatPanel(QWidget):
         except ValueError:
             rel = os.path.basename(path)
         self.composer.input.add_file_mention(rel)
+        self.composer.focus_input()
+
+    def draft_diagnostic_fix(self, text: str, file_refs: list[str] | None = None):
+        draft = str(text or "").strip()
+        if not draft:
+            return
+        self.composer.remember_file_refs(file_refs or [])
+        input_box = self.composer.input
+        current = input_box.toPlainText().rstrip()
+        was_blocked = input_box.blockSignals(True)
+        input_box.setPlainText(f"{current}\n\n{draft}" if current else draft)
+        input_box.blockSignals(was_blocked)
+        input_box.exit_mention_mode()
+        input_box.exit_slash_mode()
+        if self._file_picker:
+            self._file_picker.hide()
+        if self._skill_picker:
+            self._skill_picker.hide()
+        cursor = input_box.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        input_box.setTextCursor(cursor)
         self.composer.focus_input()
 
     def edit_last_message(self):
@@ -1603,6 +1625,7 @@ class ChatPanel(QWidget):
             run.last_edit_path = ""
             self._last_edit_path = ""
         elif name == "edit_file" and run.last_edit_path:
+            self.file_write_completed.emit(run.last_edit_path)
             self._add_file_card(run.last_edit_path)
             run.last_edit_path = ""
             self._last_edit_path = ""

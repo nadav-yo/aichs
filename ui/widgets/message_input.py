@@ -25,6 +25,12 @@ from services.chat_drag import (
     parse_file_drop,
 )
 from services.content import encode_image
+from services.file_editor_refs import (
+    AICHS_EDITOR_REF_MIME,
+    editor_ref_paths,
+    editor_ref_text,
+    parse_editor_refs,
+)
 from services.file_ref_clipboard import AICHS_MESSAGE_COPY_MIME, parse_file_refs_payload
 from services.terminal_refs import TERMINAL_REF_MIME
 from ui.theme import (
@@ -71,7 +77,8 @@ def _mime_has_attachments(mime) -> bool:
 
 def _mime_has_chat_refs(mime) -> bool:
     return (
-        mime.hasFormat(AICHS_FILE_DROP_MIME)
+        mime.hasFormat(AICHS_EDITOR_REF_MIME)
+        or mime.hasFormat(AICHS_FILE_DROP_MIME)
         or mime.hasFormat(AICHS_COMMIT_DROP_MIME)
         or mime.hasFormat(AICHS_CHAT_DROP_MIME)
     )
@@ -244,6 +251,9 @@ class MessageInput(QTextEdit):
         self._pasted_file_refs.clear()
         self._pasted_chat_refs.clear()
 
+    def remember_file_refs(self, refs: list[str]):
+        self._remember_file_refs(refs)
+
     def insert_file_mention(self, rel_path: str):
         token = f'@"{rel_path}"' if any(ch.isspace() for ch in rel_path) else f"@{rel_path}"
         self._insert_mention_token(token)
@@ -275,6 +285,13 @@ class MessageInput(QTextEdit):
         self.setTextCursor(cursor)
 
     def insert_refs_from_mime(self, mime) -> bool:
+        if mime.hasFormat(AICHS_EDITOR_REF_MIME):
+            refs = parse_editor_refs(mime.data(AICHS_EDITOR_REF_MIME))
+            text = editor_ref_text(refs)
+            if text:
+                self._remember_file_refs(editor_ref_paths(refs))
+                self.insert_reference_text(text)
+                return True
         if mime.hasFormat(AICHS_FILE_DROP_MIME):
             text = file_drop_text(parse_file_drop(mime.data(AICHS_FILE_DROP_MIME)))
             if text:
@@ -293,6 +310,11 @@ class MessageInput(QTextEdit):
                 self.insert_reference_text(text)
                 return True
         return False
+
+    def _remember_file_refs(self, refs: list[str]):
+        for ref in refs:
+            if ref and ref not in self._pasted_file_refs:
+                self._pasted_file_refs.append(ref)
 
     def _remember_chat_refs(self, refs: list[dict]):
         seen = {ref.get("id") for ref in self._pasted_chat_refs}
@@ -440,9 +462,7 @@ class MessageInput(QTextEdit):
                 return
         if source.hasFormat(AICHS_MESSAGE_COPY_MIME):
             refs = parse_file_refs_payload(source.data(AICHS_MESSAGE_COPY_MIME))
-            for ref in refs:
-                if ref not in self._pasted_file_refs:
-                    self._pasted_file_refs.append(ref)
+            self._remember_file_refs(refs)
             if refs and source.hasText():
                 self.textCursor().insertText(_with_visible_file_mentions(source.text(), refs))
                 return
@@ -678,6 +698,9 @@ class ComposerWidget(QWidget):
 
     def take_pasted_chat_refs(self) -> list[dict]:
         return self.input.take_pasted_chat_refs()
+
+    def remember_file_refs(self, refs: list[str]):
+        self.input.remember_file_refs(refs)
 
     def apply_appearance(self):
         self._shell.setStyleSheet(composer_shell_style())

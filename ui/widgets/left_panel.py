@@ -1,18 +1,19 @@
 import os
+import shutil
 from pathlib import Path
 from typing import Callable
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QPushButton, QHBoxLayout, QLabel, QMenu, QSizePolicy, QStyleFactory,
-    QAbstractItemView,
+    QAbstractItemView, QInputDialog, QMessageBox,
 )
 from PyQt6.QtCore import pyqtSignal, Qt, QFileSystemWatcher, QTimer, QMimeData
 from PyQt6.QtGui import QColor, QAction
 
 from config import IGNORED, MAX_TREE_ENTRIES_PER_DIR
 from services.chat_drag import AICHS_FILE_DROP_MIME, file_drop_payload, file_drop_text
-from services.git_status import list_file_changes
+from services.git_status import discard_files, list_file_changes
 from storage.repository import ConversationStore
 from storage.settings import SettingsStore
 from ui.theme import (
@@ -159,18 +160,207 @@ class FileTree(QTreeWidget):
         menu = QMenu(self)
         item = self.itemAt(pos)
         path = item.data(0, Qt.ItemDataRole.UserRole) if item else ""
-        if path and os.path.isfile(path):
+        if path and os.path.isdir(path):
+            new_file = QAction("New File...", self)
+            new_file.triggered.connect(lambda: self._new_file_dialog(path))
+            menu.addAction(new_file)
+            new_folder = QAction("New Folder...", self)
+            new_folder.triggered.connect(lambda: self._new_folder_dialog(path))
+            menu.addAction(new_folder)
+            menu.addSeparator()
+            delete_folder = QAction("Delete...", self)
+            delete_folder.triggered.connect(lambda: self._delete_path_dialog(path))
+            menu.addAction(delete_folder)
+            menu.addSeparator()
+        elif path and os.path.isfile(path):
             attach = QAction("Attach to message", self)
             attach.triggered.connect(lambda: self.file_attached.emit(path))
             menu.addAction(attach)
             open_file = QAction("Open", self)
             open_file.triggered.connect(lambda: self.file_opened.emit(path))
             menu.addAction(open_file)
+            rename = QAction("Rename...", self)
+            rename.triggered.connect(lambda: self._rename_file_dialog(path))
+            menu.addAction(rename)
+            delete_file = QAction("Delete...", self)
+            delete_file.triggered.connect(lambda: self._delete_path_dialog(path))
+            menu.addAction(delete_file)
+            if self._is_discardable_modified_file(path):
+                discard = QAction("Discard changes...", self)
+                discard.triggered.connect(lambda: self._discard_file_dialog(path))
+                menu.addAction(discard)
             menu.addSeparator()
         refresh = QAction("Refresh", self)
         refresh.triggered.connect(self.refresh)
         menu.addAction(refresh)
         menu.exec(self.viewport().mapToGlobal(pos))
+
+    def _new_file_dialog(self, folder: str):
+        name, ok = QInputDialog.getText(self, "New file", "File name:")
+        if not ok:
+            return
+        try:
+            path = self.create_file(folder, name)
+        except Exception as exc:
+            QMessageBox.warning(self, "New file failed", str(exc))
+            return
+        self.refresh()
+        self.mark_touched(str(path))
+        self.file_opened.emit(str(path))
+
+    def _new_folder_dialog(self, folder: str):
+        name, ok = QInputDialog.getText(self, "New folder", "Folder name:")
+        if not ok:
+            return
+        try:
+            path = self.create_folder(folder, name)
+        except Exception as exc:
+            QMessageBox.warning(self, "New folder failed", str(exc))
+            return
+        self.refresh()
+        self.mark_touched(str(path))
+
+    def _rename_file_dialog(self, path: str):
+        current = os.path.basename(path)
+        name, ok = QInputDialog.getText(self, "Rename file", "New name:", text=current)
+        if not ok or name.strip() == current:
+            return
+        try:
+            new_path = self.rename_file(path, name)
+        except Exception as exc:
+            QMessageBox.warning(self, "Rename failed", str(exc))
+            return
+        self.refresh()
+        self.mark_touched(str(new_path))
+
+    def _discard_file_dialog(self, path: str):
+        rel_path = self._repo_relative_path(path)
+        if not rel_path:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Discard changes?",
+            f"Discard changes to '{rel_path}'?\n\nThis permanently removes the file changes.",
+            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Discard:
+            return
+        code = self._git_by_path.get(_path_key(path), ("", ""))[0]
+        staged = code[:1] == "M" and (code + " ")[1] == " "
+        result = discard_files(self.root_path, [rel_path], staged=staged)
+        if not result.ok:
+            detail = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+            QMessageBox.warning(self, "Discard failed", detail or "Discard failed.")
+            return
+        self.refresh()
+
+    def _delete_path_dialog(self, path: str):
+        target = Path(path)
+        kind = "folder" if target.is_dir() else "file"
+        answer = QMessageBox.question(
+            self,
+            f"Delete {kind}",
+            f"Delete {kind} '{target.name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.delete_path(path)
+        except Exception as exc:
+            QMessageBox.warning(self, f"Delete {kind} failed", str(exc))
+            return
+        self.refresh()
+
+    def create_file(self, folder: str, name: str) -> Path:
+        directory = Path(folder)
+        if not directory.is_dir():
+            raise ValueError("Choose a folder in the workspace.")
+        self._ensure_in_workspace(directory)
+        target = directory / self._clean_leaf_name(name)
+        self._ensure_in_workspace(target)
+        if target.exists():
+            raise FileExistsError(f"File already exists: {target.name}")
+        target.touch()
+        return target
+
+    def create_folder(self, folder: str, name: str) -> Path:
+        directory = Path(folder)
+        if not directory.is_dir():
+            raise ValueError("Choose a folder in the workspace.")
+        self._ensure_in_workspace(directory)
+        target = directory / self._clean_leaf_name(name)
+        self._ensure_in_workspace(target)
+        if target.exists():
+            raise FileExistsError(f"Folder already exists: {target.name}")
+        target.mkdir()
+        return target
+
+    def rename_file(self, path: str, name: str) -> Path:
+        source = Path(path)
+        if not source.is_file():
+            raise ValueError("Choose a file in the workspace.")
+        self._ensure_in_workspace(source)
+        target = source.with_name(self._clean_leaf_name(name))
+        self._ensure_in_workspace(target)
+        if target == source:
+            return source
+        if target.exists():
+            raise FileExistsError(f"File already exists: {target.name}")
+        source.rename(target)
+        return target
+
+    def delete_path(self, path: str) -> None:
+        target = Path(path)
+        self._ensure_in_workspace(target)
+        if target.resolve(strict=False) == Path(self.root_path).resolve():
+            raise ValueError("Cannot delete the workspace folder.")
+        if target.is_file():
+            target.unlink()
+            return
+        if target.is_dir():
+            shutil.rmtree(target)
+            return
+        raise FileNotFoundError(f"Path not found: {target}")
+
+    def _ensure_in_workspace(self, path: Path) -> None:
+        root = Path(self.root_path).resolve()
+        candidate = path.resolve(strict=False)
+        if candidate != root and root not in candidate.parents:
+            raise ValueError("Path must stay inside the workspace.")
+
+    def _repo_relative_path(self, path: str) -> str:
+        try:
+            return Path(path).resolve(strict=False).relative_to(
+                Path(self.root_path).resolve()
+            ).as_posix()
+        except (OSError, ValueError):
+            return ""
+
+    def _is_discardable_modified_file(self, path: str) -> bool:
+        if not os.path.isfile(path):
+            return False
+        code, label = self._git_by_path.get(_path_key(path), ("", ""))
+        return label == "M" and code in {" M", "M "}
+
+    @staticmethod
+    def _clean_leaf_name(name: str) -> str:
+        clean = name.strip()
+        if not clean:
+            raise ValueError("Enter a file name.")
+        if clean in {".", ".."}:
+            raise ValueError("Enter a file name.")
+        separators = {os.sep}
+        if os.altsep:
+            separators.add(os.altsep)
+        if any(separator in clean for separator in separators):
+            raise ValueError("Enter a file name, not a path.")
+        parsed = Path(clean)
+        if parsed.drive or parsed.root:
+            raise ValueError("Enter a file name, not a path.")
+        return clean
 
     def refresh(self):
         self._populate()
@@ -182,6 +372,60 @@ class FileTree(QTreeWidget):
         )
         self._highlighted.add(_path_key(abs_path))
         self._apply_decorations()
+
+    def reveal_file(self, path: str) -> bool:
+        abs_path = os.path.abspath(
+            path if os.path.isabs(path) else os.path.join(self.root_path, path)
+        )
+        root = Path(self.root_path).resolve()
+        try:
+            rel_parts = Path(abs_path).resolve(strict=False).relative_to(root).parts
+        except (OSError, ValueError):
+            return False
+        if not rel_parts:
+            return False
+        current = self.invisibleRootItem()
+        current_path = str(root)
+        target_item = None
+        for index, part in enumerate(rel_parts):
+            child_path = os.path.join(current_path, part)
+            child = self._find_child_for_path(current, child_path)
+            if child is None and os.path.exists(child_path):
+                child = self._append_path_item(current, child_path)
+            if child is None:
+                return False
+            target_item = child
+            if index < len(rel_parts) - 1:
+                if self._has_placeholder(child):
+                    child.takeChildren()
+                    self._fill(child, child_path)
+                    self._apply_decorations()
+                self.expandItem(child)
+            current = child
+            current_path = child_path
+        if target_item is None:
+            return False
+        self.setCurrentItem(target_item)
+        self.scrollToItem(target_item, QAbstractItemView.ScrollHint.PositionAtCenter)
+        return True
+
+    def _find_child_for_path(self, parent: QTreeWidgetItem, path: str) -> QTreeWidgetItem | None:
+        wanted = _path_key(path)
+        for index in range(parent.childCount()):
+            child = parent.child(index)
+            child_path = child.data(0, Qt.ItemDataRole.UserRole)
+            if child_path and _path_key(child_path) == wanted:
+                return child
+        return None
+
+    def _append_path_item(self, parent: QTreeWidgetItem, path: str) -> QTreeWidgetItem:
+        item = QTreeWidgetItem([self._display_name(os.path.basename(path), path)])
+        item.setData(0, Qt.ItemDataRole.UserRole, path)
+        parent.addChild(item)
+        if os.path.isdir(path):
+            item.addChild(QTreeWidgetItem([""]))
+        self._apply_decorations()
+        return item
 
     def _load_git_status(self):
         self._git_by_path = {
@@ -320,6 +564,7 @@ class LeftPanel(QWidget):
         self._file_tree.file_attached.connect(self.file_attach)
 
         files_wrap = QWidget()
+        self._files_wrap = files_wrap
         files_layout = QVBoxLayout(files_wrap)
         files_layout.setContentsMargins(0, 0, 0, 0)
         files_layout.setSpacing(0)
@@ -414,3 +659,7 @@ class LeftPanel(QWidget):
         self._git.refresh()
         QTimer.singleShot(250, self._file_tree.refresh)
         QTimer.singleShot(250, self._git.refresh)
+
+    def reveal_file(self, path: str) -> bool:
+        self._tabs.setCurrentWidget(self._files_wrap)
+        return self._file_tree.reveal_file(path)

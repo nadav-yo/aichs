@@ -32,6 +32,7 @@ from services.git_status import (
     GitCommandResult,
     GitFileChange,
     commit_staged,
+    discard_files,
     is_git_repo,
     list_file_changes,
     stage_files,
@@ -336,6 +337,9 @@ class GitChangesList(QWidget):
         stash = QAction("Stash selected...", self)
         stash.triggered.connect(lambda: self._stash_selected(widget))
         menu.addAction(stash)
+        discard = QAction("Discard changes...", self)
+        discard.triggered.connect(lambda: self._discard_selected(widget))
+        menu.addAction(discard)
         menu.exec(widget.viewport().mapToGlobal(pos))
 
     def _stash_selected(self, widget: QListWidget):
@@ -347,6 +351,36 @@ class GitChangesList(QWidget):
         if not ok:
             return
         self._run_change_action("Stash", stash_files(self.repo_path, paths, message))
+
+    def _discard_selected(self, widget: _GitChangeList):
+        paths = self._selected_rel_paths(widget)
+        if not paths:
+            return
+        if not self._confirm_discard(paths, staged=widget.staged):
+            return
+        self._run_change_action(
+            "Discard",
+            discard_files(self.repo_path, paths, staged=widget.staged),
+        )
+
+    def _confirm_discard(self, paths: list[str], *, staged: bool) -> bool:
+        count = len(paths)
+        section = "staged" if staged else "unstaged"
+        noun = "change" if count == 1 else "changes"
+        detail = (
+            f"Discard {count} selected {section} {noun}?\n\n"
+            "This permanently removes the selected file changes."
+        )
+        if staged:
+            detail += "\n\nAny unstaged edits on the same selected files will also be discarded."
+        answer = QMessageBox.question(
+            self,
+            "Discard changes?",
+            detail,
+            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Discard
 
     def _commit(self):
         result = commit_staged(

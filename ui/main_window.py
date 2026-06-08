@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         self._viewer = FileViewerPanel(repo, settings=self._settings)
         self._viewer.hide()
         self._viewer.all_closed.connect(self._close_file)
+        self._viewer.diagnostic_fix_requested.connect(self._chat_draft_diagnostic_fix)
 
         self._chat = ChatPanel(store, cwd=repo, settings=self._settings)
 
@@ -92,6 +93,7 @@ class MainWindow(QMainWindow):
         self._chat.open_code.connect(self._open_content)
         self._chat.open_file.connect(self._open_file)
         self._chat.file_written.connect(self._left.mark_file_touched)
+        self._chat.file_write_completed.connect(self._refresh_open_file)
         self._left.settings_changed.connect(self._apply_appearance)
 
         self._setup_shortcuts()
@@ -232,6 +234,7 @@ class MainWindow(QMainWindow):
             diff_text=diff_text,
             line_no=line_no,
         )
+        self._left.reveal_file(path)
         self._viewer.show()
         total = self._inner.height()
         self._inner.setSizes([total * 2 // 3, total // 3])
@@ -242,5 +245,11 @@ class MainWindow(QMainWindow):
         total = self._inner.height()
         self._inner.setSizes([total * 2 // 3, total // 3])
 
+    def _refresh_open_file(self, path: str):
+        self._viewer.refresh_file(path, repo_root=os.getcwd())
+
     def _close_file(self):
         self._viewer.hide()
+
+    def _chat_draft_diagnostic_fix(self, text: str, file_refs: list[str]):
+        self._chat.draft_diagnostic_fix(text, file_refs)

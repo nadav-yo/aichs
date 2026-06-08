@@ -2,7 +2,7 @@ import json
 
 from PyQt6.QtCore import QMimeData, QPoint, QPointF, Qt
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
-from PyQt6.QtWidgets import QAbstractItemView, QApplication, QPushButton
+from PyQt6.QtWidgets import QAbstractItemView, QApplication, QMessageBox, QPushButton
 
 from services.git_status import GitCommandResult, stage_files
 from storage.settings import SettingsStore
@@ -272,6 +272,46 @@ def test_git_changes_list_failure_uses_dialog_without_status_row(qapp, git_repo,
 
     assert not hasattr(widget, "_status")
     assert warnings == [(widget, "Back failed", "cannot unstage")]
+
+
+def test_git_changes_list_discard_selected_confirms_and_discards(qapp, git_repo, monkeypatch):
+    main = git_repo / "src" / "main.py"
+    main.write_text("print('discard from ui')\n", encoding="utf-8")
+    widget = GitChangesList(str(git_repo))
+    widget.unstaged_list.item(0).setSelected(True)
+    questions = []
+    monkeypatch.setattr(
+        "ui.widgets.git_changes_list.QMessageBox.question",
+        lambda parent, title, detail, buttons, default: questions.append(
+            (parent, title, detail, buttons, default)
+        )
+        or QMessageBox.StandardButton.Discard,
+    )
+
+    widget._discard_selected(widget.unstaged_list)
+
+    assert main.read_text(encoding="utf-8") == "print('hi')\n"
+    assert widget.unstaged_list.count() == 0
+    assert questions
+    assert questions[0][0] is widget
+    assert questions[0][1] == "Discard changes?"
+    assert "permanently removes" in questions[0][2]
+
+
+def test_git_changes_list_discard_cancel_keeps_changes(qapp, git_repo, monkeypatch):
+    main = git_repo / "src" / "main.py"
+    main.write_text("print('keep me')\n", encoding="utf-8")
+    widget = GitChangesList(str(git_repo))
+    widget.unstaged_list.item(0).setSelected(True)
+    monkeypatch.setattr(
+        "ui.widgets.git_changes_list.QMessageBox.question",
+        lambda *args: QMessageBox.StandardButton.Cancel,
+    )
+
+    widget._discard_selected(widget.unstaged_list)
+
+    assert main.read_text(encoding="utf-8") == "print('keep me')\n"
+    assert widget.unstaged_list.count() == 1
 
 
 def test_default_stash_message_summarizes_selected_paths():

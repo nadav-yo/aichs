@@ -8,6 +8,7 @@ from services.git_status import (
     commit_staged,
     count_commits_to_pull,
     count_commits_to_push,
+    discard_files,
     is_git_repo,
     list_file_changes,
     parse_status_line,
@@ -188,6 +189,41 @@ class TestGitRepo:
         ch = next(c for c in list_file_changes(str(git_repo)) if c.rel_path.replace("\\", "/") == "src/main.py")
         assert not ch.staged
         assert ch.unstaged
+
+    def test_discard_unstaged_files_restores_tracked_and_removes_untracked(self, git_repo):
+        main = git_repo / "src" / "main.py"
+        note = git_repo / "note.txt"
+        main.write_text("print('discard')\n", encoding="utf-8")
+        note.write_text("new\n", encoding="utf-8")
+
+        result = discard_files(str(git_repo), ["src/main.py", "note.txt"])
+
+        assert result.ok
+        assert main.read_text(encoding="utf-8") == "print('hi')\n"
+        assert not note.exists()
+        assert list_file_changes(str(git_repo)) == []
+
+    def test_discard_staged_files_restores_tracked_file(self, git_repo):
+        main = git_repo / "src" / "main.py"
+        main.write_text("print('discard staged')\n", encoding="utf-8")
+        assert stage_files(str(git_repo), ["src/main.py"]).ok
+
+        result = discard_files(str(git_repo), ["src/main.py"], staged=True)
+
+        assert result.ok
+        assert main.read_text(encoding="utf-8") == "print('hi')\n"
+        assert list_file_changes(str(git_repo)) == []
+
+    def test_discard_staged_added_file_removes_it(self, git_repo):
+        note = git_repo / "note.txt"
+        note.write_text("new\n", encoding="utf-8")
+        assert stage_files(str(git_repo), ["note.txt"]).ok
+
+        result = discard_files(str(git_repo), ["note.txt"], staged=True)
+
+        assert result.ok
+        assert not note.exists()
+        assert list_file_changes(str(git_repo)) == []
 
     def test_stash_files_includes_untracked_selected_files(self, git_repo):
         main = git_repo / "src" / "main.py"

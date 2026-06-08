@@ -5,11 +5,11 @@ import markdown as _md
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPlainTextEdit, QFrame, QTabWidget,
     QScrollArea, QLabel, QSizePolicy, QCheckBox, QPushButton, QTextBrowser, QLineEdit,
-    QCompleter,
+    QCompleter, QApplication, QToolTip,
 )
-from PyQt6.QtCore import pyqtSignal, Qt, QSize, QUrl, QStringListModel
+from PyQt6.QtCore import pyqtSignal, Qt, QSize, QUrl, QStringListModel, QMimeData
 from PyQt6.QtGui import (
-    QColor, QKeySequence, QPainter, QPixmap, QShortcut, QSyntaxHighlighter,
+    QColor, QDrag, QGuiApplication, QKeySequence, QPainter, QPixmap, QShortcut, QSyntaxHighlighter,
     QTextCharFormat, QTextCursor, QTextFormat,
 )
 from pygments.formatters import HtmlFormatter
@@ -18,6 +18,7 @@ from pygments.token import Token
 
 from config import MAX_FILE_PREVIEW_BYTES
 from services.diff_html import changed_new_line_numbers
+from services.file_editor_refs import AICHS_EDITOR_REF_MIME, editor_ref_payload, editor_ref_text
 from services.git_diff import can_diff_against_head, diff_against_head
 from services.git_status import is_git_repo
 from services.tool_policy import path_in_repo
@@ -357,6 +358,7 @@ class _LineNumberArea(QWidget):
     def __init__(self, editor: "_FileTextEdit"):
         super().__init__(editor)
         self._editor = editor
+        self.setMouseTracking(True)
 
     def sizeHint(self):
         return QSize(self._editor.line_number_area_width(), 0)
@@ -364,10 +366,20 @@ class _LineNumberArea(QWidget):
     def paintEvent(self, event):
         self._editor.line_number_area_paint_event(event)
 
+    def mouseMoveEvent(self, event):
+        self._editor.line_number_area_mouse_move_event(event)
+
+    def mousePressEvent(self, event):
+        self._editor.line_number_area_mouse_press_event(event)
+
+    def leaveEvent(self, event):
+        self._editor.line_number_area_leave_event(event)
+
 
 class _FileTextEdit(QPlainTextEdit):
     edit_requested = pyqtSignal()
     cancel_requested = pyqtSignal()
+    diagnostic_fix_requested = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -380,6 +392,10 @@ class _FileTextEdit(QPlainTextEdit):
         self._completion_items: dict[str, CompletionItem] = {}
         self._completion_model = QStringListModel(self)
         self._completer: QCompleter | None = None
+        self._reference_path = ""
+        self._drag_start_pos = None
+        self._drag_start_in_selection = False
+        self._hovered_diagnostic_line: int | None = None
 
         self.blockCountChanged.connect(self._update_line_number_area_width)
         self.updateRequest.connect(self._update_line_number_area)
@@ -397,6 +413,17 @@ class _FileTextEdit(QPlainTextEdit):
         self._completion_path = path
         if provider is not None:
             self._completion_provider = provider
+
+    def configure_reference(self, path: str, repo_root: str):
+        if not path or str(path).startswith("\0"):
+            self._reference_path = ""
+            return
+        try:
+            rel = Path(path).resolve().relative_to(Path(repo_root).resolve())
+        except (OSError, ValueError):
+            self._reference_path = ""
+            return
+        self._reference_path = rel.as_posix()
 
     def minimap_color_for_line(self, text: str) -> QColor | None:
         return self._syntax_highlighter.minimap_color_for_line(text)
@@ -491,9 +518,15 @@ class _FileTextEdit(QPlainTextEdit):
             if block.isVisible() and bottom >= event.rect().top():
                 line_diagnostics = diagnostics_by_line.get(block_number + 1)
                 if line_diagnostics:
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.setBrush(_diagnostic_color(line_diagnostics[0].severity))
+                    color = _diagnostic_color(line_diagnostics[0].severity)
                     marker_y = top + max(2, (height - 7) // 2)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    if block_number + 1 == self._hovered_diagnostic_line:
+                        halo = QColor(color)
+                        halo.setAlpha(70)
+                        painter.setBrush(halo)
+                        painter.drawEllipse(1, marker_y - 3, 13, 13)
+                    painter.setBrush(color)
                     painter.drawEllipse(4, marker_y, 7, 7)
                 painter.setPen(QColor(p["TEXT"] if block_number == current else p["TEXT_DIM"]))
                 painter.drawText(
@@ -520,11 +553,51 @@ class _FileTextEdit(QPlainTextEdit):
         self._update_extra_selections()
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = _event_pos(event)
+            self._drag_start_pos = pos
+            self._drag_start_in_selection = self._pos_in_selection(pos)
+            if self._drag_start_in_selection:
+                event.accept()
+                return
+        else:
+            self._drag_start_pos = None
+            self._drag_start_in_selection = False
         if self.isReadOnly():
             self.edit_requested.emit()
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event):
+        if (
+            self._drag_start_in_selection
+            and self._drag_start_pos is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+            and (_event_pos(event) - self._drag_start_pos).manhattanLength()
+            >= QApplication.startDragDistance()
+        ):
+            mime = self._mime_data_for_drag()
+            if mime is not None:
+                drag = QDrag(self)
+                drag.setMimeData(mime)
+                drag.exec(Qt.DropAction.CopyAction)
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start_pos = None
+        self._drag_start_in_selection = False
+        super().mouseReleaseEvent(event)
+
+    def copy(self):
+        if self._copy_with_reference():
+            return
+        super().copy()
+
     def keyPressEvent(self, event):
+        if event.matches(QKeySequence.StandardKey.Copy) and self._copy_with_reference():
+            event.accept()
+            return
         if self._completion_popup_visible():
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Tab):
                 self._insert_completion(self._completer.currentCompletion() if self._completer else "")
@@ -551,6 +624,57 @@ class _FileTextEdit(QPlainTextEdit):
             return
         super().keyPressEvent(event)
         self._maybe_update_completion(event)
+
+    def _copy_with_reference(self) -> bool:
+        mime = self._mime_data_for_selection()
+        if mime is None:
+            return False
+        QGuiApplication.clipboard().setMimeData(mime)
+        return True
+
+    def _mime_data_for_selection(self) -> QMimeData | None:
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return None
+        text = cursor.selectedText().replace("\u2029", "\n")
+        if not text.strip():
+            return None
+        mime = QMimeData()
+        mime.setText(text)
+        ref = self._selected_editor_ref(cursor, text)
+        if ref:
+            mime.setData(AICHS_EDITOR_REF_MIME, editor_ref_payload([ref]))
+        return mime
+
+    def _mime_data_for_drag(self) -> QMimeData | None:
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return None
+        ref = self._selected_editor_ref(cursor)
+        if not ref:
+            return self._mime_data_for_selection()
+        mime = QMimeData()
+        mime.setText(editor_ref_text([ref]))
+        mime.setData(AICHS_EDITOR_REF_MIME, editor_ref_payload([ref]))
+        return mime
+
+    def _selected_editor_ref(self, cursor: QTextCursor, text: str = "") -> dict:
+        if not self._reference_path:
+            return {}
+        start_line, end_line = _cursor_line_range(self.document(), cursor)
+        return {
+            "path": self._reference_path,
+            "start_line": start_line,
+            "end_line": end_line,
+            "text": text,
+        }
+
+    def _pos_in_selection(self, pos) -> bool:
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return False
+        hit = self.cursorForPosition(pos).position()
+        return cursor.selectionStart() <= hit <= cursor.selectionEnd()
 
     def _maybe_update_completion(self, event):
         if self.isReadOnly():
@@ -655,6 +779,49 @@ class _FileTextEdit(QPlainTextEdit):
         if rect.contains(self.viewport().rect()):
             self._update_line_number_area_width(0)
 
+    def line_number_area_mouse_move_event(self, event):
+        pos = _event_pos(event)
+        line = self._diagnostic_line_at_gutter_pos(pos)
+        if line != self._hovered_diagnostic_line:
+            self._hovered_diagnostic_line = line
+            self._line_number_area.update()
+        if line is None:
+            self._line_number_area.unsetCursor()
+            self._line_number_area.setToolTip("")
+            QToolTip.hideText()
+            return
+
+        diagnostics = self._diagnostics_by_line().get(line, [])
+        details = _diagnostic_details(diagnostics)
+        self._line_number_area.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._line_number_area.setToolTip(details)
+        if details:
+            try:
+                global_pos = event.globalPosition().toPoint()
+            except AttributeError:
+                global_pos = self._line_number_area.mapToGlobal(pos)
+            QToolTip.showText(global_pos, details, self._line_number_area)
+
+    def line_number_area_leave_event(self, _event):
+        if self._hovered_diagnostic_line is not None:
+            self._hovered_diagnostic_line = None
+            self._line_number_area.update()
+        self._line_number_area.unsetCursor()
+        self._line_number_area.setToolTip("")
+        QToolTip.hideText()
+
+    def line_number_area_mouse_press_event(self, event):
+        if event.button() != Qt.MouseButton.RightButton:
+            return
+        line = self._diagnostic_line_at_gutter_pos(_event_pos(event))
+        if line is None:
+            return
+        diagnostics = self._diagnostics_by_line().get(line, [])
+        if not diagnostics:
+            return
+        self.diagnostic_fix_requested.emit(diagnostics)
+        event.accept()
+
     def _update_extra_selections(self):
         selections = []
         p = palette()
@@ -703,6 +870,31 @@ class _FileTextEdit(QPlainTextEdit):
             by_line.setdefault(max(1, diagnostic.line), []).append(diagnostic)
         return by_line
 
+    def _diagnostic_line_at_gutter_pos(self, pos) -> int | None:
+        if not self._diagnostics or pos.x() > 16:
+            return None
+        diagnostics_by_line = self._diagnostics_by_line()
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = int(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom = top + int(self.blockBoundingRect(block).height())
+        height = self.fontMetrics().height()
+
+        while block.isValid():
+            if block.isVisible():
+                line_number = block_number + 1
+                if line_number in diagnostics_by_line:
+                    marker_y = top + max(2, (height - 7) // 2)
+                    if 0 <= pos.x() <= 16 and marker_y - 4 <= pos.y() <= marker_y + 12:
+                        return line_number
+            if top > pos.y():
+                return None
+            block = block.next()
+            top = bottom
+            bottom = top + int(self.blockBoundingRect(block).height())
+            block_number += 1
+        return None
+
 
 class _MarkdownPreview(QTextBrowser):
     edit_requested = pyqtSignal()
@@ -746,6 +938,7 @@ class _TextFileTab(QWidget):
     """Editable file tab with optional read-only git diff vs HEAD."""
 
     dirty_changed = pyqtSignal(bool)
+    diagnostic_fix_requested = pyqtSignal(str, object)
 
     def __init__(
         self,
@@ -830,6 +1023,7 @@ class _TextFileTab(QWidget):
         self._editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self._editor.edit_requested.connect(self._enter_edit_mode)
         self._editor.cancel_requested.connect(self._cancel_edit)
+        self._editor.diagnostic_fix_requested.connect(self._draft_diagnostic_fix)
         self._editor.textChanged.connect(self._on_text_changed)
         self._preview = _MarkdownPreview()
         self._preview.edit_requested.connect(self._enter_edit_mode)
@@ -985,6 +1179,7 @@ class _TextFileTab(QWidget):
         self._editor.configure_syntax(self._lang_hint, self._content)
         self._completion_provider = LanguageCompletionProvider(self._repo_root)
         self._editor.configure_completion(self._path, self._completion_provider)
+        self._editor.configure_reference(self._path, self._repo_root)
         if self._editor.toPlainText() != self._content:
             self._editor.setPlainText(self._content)
         if self._is_markdown_preview():
@@ -1183,6 +1378,25 @@ class _TextFileTab(QWidget):
         self._diagnostics = list(diagnostics)
         self._editor.set_diagnostics(self._diagnostics)
 
+    def _draft_diagnostic_fix(self, diagnostics: list[Diagnostic]):
+        if not diagnostics:
+            return
+        rel_path = _relative_file_reference(self._path, self._repo_root)
+        line = max(1, diagnostics[0].line)
+        mention = editor_ref_text([{
+            "path": rel_path,
+            "start_line": line,
+            "end_line": line,
+        }])
+        tool = _diagnostic_tool_label(diagnostics)
+        details = _diagnostic_details(diagnostics)
+        prompt = (
+            f"Please fix this diagnostic in {mention}.\n\n"
+            f"Diagnostic tool: {tool}\n"
+            f"Diagnostic output:\n{details}"
+        )
+        self.diagnostic_fix_requested.emit(prompt, [rel_path])
+
     def _set_dirty(self, dirty: bool):
         if self._dirty == dirty:
             if dirty:
@@ -1203,6 +1417,7 @@ class _TextFileTab(QWidget):
 
 class FileViewerPanel(QWidget):
     all_closed = pyqtSignal()
+    diagnostic_fix_requested = pyqtSignal(str, object)
 
     def __init__(self, repo_root: str = "", settings=None, parent=None):
         super().__init__(parent)
@@ -1265,6 +1480,7 @@ class FileViewerPanel(QWidget):
         widget.setProperty("_base_tab_title", title)
         if isinstance(widget, _TextFileTab):
             widget.dirty_changed.connect(lambda _dirty, w=widget: self._sync_tab_title(w))
+            widget.diagnostic_fix_requested.connect(self.diagnostic_fix_requested.emit)
             self._sync_tab_title(widget)
         self._tabs.setCurrentIndex(idx)
 
@@ -1299,22 +1515,10 @@ class FileViewerPanel(QWidget):
             self._add_tab_widget(path, os.path.basename(path), _ImageViewer(path))
             return
 
-        try:
-            content, truncated, decode_error, blocked_preview = _read_text_preview_details(path)
-        except OSError as e:
-            content = f"[Could not read file: {e}]"
-            editable = False
-            read_only_reason = f"Could not read file: {e}"
-        else:
-            editable = not truncated and not decode_error and not blocked_preview
-            read_only_reason = _read_only_reason(truncated, decode_error, blocked_preview)
-
-        if (
-            diff_text is None
-            and is_git_repo(self._repo_root)
-            and can_diff_against_head(self._repo_root, path)
-        ):
-            diff_text = diff_against_head(self._repo_root, path)
+        content, diff_text, editable, read_only_reason = self._read_text_file_state(
+            path,
+            diff_text,
+        )
 
         idx = self._find_tab(path)
         if idx >= 0:
@@ -1338,6 +1542,47 @@ class FileViewerPanel(QWidget):
         self._add_tab_widget(path, os.path.basename(path), tab)
         if line_no is not None:
             tab.goto_line(line_no)
+
+    def refresh_file(self, path: str, repo_root: str | None = None) -> bool:
+        if repo_root:
+            self._repo_root = repo_root
+        path = os.path.abspath(
+            path if os.path.isabs(path) else os.path.join(self._repo_root, path)
+        )
+        idx = self._find_tab(path)
+        if idx < 0:
+            return False
+        widget = self._tabs.widget(idx)
+        if not isinstance(widget, _TextFileTab):
+            return False
+
+        content, diff_text, editable, read_only_reason = self._read_text_file_state(path)
+        widget.update_content(content, diff_text, editable, read_only_reason)
+        self._sync_tab_title(widget)
+        return True
+
+    def _read_text_file_state(
+        self,
+        path: str,
+        diff_text: str | None = None,
+    ) -> tuple[str, str | None, bool, str]:
+        try:
+            content, truncated, decode_error, blocked_preview = _read_text_preview_details(path)
+        except OSError as e:
+            content = f"[Could not read file: {e}]"
+            editable = False
+            read_only_reason = f"Could not read file: {e}"
+        else:
+            editable = not truncated and not decode_error and not blocked_preview
+            read_only_reason = _read_only_reason(truncated, decode_error, blocked_preview)
+
+        if (
+            diff_text is None
+            and is_git_repo(self._repo_root)
+            and can_diff_against_head(self._repo_root, path)
+        ):
+            diff_text = diff_against_head(self._repo_root, path)
+        return content, diff_text, editable, read_only_reason
 
     def open_content(self, content: str, title: str):
         key = f"\0{title}"
@@ -1412,6 +1657,30 @@ def _find_match_status(text: str, folded_query: str, pos: int) -> str:
     return f"{current} of {len(starts)}"
 
 
+def _event_pos(event):
+    try:
+        return event.position().toPoint()
+    except AttributeError:
+        return event.pos()
+
+
+def _cursor_line_range(document, cursor: QTextCursor) -> tuple[int, int]:
+    line_count = max(1, document.blockCount())
+    start = min(cursor.selectionStart(), cursor.selectionEnd())
+    end = max(cursor.selectionStart(), cursor.selectionEnd())
+    if end > start and document.characterAt(end - 1) in ("\n", "\u2029"):
+        end -= 1
+    start_cursor = QTextCursor(document)
+    start_cursor.setPosition(max(0, start))
+    end_cursor = QTextCursor(document)
+    end_cursor.setPosition(max(start, end))
+    start_line = start_cursor.blockNumber() + 1
+    end_line = end_cursor.blockNumber() + 1
+    start_line = max(1, min(start_line, line_count))
+    end_line = max(start_line, min(end_line, line_count))
+    return start_line, end_line
+
+
 def _diagnostic_color(severity: str) -> QColor:
     return QColor({
         "error": "#ef4444",
@@ -1433,6 +1702,35 @@ def _diagnostic_summary(diagnostics: list[Diagnostic]) -> str:
     if warnings:
         return f"{count} problem{plural} ({warnings} warning{'s' if warnings != 1 else ''})"
     return f"{count} problem{plural}"
+
+
+def _diagnostic_details(diagnostics: list[Diagnostic], limit: int = 8) -> str:
+    lines = []
+    for item in diagnostics[:limit]:
+        label = " ".join(part for part in (item.source, item.code) if part)
+        prefix = f"line {item.line}:{item.column + 1} {item.severity or 'info'}"
+        if label:
+            prefix = f"{prefix} [{label}]"
+        lines.append(f"{prefix}: {item.message}")
+    remaining = len(diagnostics) - limit
+    if remaining > 0:
+        lines.append(f"... and {remaining} more")
+    return "\n".join(lines)
+
+
+def _diagnostic_tool_label(diagnostics: list[Diagnostic]) -> str:
+    for item in diagnostics:
+        label = " ".join(part for part in (item.source, item.code) if part)
+        if label:
+            return label
+    return "diagnostic tool"
+
+
+def _relative_file_reference(path: str, repo_root: str) -> str:
+    try:
+        return Path(path).resolve().relative_to(Path(repo_root).resolve()).as_posix()
+    except (OSError, ValueError):
+        return Path(path).name
 
 
 def _read_text_preview(path: str) -> str:

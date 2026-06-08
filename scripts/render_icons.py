@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QImage, QPainter
+from PyQt6.QtCore import QImage, Qt, QPainter
 from PyQt6.QtSvg import QSvgRenderer
-from PyQt6.QtWidgets import QApplication
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,10 +26,7 @@ def render_svg(svg_path: Path, width: int, height: int) -> QImage:
 def render_square(svg_path: Path, size: int) -> QImage:
     return render_svg(svg_path, size, size)
 
-
 def main() -> int:
-    app = QApplication(sys.argv)
-
     icon_svg = ASSETS / "icon.svg"
     out_dir = ASSETS / "png"
     out_dir.mkdir(parents=True, exist_ok=True)

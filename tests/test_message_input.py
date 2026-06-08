@@ -12,6 +12,7 @@ from services.chat_drag import (
     commit_drop_payload,
     file_drop_payload,
 )
+from services.file_editor_refs import AICHS_EDITOR_REF_MIME, editor_ref_payload
 from services.terminal_refs import TERMINAL_REF_MIME
 from ui.widgets.message_input import (
     ComposerWidget,
@@ -138,6 +139,27 @@ def test_drop_file_ref_inserts_visible_mention(qapp):
     composer.input.dropEvent(_drop_event(mime))
 
     assert composer.input.toPlainText() == "@src/main.py "
+
+
+def test_drop_editor_ref_inserts_line_mention_and_records_hidden_file(qapp):
+    composer = ComposerWidget()
+    mime = QMimeData()
+    mime.setText("def main():\n    pass")
+    mime.setData(
+        AICHS_EDITOR_REF_MIME,
+        editor_ref_payload([{
+            "path": "src/main.py",
+            "start_line": 10,
+            "end_line": 11,
+            "text": "def main():\n    pass",
+        }]),
+    )
+
+    composer.input.dropEvent(_drop_event(mime))
+
+    assert composer.input.toPlainText() == "@src/main.py:10-11 "
+    assert composer.take_pasted_file_refs() == ["src/main.py"]
+    assert composer.take_pasted_file_refs() == []
 
 
 def test_drop_commit_ref_inserts_commit_text(qapp):

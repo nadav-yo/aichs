@@ -179,6 +179,37 @@ def unstage_files(repo_path: str, rel_paths: list[str]) -> GitCommandResult:
     return run_git_command(["git", "restore", "--staged", "--", *paths], repo_path)
 
 
+def discard_files(repo_path: str, rel_paths: list[str], *, staged: bool = False) -> GitCommandResult:
+    paths = repo_relative_paths(repo_path, rel_paths)
+    if not paths:
+        return GitCommandResult(returncode=1, stdout="", stderr="No files selected.")
+
+    if staged:
+        in_head = _paths_in_head(repo_path, paths)
+        tracked_paths = [path for path in paths if path in in_head]
+        added_paths = [path for path in paths if path not in in_head]
+        results: list[GitCommandResult] = []
+        if tracked_paths:
+            results.append(
+                run_git_command(
+                    ["git", "restore", "--staged", "--worktree", "--", *tracked_paths],
+                    repo_path,
+                )
+            )
+        if added_paths:
+            results.append(run_git_command(["git", "rm", "-f", "--cached", "--", *added_paths], repo_path))
+            if results[-1].ok:
+                results.append(run_git_command(["git", "clean", "-f", "--", *added_paths], repo_path))
+        return _combined_git_result(results)
+
+    tracked_paths = _tracked_paths(repo_path, paths)
+    results: list[GitCommandResult] = []
+    if tracked_paths:
+        results.append(run_git_command(["git", "restore", "--worktree", "--", *tracked_paths], repo_path))
+    results.append(run_git_command(["git", "clean", "-f", "--", *paths], repo_path))
+    return _combined_git_result(results)
+
+
 def stash_files(repo_path: str, rel_paths: list[str], message: str) -> GitCommandResult:
     paths = repo_relative_paths(repo_path, rel_paths)
     if not paths:
@@ -220,3 +251,29 @@ def repo_relative_paths(repo_path: str, rel_paths: list[str]) -> list[str]:
         seen.add(rel)
         safe.append(rel)
     return safe
+
+
+def _tracked_paths(repo_path: str, paths: list[str]) -> set[str]:
+    if not paths:
+        return set()
+    output = run_git(["git", "ls-files", "--", *paths], repo_path)
+    return {line.strip().replace("\\", "/") for line in output.splitlines() if line.strip()}
+
+
+def _paths_in_head(repo_path: str, paths: list[str]) -> set[str]:
+    if not paths:
+        return set()
+    output = run_git(["git", "ls-tree", "-r", "--name-only", "HEAD", "--", *paths], repo_path)
+    return {line.strip().replace("\\", "/") for line in output.splitlines() if line.strip()}
+
+
+def _combined_git_result(results: list[GitCommandResult]) -> GitCommandResult:
+    if not results:
+        return GitCommandResult(returncode=0, stdout="", stderr="")
+    failed = next((result for result in results if not result.ok), None)
+    returncode = failed.returncode if failed else 0
+    return GitCommandResult(
+        returncode=returncode,
+        stdout="\n".join(result.stdout for result in results if result.stdout).strip(),
+        stderr="\n".join(result.stderr for result in results if result.stderr).strip(),
+    )
