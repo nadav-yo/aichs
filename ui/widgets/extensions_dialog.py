@@ -5,17 +5,28 @@ from pathlib import Path
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
+from services.extension_installer import (
+    ExtensionInstallCandidate,
+    ExtensionInstallSource,
+    cleanup_extension_install_source,
+    install_extension_candidates,
+    prepare_extension_install_source,
+)
 from services.tool_registry import (
     ExtensionFileSummary,
     ExtensionOverview,
@@ -41,7 +52,6 @@ class ExtensionsDialog(QDialog):
         )
         self._on_reload = on_reload
         self._selected_path = ""
-        self._detail_mode = "placeholder"
         self.setWindowTitle("Extensions")
         self.resize(900, 620)
 
@@ -66,11 +76,10 @@ class ExtensionsDialog(QDialog):
         title_row.addWidget(title)
         title_row.addStretch()
 
-        api_btn = QPushButton("API Reference")
-        api_btn.setToolTip("Inspect the extension API reference")
-        api_btn.setStyleSheet(_secondary_button_style())
-        api_btn.clicked.connect(self._show_api_reference)
-        title_row.addWidget(api_btn)
+        add_btn = QPushButton("Add")
+        add_btn.setToolTip("Install extensions from a git URL")
+        add_btn.clicked.connect(self._install_extensions)
+        title_row.addWidget(add_btn)
 
         reload_btn = QPushButton("↻")
         reload_btn.setToolTip("Reload extensions")
@@ -118,6 +127,11 @@ class ExtensionsDialog(QDialog):
         set_extension_enabled(path, enabled, self._cwd or None)
         self._reload()
 
+    def _install_extensions(self) -> None:
+        dialog = ExtensionInstallDialog(self._cwd, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._reload()
+
     def _render(self):
         overview = self._overview
         self._summary.setText(_summary_text(overview))
@@ -126,12 +140,9 @@ class ExtensionsDialog(QDialog):
             selected = _find_file(overview, self._selected_path) if self._selected_path else None
             if self._selected_path and selected is None:
                 self._selected_path = ""
-                if self._detail_mode != "api":
-                    self._detail_mode = "placeholder"
-            if not self._selected_path and self._detail_mode != "api":
+            if not self._selected_path:
                 selected = overview.files[0]
                 self._selected_path = selected.path
-                self._detail_mode = "detail"
             for file in overview.files:
                 row = _ExtensionListRow(
                     file,
@@ -140,9 +151,7 @@ class ExtensionsDialog(QDialog):
                     on_select=self._show_file_detail,
                 )
                 self._list_layout.addWidget(row)
-            if self._detail_mode == "api":
-                self._detail_scroll.setWidget(_ApiReferencePane())
-            elif selected:
+            if selected:
                 self._detail_scroll.setWidget(_ExtensionDetailPane(selected, on_toggle=self._set_enabled))
             else:
                 self._show_placeholder()
@@ -158,19 +167,172 @@ class ExtensionsDialog(QDialog):
         rerender_list: bool = True,
     ) -> None:
         self._selected_path = file.path
-        self._detail_mode = "detail"
         self._detail_scroll.setWidget(_ExtensionDetailPane(file, on_toggle=self._set_enabled))
         if rerender_list:
             self._render()
 
-    def _show_api_reference(self) -> None:
-        self._selected_path = ""
-        self._detail_mode = "api"
-        self._render()
-
     def _show_placeholder(self) -> None:
-        self._detail_mode = "placeholder"
         self._detail_scroll.setWidget(_PlaceholderPane())
+
+
+class ExtensionInstallDialog(QDialog):
+    def __init__(self, cwd: str = "", parent=None):
+        super().__init__(parent)
+        self._cwd = cwd
+        self._source: ExtensionInstallSource | None = None
+        self._candidate_checks: list[tuple[QCheckBox, ExtensionInstallCandidate]] = []
+        self.setWindowTitle("Add Extensions")
+        self.resize(620, 480)
+
+        p = palette()
+        self.setStyleSheet(
+            f"QDialog {{ background:{p['BG2']}; color:{p['TEXT']}; }}"
+            f"QScrollArea {{ background:{p['BG2']}; border:1px solid {p['BORDER_SUBTLE']}; }}"
+        )
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(10)
+
+        title = QLabel("Add Extensions")
+        title.setStyleSheet(
+            f"font-size:{chat_font_pt() + 2}px; font-weight:600; color:{p['TEXT']};"
+        )
+        root.addWidget(title)
+
+        source_row = QHBoxLayout()
+        source_row.setContentsMargins(0, 0, 0, 0)
+        source_row.setSpacing(8)
+        self.url_edit = QLineEdit()
+        self.url_edit.setPlaceholderText("Git URL")
+        source_row.addWidget(self.url_edit, 1)
+        self.fetch_btn = QPushButton("Fetch")
+        self.fetch_btn.clicked.connect(self._fetch)
+        source_row.addWidget(self.fetch_btn)
+        root.addLayout(source_row)
+
+        scope_row = QHBoxLayout()
+        scope_row.setContentsMargins(0, 0, 0, 0)
+        scope_row.setSpacing(8)
+        scope_label = QLabel("Install to")
+        scope_label.setStyleSheet(f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;")
+        self.scope_combo = QComboBox()
+        self.scope_combo.addItem("Local project", "local")
+        self.scope_combo.addItem("Global user", "global")
+        if not self._cwd:
+            self.scope_combo.setCurrentIndex(1)
+        scope_row.addWidget(scope_label)
+        scope_row.addWidget(self.scope_combo)
+        scope_row.addStretch()
+        root.addLayout(scope_row)
+
+        self.status_label = QLabel("Fetch a git source to choose extensions.")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet(f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;")
+        root.addWidget(self.status_label)
+
+        self.candidate_scroll = QScrollArea()
+        self.candidate_scroll.setWidgetResizable(True)
+        self.candidate_body = QWidget()
+        self.candidate_layout = QVBoxLayout(self.candidate_body)
+        self.candidate_layout.setContentsMargins(10, 10, 10, 10)
+        self.candidate_layout.setSpacing(8)
+        self.candidate_scroll.setWidget(self.candidate_body)
+        root.addWidget(self.candidate_scroll, 1)
+        self._set_candidates([])
+
+        buttons = QDialogButtonBox()
+        self.install_btn = buttons.addButton("Install", QDialogButtonBox.ButtonRole.AcceptRole)
+        self.install_btn.setEnabled(False)
+        cancel = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+        self.install_btn.clicked.connect(self._install)
+        cancel.clicked.connect(self.reject)
+        root.addWidget(buttons)
+
+    def reject(self) -> None:
+        cleanup_extension_install_source(self._source)
+        self._source = None
+        super().reject()
+
+    def _fetch(self) -> None:
+        url = self.url_edit.text().strip()
+        if not url:
+            self._set_status("Enter a git URL.", danger=True)
+            return
+        self.fetch_btn.setEnabled(False)
+        self.install_btn.setEnabled(False)
+        self._set_status("Cloning source...")
+        cleanup_extension_install_source(self._source)
+        self._source = None
+        try:
+            self._source = prepare_extension_install_source(url)
+        except Exception as exc:
+            self._set_candidates([])
+            self._set_status(str(exc), danger=True)
+            self.fetch_btn.setEnabled(True)
+            return
+        self._set_candidates(self._source.candidates)
+        count = len(self._source.candidates)
+        if count:
+            noun = "extension" if count == 1 else "extensions"
+            self._set_status(f"Found {count} installable {noun}.")
+        else:
+            self._set_status("No extension.py or root .py extensions found.", danger=True)
+        self.fetch_btn.setEnabled(True)
+
+    def _install(self) -> None:
+        selected = self.selected_candidates()
+        if not selected:
+            self._set_status("Choose at least one extension to install.", danger=True)
+            return
+        try:
+            install_extension_candidates(
+                selected,
+                scope=str(self.scope_combo.currentData()),
+                cwd=self._cwd or None,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Install failed", str(exc))
+            return
+        cleanup_extension_install_source(self._source)
+        self._source = None
+        self.accept()
+
+    def selected_candidates(self) -> list[ExtensionInstallCandidate]:
+        return [
+            candidate
+            for checkbox, candidate in self._candidate_checks
+            if checkbox.isChecked()
+        ]
+
+    def _set_candidates(self, candidates: list[ExtensionInstallCandidate]) -> None:
+        _clear_layout(self.candidate_layout)
+        self._candidate_checks = []
+        if not candidates:
+            empty = QLabel("No extensions discovered yet.")
+            empty.setStyleSheet(f"color:{palette()['TEXT_DIM']};")
+            self.candidate_layout.addWidget(empty)
+            self.candidate_layout.addStretch()
+            self.install_btn.setEnabled(False) if hasattr(self, "install_btn") else None
+            return
+        for candidate in candidates:
+            checkbox = QCheckBox(_candidate_label(candidate))
+            checkbox.setChecked(True)
+            checkbox.setStyleSheet(_enabled_checkbox_style())
+            checkbox.toggled.connect(self._sync_install_enabled)
+            self.candidate_layout.addWidget(checkbox)
+            self._candidate_checks.append((checkbox, candidate))
+        self.candidate_layout.addStretch()
+        self._sync_install_enabled()
+
+    def _sync_install_enabled(self) -> None:
+        if hasattr(self, "install_btn"):
+            self.install_btn.setEnabled(bool(self.selected_candidates()))
+
+    def _set_status(self, text: str, *, danger: bool = False) -> None:
+        color = "#f87171" if danger else palette()["TEXT_DIM"]
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(f"color:{color}; font-size:{meta_font_pt()}px;")
 
 
 class _ExtensionListRow(QFrame):
@@ -278,6 +440,22 @@ class _ExtensionDetailPane(QWidget):
             "Hooks",
             [(name, "Lifecycle hook") for name in file.hooks],
         )
+        _add_detail_section(
+            root,
+            "Language Features",
+            [
+                (
+                    language.name,
+                    _join_details(
+                        f"patterns: {', '.join(language.file_patterns)}",
+                        "diagnostics" if language.diagnostics else "",
+                        "symbols" if language.symbols else "",
+                        "completion" if language.completion else "",
+                    ),
+                )
+                for language in file.languages
+            ],
+        )
         ui_rows = [(badge.name, "Status badge") for badge in file.badges]
         ui_rows += [(panel.name, f"Panel: {panel.title}") for panel in file.panels]
         _add_detail_section(root, "UI Contributions", ui_rows)
@@ -368,173 +546,6 @@ class _PlaceholderPane(QWidget):
         layout.addStretch()
 
 
-class _ApiReferencePane(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(14)
-
-        title = QLabel("API Reference")
-        title.setStyleSheet(_pane_title_style())
-        layout.addWidget(title)
-
-        intro = QLabel(
-            "Extensions return structured data. aichs owns the widgets, layout, "
-            "and styling, so extension UI stays predictable."
-        )
-        intro.setWordWrap(True)
-        intro.setStyleSheet(_intro_style())
-        layout.addWidget(intro)
-
-        _add_api_section(layout, "What UI Extensions Can Do", [
-            (
-                "metadata",
-                "Adds a short extension description shown near status in the Extensions dialog.",
-            ),
-            (
-                "status_badge",
-                "Adds a small top-bar badge. The badge can open a registered panel.",
-            ),
-            (
-                "panel",
-                "Adds a structured read-only dialog rendered by aichs.",
-            ),
-            (
-                "Extensions view",
-                "Shows loaded extension files and their registered contributions.",
-            ),
-        ])
-        _add_api_section(layout, "Provider Context", [
-            ("ctx.cwd", "Current workspace path."),
-            ("ctx.model", "Currently selected model id."),
-            ("ctx.history", "Current conversation history visible to the chat panel."),
-            ("ctx.extension_id", "Safe id derived from the extension filename."),
-            ("ctx.storage.load_config(scope)", "Load project/global extension JSON config."),
-            ("ctx.storage.save_config(data, scope)", "Save project/global extension JSON config."),
-            ("ctx.storage.load_state(name)", "Load project-scoped extension JSON state."),
-            ("ctx.storage.save_state(data, name)", "Save project-scoped extension JSON state."),
-            ("ctx.processes", "Managed process API when available to UI providers."),
-        ])
-        _add_api_section(layout, "Tool Context", [
-            ("ctx.cwd", "Current workspace path."),
-            ("ctx.on_line", "Optional callback for streaming command-like output."),
-            ("ctx.cancel", "Cancellation event."),
-            ("ctx.is_cancelled()", "Convenience cancellation check."),
-            ("ctx.extension_id", "Safe id derived from the extension filename."),
-            ("ctx.storage.load_config(scope)", "Load project/global extension JSON config."),
-            ("ctx.storage.save_config(data, scope)", "Save project/global extension JSON config."),
-            ("ctx.storage.load_state(name)", "Load project-scoped extension JSON state."),
-            ("ctx.storage.save_state(data, name)", "Save project-scoped extension JSON state."),
-        ])
-        _add_api_section(layout, "Executable Command Context", [
-            ("ctx.cwd", "Current workspace path."),
-            ("ctx.model", "Selected model id."),
-            ("ctx.history", "Current visible conversation history."),
-            ("ctx.conversation_id", "Current conversation id, when available."),
-            ("ctx.command", "Command name being executed."),
-            ("ctx.extension_id", "Safe id derived from the extension filename."),
-            ("ctx.storage.load_config(scope)", "Load project/global extension JSON config."),
-            ("ctx.storage.save_config(data, scope)", "Save project/global extension JSON config."),
-            ("ctx.storage.load_state(name)", "Load project conversation-scoped JSON state."),
-            ("ctx.storage.save_state(data, name)", "Save project conversation-scoped JSON state."),
-            ("ctx.runtime.notice(text)", "Show a center notice."),
-            ("ctx.runtime.send(text)", "Send now, or queue if a run is active."),
-            ("ctx.runtime.enqueue(text)", "Queue a normal chat message."),
-            ("ctx.runtime.compact(force=True)", "Request normal compaction."),
-            ("ctx.runtime.continue_after_compact(prompt, force=True)", "Queue a synthetic resume after compaction."),
-            ("ctx.runtime.processes.start(name, command, ...)", "Start a managed long-running process."),
-            ("ctx.runtime.processes.status(name)", "Inspect managed process state."),
-            ("ctx.runtime.processes.tail(name, lines)", "Read recent process output."),
-            ("ctx.runtime.processes.write(name, text)", "Write to process stdin when enabled."),
-            ("ctx.runtime.processes.stop(name)", "Stop a managed process."),
-        ])
-        _add_api_section(layout, "Extension Metadata", [
-            (
-                "registry.metadata(description=...)",
-                "Sets the description after the extension loads.",
-            ),
-            (
-                "EXTENSION_DESCRIPTION",
-                "Static fallback used even while the extension is disabled.",
-            ),
-            (
-                "EXTENSION = {'description': ...}",
-                "Alternative static fallback.",
-            ),
-            ("module docstring", "Last-resort static fallback."),
-        ])
-        _add_api_section(layout, "Runtime Hook Directives", [
-            ("show_notice", "Show a notice in the active chat."),
-            ("enqueue_message", "Queue a normal user message."),
-            ("compact_now", "Request app-owned compaction at a safe boundary."),
-            ("compact_and_resume", "Compact and queue a synthetic continuation prompt."),
-            ("ledger", "Optional directive flag requiring continuation-ledger validation."),
-            ("ctx.process", "Process event payload for process_started and process_exited hooks."),
-        ])
-        _add_api_section(layout, "Status Badge Schema", [
-            (
-                "registry.status_badge(name, provider)",
-                "Registers a top-bar badge provider.",
-            ),
-            ("label", "Required button text."),
-            ("tooltip", "Optional hover text."),
-            (
-                "tone",
-                "Optional: success, danger, warning, accent.",
-            ),
-            ("panel", "Optional panel name to open. Defaults to the badge name."),
-            ("visible", "Set to False to hide the badge."),
-        ])
-        _add_api_section(layout, "Panel Provider Schema", [
-            ("registry.panel(name, title, provider)", "Registers a structured panel."),
-            ("title", "Optional panel heading."),
-            ("body", "Optional text before sections."),
-            ("sections", "Optional list of section objects or strings."),
-        ])
-        _add_api_section(layout, "Section Schema", [
-            ("heading", "Optional section heading."),
-            ("body", "Optional text before section items."),
-            ("items", "Optional list of item objects or strings."),
-        ])
-        _add_api_section(layout, "Item Schema", [
-            ("title", "Primary row text. Defaults to Item."),
-            ("subtitle", "Optional secondary text."),
-            ("body", "Optional detail text."),
-            ("action", "Optional single action object."),
-            ("actions", "Optional list of action objects."),
-        ])
-        _add_api_section(layout, "Action Schema", [
-            ("label", "Button text. Defaults to the action type."),
-            ("type", "Supported: open_file, copy, refresh_panel, send_message, run_extension_command."),
-            ("path", "For open_file: workspace-relative path."),
-            ("text", "For copy or send_message."),
-            ("command", "For run_extension_command: executable extension command name."),
-            ("args", "For run_extension_command: command arguments."),
-            ("refresh", "If true, refreshes the panel after the action runs."),
-            ("refresh_panel", "Re-runs the provider and redraws the current panel."),
-            ("send_message", "Sends or queues text like a normal user message."),
-            ("run_extension_command", "Runs an executable extension command without adding a chat message."),
-        ])
-        _add_api_section(layout, "String Shortcuts", [
-            ("panel returns a string", "Rendered as body text."),
-            ("section is a string", "Rendered as body text."),
-            ("item is a string", "Rendered as a single card title."),
-        ])
-        _add_api_section(layout, "Currently Unsupported", [
-            ("tool-running buttons", ""),
-            ("file links inside text", ""),
-            ("custom row colors or icons", ""),
-            ("arbitrary PyQt widgets", ""),
-            ("HTML or Markdown rendering", ""),
-        ])
-        layout.addStretch()
-
-
-def _add_api_section(layout: QVBoxLayout, heading: str, rows: list[tuple[str, str]]) -> None:
-    _add_detail_section(layout, heading, rows)
-
-
 def _add_detail_section(
     layout: QVBoxLayout,
     heading: str,
@@ -603,7 +614,19 @@ def _find_file(
 
 
 def _extension_name(file: ExtensionFileSummary) -> str:
+    if file.display_name:
+        return file.display_name
+    path = Path(file.path)
+    if path.name == "extension.py" and path.parent.name:
+        return path.parent.name
     return Path(file.path).name
+
+
+def _candidate_label(candidate: ExtensionInstallCandidate) -> str:
+    details = [candidate.name, candidate.kind]
+    if candidate.description:
+        details.append(candidate.description)
+    return " · ".join(details)
 
 
 def _list_status_text(file: ExtensionFileSummary) -> str:
@@ -618,6 +641,7 @@ def _list_subtitle(file: ExtensionFileSummary) -> str:
         (len(file.commands), "command"),
         (len(file.contexts), "context"),
         (len(file.hooks), "hook"),
+        (len(file.languages), "language"),
         (len(file.badges) + len(file.panels), "UI"),
     ]
     parts = [
@@ -632,34 +656,6 @@ def _list_subtitle(file: ExtensionFileSummary) -> str:
     return " · ".join(parts)
 
 
-def _tab_title(file: ExtensionFileSummary) -> str:
-    name = Path(file.path).name
-    if file.status == "Disabled":
-        return f"Disabled · {name}"
-    return f"! {name}" if file.errors else name
-
-
-def _tab_tooltip(file: ExtensionFileSummary) -> str:
-    suffix = f"\n\n{file.description}" if file.description else ""
-    if file.status == "Disabled":
-        return (
-            "Disabled. This extension is visible here but does not register contributions."
-            f"{suffix}"
-        )
-    if file.errors:
-        return f"Failed to load. Open this tab to inspect errors.{suffix}"
-    return f"Loaded.{suffix}"
-
-
-def _tab_text_color(file: ExtensionFileSummary) -> str:
-    p = palette()
-    if file.status == "Disabled":
-        return p["TEXT_DIM"]
-    if file.errors:
-        return "#f87171"
-    return p["TEXT"]
-
-
 def _join_details(*parts: str) -> str:
     return " | ".join(part for part in parts if part)
 
@@ -670,19 +666,6 @@ def _heading_style(tone: str = "") -> str:
     return (
         f"color:{color}; font-size:{meta_font_pt()}px;"
         "font-weight:600;"
-    )
-
-
-def _pane_title_style() -> str:
-    p = palette()
-    return f"font-size:{chat_font_pt() + 4}px; font-weight:650; color:{p['TEXT']};"
-
-
-def _intro_style() -> str:
-    p = palette()
-    return (
-        f"color:{p['TEXT']}; background:transparent;"
-        f"border-left:2px solid {p['BORDER']}; padding:0 0 0 10px;"
     )
 
 
@@ -734,19 +717,6 @@ def _list_meta_style(tone: str) -> str:
 def _list_path_style() -> str:
     p = palette()
     return f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;"
-
-
-def _secondary_button_style(*, compact: bool = False) -> str:
-    p = palette()
-    pad = "4px 9px" if compact else "5px 12px"
-    fs = meta_font_pt() if compact else max(meta_font_pt(), 11)
-    return (
-        f"QPushButton {{ background:{p['BG3']}; color:{p['TEXT']};"
-        f"border:1px solid {p['BORDER']}; border-radius:6px;"
-        f"padding:{pad}; font-size:{fs}px; font-weight:500; }}"
-        f"QPushButton:hover {{ background:{p['BORDER']}; }}"
-        f"QPushButton:pressed {{ background:{p['BG2']}; }}"
-    )
 
 
 def _header_style() -> str:

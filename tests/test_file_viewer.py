@@ -1,10 +1,12 @@
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QTextCursor
 
 from storage.settings import FILE_EDITOR_AUTO_SAVE_KEY
+from tests.conftest import write_extension
 from ui.theme import palette
 from ui.widgets.file_viewer import (
     FileViewerPanel,
+    _FileTextEdit,
     _TextFileTab,
     _read_text_preview,
     _read_text_preview_details,
@@ -176,6 +178,133 @@ def test_text_file_tab_local_find_keeps_focus_while_typing(qapp):
     tab.close()
     tab.deleteLater()
     qapp.processEvents()
+
+
+def test_file_text_edit_populates_local_completions(qapp):
+    editor = _FileTextEdit()
+    editor.configure_completion("demo.js")
+    editor.setPlainText("const renderer = renderScene;\nren")
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    editor.setTextCursor(cursor)
+
+    editor._show_completion(manual=False)
+
+    completions = editor._completion_model.stringList()
+    assert "renderer" in completions
+    assert "renderScene" in completions
+    assert "return" not in completions
+    editor.close()
+    editor.deleteLater()
+    qapp.processEvents()
+
+
+def test_file_text_edit_inserts_completion_over_prefix(qapp):
+    editor = _FileTextEdit()
+    editor.configure_completion("demo.py")
+    editor.setPlainText("def render_scene():\n    ret")
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    editor.setTextCursor(cursor)
+
+    editor._show_completion(manual=False)
+    editor._insert_completion("return")
+
+    assert editor.toPlainText().endswith("    return")
+    assert editor._completion_model.stringList() == []
+    editor.close()
+    editor.deleteLater()
+    qapp.processEvents()
+
+
+def test_file_text_edit_does_not_complete_read_only(qapp):
+    editor = _FileTextEdit()
+    editor.configure_completion("demo.py")
+    editor.setPlainText("return")
+    editor.setReadOnly(True)
+
+    editor._show_completion(manual=True)
+
+    assert editor._completion_model.stringList() == []
+    editor.close()
+    editor.deleteLater()
+    qapp.processEvents()
+
+
+def test_file_text_edit_diagnostic_markers_expand_gutter(qapp):
+    from services.language_features import Diagnostic
+
+    editor = _FileTextEdit()
+    editor.setPlainText("one\ntwo\n")
+    before = editor.line_number_area_width()
+
+    editor.set_diagnostics([
+        Diagnostic(path="demo.py", line=2, column=0, severity="warning", message="careful"),
+    ])
+
+    assert editor.line_number_area_width() > before
+    editor.close()
+    editor.deleteLater()
+    qapp.processEvents()
+
+
+def test_file_viewer_applies_extension_diagnostics(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    write_extension(
+        workspace,
+        "language.py",
+        """
+        def register(registry):
+            registry.language(
+                name="python",
+                file_patterns=["*.py"],
+                diagnostics=lambda ctx: [{
+                    "line": 1,
+                    "column": 0,
+                    "severity": "error",
+                    "message": "syntax problem",
+                }],
+            )
+        """,
+    )
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace))
+    tab = panel._tabs.widget(0)
+
+    assert tab._diagnostics[0].message == "syntax problem"
+    assert tab._editor._diagnostics == tab._diagnostics
+    assert tab._status.text() == "1 problem (1 error)"
+    panel.close()
+
+
+def test_file_viewer_clears_diagnostics_in_diff_mode(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    write_extension(
+        workspace,
+        "language.py",
+        """
+        def register(registry):
+            registry.language(
+                name="python",
+                file_patterns=["*.py"],
+                diagnostics=lambda ctx: [{"line": 1, "message": "hidden in diff"}],
+            )
+        """,
+    )
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(
+        str(path),
+        repo_root=str(workspace),
+        diff_text="--- a/src/main.py\n+++ b/src/main.py\n@@ -1 +1 @@\n-print('hi')\n+print('bye')\n",
+    )
+    tab = panel._tabs.widget(0)
+
+    assert tab._is_showing_diff() is True
+    assert tab._diagnostics == []
+    assert tab._editor._diagnostics == []
+    panel.close()
 
 
 def test_file_viewer_diff_mode_marks_changed_lines(qapp, workspace):

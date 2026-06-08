@@ -8,7 +8,9 @@ and lifecycle hooks from local Python files.
 | Path | Scope |
 |---|---|
 | `~/.aichs/extensions/*.py` | User-global |
+| `~/.aichs/extensions/*/extension.py` | User-global folder extension |
 | `.aichs/extensions/*.py` | Project-local |
+| `.aichs/extensions/*/extension.py` | Project-local folder extension |
 
 Project-local extensions load after user-global extensions. Tool names must be
 unique.
@@ -22,11 +24,40 @@ extensions stay visible in the dialog but do not register tools, commands,
 hooks, context, badges, or panels. The per-workspace disabled list is stored in
 `.aichs/extensions.disabled.json`.
 
+## Installing From Git
+
+Open the Extensions dialog and choose **Add**. Paste a git URL, fetch it, choose
+the discovered extensions, then install them into either:
+
+| Choice | Target |
+|---|---|
+| Local project | `.aichs/extensions/` in the current workspace |
+| Global user | `~/.aichs/extensions/` |
+
+For now the installer supports git sources only. The source pipeline is kept
+resolver-based so a future registry can add HTTP/catalog sources without
+changing how extension candidates are selected or copied.
+
+If the source contains multiple folder extensions, each folder with an
+`extension.py` entrypoint is shown separately. Root-level `*.py` extension files
+are also installable. Installing an extension with the same folder or file name
+replaces the existing installed copy.
+
 ## File format
 
-Each extension is a Python file with a `register(registry)` function.
+Each extension is either a Python file with a `register(registry)` function, or
+a folder containing an `extension.py` entrypoint. Folder extensions use the
+folder name as their extension id, which makes room for future multi-file
+extensions.
 
 Extensions can declare a short description for the Extensions dialog:
+
+```json
+{
+  "name": "Python Language Support",
+  "description": "Adds Python diagnostics, symbols, and completion."
+}
+```
 
 ```python
 EXTENSION_DESCRIPTION = "Adds project-specific review and guardrail helpers."
@@ -36,10 +67,15 @@ def register(registry):
     registry.metadata(description="Adds project-specific review and guardrail helpers.")
 ```
 
-`registry.metadata(...)` is used when the extension is loaded. The module-level
-`EXTENSION_DESCRIPTION` constant, `EXTENSION = {"description": "..."}`, or the
-module docstring is used as a safe fallback, including while an extension is
-disabled and its `register()` function is not executed.
+For folder extensions, `aichs-extension.json` `name` is used as the display
+name in the Extensions dialog. Its `description` is the first static description
+fallback.
+
+`registry.metadata(...)` is used when the extension is loaded. If there is no
+manifest description, the module-level `EXTENSION_DESCRIPTION` constant,
+`EXTENSION = {"description": "..."}`, or the module docstring is used as a safe
+fallback, including while an extension is disabled and its `register()` function
+is not executed.
 
 ## Tools
 
@@ -317,15 +353,78 @@ validate as `aicc-continuation/v1`:
 Invalid ledgers fail closed: the runtime emits a compaction failure event and
 does not resume from guessed continuation state.
 
-Examples:
+Examples live outside the app repo at
+[nadav-yo/aichs-extensions](https://github.com/nadav-yo/aichs-extensions).
+They are opt-in and are not shipped with `aichs` by default.
 
-- `.aichs/extensions/runtime_continue.py` shows an executable `/continue`
-  command with `status`, `preview`, and `queue` subcommands, command state, a
-  status panel, and a `before_next_model_request` hook that requests
-  `compact_and_resume`.
-- `.aichs/extensions/runtime_guard.py` shows a smaller runtime-control pattern:
-  `/guard status`, a status panel, and a `before_next_model_request` hook that
-  blocks repeated identical tool errors before the agent retries the same path.
+## Language Features
+
+Extensions can add optional file-editor language features. The core app owns the
+editor UI and routing; extensions return structured data.
+
+`aichs` does not ship language support by default. Python, tree-sitter grammars,
+LSP servers, linters, and other language packages are opt-in extension
+dependencies.
+
+```python
+def register(registry):
+    registry.language(
+        name="python",
+        file_patterns=["*.py"],
+        diagnostics=diagnostics,
+        symbols=symbols,
+        completion=completion,
+    )
+
+
+def diagnostics(ctx):
+    return [{
+        "line": 3,
+        "column": 8,
+        "severity": "warning",
+        "message": "Example warning",
+        "source": "example",
+    }]
+```
+
+Language providers receive:
+
+| Field/API | Description |
+|---|---|
+| `ctx.cwd` | Current workspace path. |
+| `ctx.path` | Current file path. |
+| `ctx.content` | Current file text. |
+| `ctx.position` | Cursor offset when requesting completion. |
+| `ctx.prefix` | Current word prefix when requesting completion. |
+| `ctx.extension_id` | Safe id derived from the extension filename. |
+| `ctx.storage.load_config(scope)` | Load project/global extension JSON config. |
+| `ctx.storage.save_config(data, scope)` | Save project/global extension JSON config. |
+| `ctx.storage.load_state(name)` | Load project-scoped extension JSON state. |
+| `ctx.storage.save_state(data, name)` | Save project-scoped extension JSON state. |
+
+Diagnostic fields:
+
+| Field | Description |
+|---|---|
+| `line` | 1-based line number. |
+| `column` | 0-based column number. |
+| `end_line` / `end_column` | Optional range end. |
+| `severity` | `error`, `warning`, `info`, or `hint`. |
+| `message` | Diagnostic message. |
+| `source` | Optional source label, such as a linter name. |
+| `code` | Optional diagnostic code. |
+
+Symbol fields:
+
+| Field | Description |
+|---|---|
+| `name` | Symbol name. |
+| `kind` | Symbol kind, such as `class` or `function`. |
+| `line` / `column` | Symbol location. |
+| `end_line` / `end_column` | Optional range end. |
+
+Completion providers may return strings or objects with `label`, `insert_text`,
+and optional `detail`.
 
 ## UI Contributions
 
@@ -455,4 +554,5 @@ Currently unsupported in panel data:
 | arbitrary PyQt widgets |
 | HTML or Markdown rendering |
 
-see [Examples](../.aichs/extensions/)
+See [nadav-yo/aichs-extensions](https://github.com/nadav-yo/aichs-extensions)
+for opt-in example extensions.

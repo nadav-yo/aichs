@@ -15,6 +15,7 @@ CommandExecute = Callable[["CommandContext", str], object]
 ContextProvider = Callable[["ExtensionContext"], str]
 HookHandler = Callable[["HookContext"], None]
 UiProvider = Callable[["ExtensionContext"], object]
+LanguageProvider = Callable[[object], object]
 
 
 @dataclass(frozen=True)
@@ -176,6 +177,17 @@ class ExtensionPanel:
 
 
 @dataclass(frozen=True)
+class LanguageContribution:
+    name: str
+    file_patterns: list[str]
+    diagnostics: LanguageProvider | None = None
+    symbols: LanguageProvider | None = None
+    completion: LanguageProvider | None = None
+    source: str = "extension"
+    extension_id: str = "extension"
+
+
+@dataclass(frozen=True)
 class ExtensionFileSummary:
     path: str
     status: str
@@ -187,6 +199,8 @@ class ExtensionFileSummary:
     panels: list[ExtensionPanel]
     errors: list[str]
     description: str = ""
+    display_name: str = ""
+    languages: list[LanguageContribution] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -265,6 +279,7 @@ class ToolRegistry:
         self._hooks: dict[str, list[HookHandler]] = {}
         self._badges: dict[str, StatusBadge] = {}
         self._panels: dict[str, ExtensionPanel] = {}
+        self._languages: dict[str, LanguageContribution] = {}
         self._current_extension_id = "extension"
         self._description = ""
         self.errors: list[str] = []
@@ -366,6 +381,35 @@ class ToolRegistry:
             source=source,
         )
 
+    def language(
+        self,
+        *,
+        name: str,
+        file_patterns: list[str],
+        diagnostics: LanguageProvider | None = None,
+        symbols: LanguageProvider | None = None,
+        completion: LanguageProvider | None = None,
+        source: str = "extension",
+    ) -> None:
+        if not name or not name.replace("_", "").isalnum():
+            raise ValueError(f"invalid language name: {name!r}")
+        if name in self._languages:
+            raise ValueError(f"language already registered: {name}")
+        patterns = [str(pattern).strip() for pattern in file_patterns if str(pattern).strip()]
+        if not patterns:
+            raise ValueError("language file_patterns are required")
+        if diagnostics is None and symbols is None and completion is None:
+            raise ValueError("language must provide diagnostics, symbols, or completion")
+        self._languages[name] = LanguageContribution(
+            name=name,
+            file_patterns=patterns,
+            diagnostics=diagnostics,
+            symbols=symbols,
+            completion=completion,
+            source=source,
+            extension_id="builtin" if source == "builtin" else self._current_extension_id,
+        )
+
     def get(self, name: str) -> ToolDefinition | None:
         return self._tools.get(name)
 
@@ -424,6 +468,9 @@ class ToolRegistry:
 
     def panel_by_name(self, name: str) -> ExtensionPanel | None:
         return self._panels.get(name)
+
+    def languages(self) -> list[LanguageContribution]:
+        return list(self._languages.values())
 
 def load_extensions(registry: ToolRegistry, cwd: str | None = None) -> None:
     for path in _extension_files(cwd):
@@ -561,6 +608,12 @@ def extension_panel_data(
     return panel.title, data, list(registry.errors)
 
 
+def extension_languages(cwd: str | None = None) -> tuple[list[LanguageContribution], list[str]]:
+    registry = ToolRegistry()
+    load_extensions(registry, cwd)
+    return registry.languages(), list(registry.errors)
+
+
 def _extension_files(cwd: str | None) -> list[Path]:
     roots = [Path.home() / ".aichs" / "extensions"]
     if cwd:
@@ -571,7 +624,8 @@ def _extension_files(cwd: str | None) -> list[Path]:
     for root in roots:
         if not root.exists():
             continue
-        for path in sorted(root.glob("*.py")):
+        candidates = list(root.glob("*.py")) + list(root.glob("*/extension.py"))
+        for path in sorted(candidates):
             resolved = path.resolve()
             if resolved not in seen and path.name != "__init__.py":
                 files.append(path)
@@ -593,7 +647,7 @@ def _load_extension_file(registry: ToolRegistry, path: Path) -> None:
         if not callable(register):
             registry.errors.append(f"{path}: missing register(registry)")
             return
-        registry._current_extension_id = path.stem
+        registry._current_extension_id = _extension_id_for_path(path)
         register(registry)
     except Exception:
         registry.errors.append(f"{path}:\n{traceback.format_exc().rstrip()}")
@@ -603,7 +657,9 @@ def _load_extension_file(registry: ToolRegistry, path: Path) -> None:
 
 
 def _extension_file_summary(path: Path, cwd: str | None = None) -> ExtensionFileSummary:
+    manifest = _extension_manifest_metadata(path)
     static_description = _static_extension_description(path)
+    display_name = _clean_description(str(manifest.get("name") or ""))
     if is_extension_disabled(path, cwd):
         return ExtensionFileSummary(
             path=str(path),
@@ -616,6 +672,8 @@ def _extension_file_summary(path: Path, cwd: str | None = None) -> ExtensionFile
             panels=[],
             errors=[],
             description=static_description,
+            display_name=display_name,
+            languages=[],
         )
     registry = ToolRegistry()
     before = registry.errors[:]
@@ -632,6 +690,8 @@ def _extension_file_summary(path: Path, cwd: str | None = None) -> ExtensionFile
         panels=registry.panels(),
         errors=errors,
         description=registry._description or static_description,
+        display_name=display_name,
+        languages=registry.languages(),
     )
 
 
@@ -660,6 +720,11 @@ def _normalized_extension_path(path: str | Path) -> str:
 
 
 def _static_extension_description(path: Path) -> str:
+    manifest_description = _clean_description(
+        str(_extension_manifest_metadata(path).get("description") or "")
+    )
+    if manifest_description:
+        return manifest_description
     try:
         module = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError, UnicodeDecodeError):
@@ -671,6 +736,30 @@ def _static_extension_description(path: Path) -> str:
     if metadata:
         return metadata
     return _clean_description(ast.get_docstring(module) or "")
+
+
+def _extension_manifest_metadata(path: Path) -> dict:
+    manifest_path = _extension_manifest_path(path)
+    if manifest_path is None:
+        return {}
+    try:
+        data = _read_json_object(manifest_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    return data
+
+
+def _extension_manifest_path(path: Path) -> Path | None:
+    if path.name == "extension.py":
+        candidate = path.parent / "aichs-extension.json"
+        return candidate if candidate.exists() else None
+    return None
+
+
+def _extension_id_for_path(path: Path) -> str:
+    if path.name == "extension.py" and path.parent.name:
+        return _safe_extension_id(path.parent.name)
+    return _safe_extension_id(path.stem)
 
 
 def _module_string_constant(module: ast.Module, name: str) -> str:

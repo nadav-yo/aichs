@@ -1,20 +1,25 @@
 from PyQt6.QtWidgets import QLabel, QPushButton
 
-from services.tool_registry import ExtensionFileSummary, ExtensionOverview
+from services.extension_installer import ExtensionInstallCandidate
+from services.tool_registry import ExtensionFileSummary, ExtensionOverview, LanguageContribution
 from ui.widgets.extensions_dialog import (
+    ExtensionInstallDialog,
     ExtensionsDialog,
-    _ApiReferencePane,
     _ExtensionDetailPane,
     _list_subtitle,
     _status_tone,
     _summary_text,
-    _tab_text_color,
-    _tab_title,
-    _tab_tooltip,
 )
 
 
-def _summary(path="ext.py", status="Loaded", errors=None, description=""):
+def _summary(
+    path="ext.py",
+    status="Loaded",
+    errors=None,
+    description="",
+    display_name="",
+    languages=None,
+):
     return ExtensionFileSummary(
         path=path,
         status=status,
@@ -26,6 +31,8 @@ def _summary(path="ext.py", status="Loaded", errors=None, description=""):
         panels=[],
         errors=list(errors or []),
         description=description,
+        display_name=display_name,
+        languages=list(languages or []),
     )
 
 
@@ -42,19 +49,9 @@ def test_extensions_dialog_status_helpers():
     assert _status_tone(_summary()) == "success"
     assert _status_tone(_summary(status="Disabled")) == "disabled"
     assert _status_tone(_summary(status="Failed", errors=["boom"])) == "danger"
-    assert _tab_title(_summary("disabled.py", status="Disabled")) == "Disabled · disabled.py"
-    assert "Disabled" in _tab_tooltip(_summary(status="Disabled"))
-    assert _tab_text_color(_summary(status="Failed", errors=["boom"])) == "#f87171"
 
 
-def test_extensions_dialog_tab_tooltip_includes_description():
-    tooltip = _tab_tooltip(_summary(description="Adds runtime guardrails."))
-
-    assert "Loaded." in tooltip
-    assert "Adds runtime guardrails." in tooltip
-
-
-def test_extensions_dialog_keeps_api_reference_outside_extension_list(qapp):
+def test_extensions_dialog_uses_docs_for_api_reference(qapp):
     overview = ExtensionOverview(files=[
         _summary("runtime.py", description="Runtime controls"),
         _summary("guard.py", description="Guardrails"),
@@ -63,12 +60,7 @@ def test_extensions_dialog_keeps_api_reference_outside_extension_list(qapp):
 
     assert dialog._selected_path == "runtime.py"
     assert isinstance(dialog._detail_scroll.widget(), _ExtensionDetailPane)
-    assert "Inspect" not in [button.text() for button in dialog.findChildren(QPushButton)]
-
-    dialog._show_api_reference()
-
-    assert dialog._selected_path == ""
-    assert isinstance(dialog._detail_scroll.widget(), _ApiReferencePane)
+    assert "API Reference" not in [button.text() for button in dialog.findChildren(QPushButton)]
 
     dialog._show_file_detail(overview.files[1])
 
@@ -76,19 +68,46 @@ def test_extensions_dialog_keeps_api_reference_outside_extension_list(qapp):
     assert isinstance(dialog._detail_scroll.widget(), _ExtensionDetailPane)
 
 
+def test_extensions_dialog_uses_manifest_display_name(qapp, tmp_path):
+    entrypoint = tmp_path / ".aichs" / "extensions" / "python-lang" / "extension.py"
+    overview = ExtensionOverview(files=[
+        _summary(str(entrypoint), display_name="Python Language Support"),
+    ])
+
+    dialog = ExtensionsDialog(overview)
+
+    labels = [label.text() for label in dialog.findChildren(QLabel)]
+    assert "Python Language Support" in labels
+    assert "extension.py" not in labels
+
+
 def test_extensions_dialog_list_subtitle_summarizes_contributions():
     file = _summary("runtime.py", description="Runtime controls")
 
     assert _list_subtitle(file) == "No registered contributions · Runtime controls"
 
+    language_file = _summary(
+        "language.py",
+        languages=[LanguageContribution(name="python", file_patterns=["*.py"])],
+    )
+    assert _list_subtitle(language_file) == "1 language"
 
-def test_extensions_api_reference_includes_recent_runtime_apis(qapp):
-    dialog = ExtensionsDialog(ExtensionOverview(files=[_summary("runtime.py")]))
 
-    dialog._show_api_reference()
+def test_extension_install_dialog_selects_candidates(qapp, tmp_path):
+    dialog = ExtensionInstallDialog(str(tmp_path))
+    candidate = ExtensionInstallCandidate(
+        name="python-lang",
+        source_path=tmp_path / "python-lang",
+        entrypoint=tmp_path / "python-lang" / "extension.py",
+        kind="folder",
+        description="Python support",
+    )
 
-    labels = "\n".join(label.text() for label in dialog.findChildren(QLabel))
-    assert "ctx.storage.load_config(scope)" in labels
-    assert "ctx.runtime.processes.start(name, command, ...)" in labels
-    assert "run_extension_command" in labels
-    assert "compact_and_resume" in labels
+    dialog._set_candidates([candidate])
+
+    assert dialog.scope_combo.currentData() == "local"
+    assert [item.name for item in dialog.selected_candidates()] == ["python-lang"]
+    checkbox, _candidate = dialog._candidate_checks[0]
+    checkbox.setChecked(False)
+    assert dialog.selected_candidates() == []
+    assert not dialog.install_btn.isEnabled()

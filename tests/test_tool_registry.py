@@ -13,6 +13,7 @@ from services.tool_registry import (
     ToolRegistry,
     extension_context_snippets,
     extension_errors,
+    extension_languages,
     extension_overview,
     is_extension_disabled,
     load_extensions,
@@ -123,6 +124,75 @@ def test_registry_validation_errors():
     registry.panel(name="panel", title="Panel", provider=lambda ctx: {})
     with pytest.raises(ValueError, match="panel already registered"):
         registry.panel(name="panel", title="Panel", provider=lambda ctx: {})
+    with pytest.raises(ValueError, match="invalid language name"):
+        registry.language(name="bad-name!", file_patterns=["*.py"], diagnostics=lambda ctx: [])
+    with pytest.raises(ValueError, match="file_patterns"):
+        registry.language(name="python", file_patterns=[], diagnostics=lambda ctx: [])
+    with pytest.raises(ValueError, match="diagnostics, symbols, or completion"):
+        registry.language(name="empty", file_patterns=["*.py"])
+    registry.language(name="lang", file_patterns=["*.py"], diagnostics=lambda ctx: [])
+    with pytest.raises(ValueError, match="language already registered"):
+        registry.language(name="lang", file_patterns=["*.py"], diagnostics=lambda ctx: [])
+
+
+def test_extension_language_registration(workspace):
+    write_extension(
+        workspace,
+        "language.py",
+        """
+        def register(registry):
+            registry.language(
+                name="python",
+                file_patterns=["*.py"],
+                diagnostics=lambda ctx: [],
+                symbols=lambda ctx: [],
+            )
+        """,
+    )
+
+    languages, errors = extension_languages(str(workspace))
+
+    assert errors == []
+    assert len(languages) == 1
+    assert languages[0].name == "python"
+    assert languages[0].file_patterns == ["*.py"]
+    assert languages[0].extension_id == "language"
+
+
+def test_folder_extension_entrypoint_loads_with_folder_id(workspace):
+    ext_dir = workspace / ".aichs" / "extensions" / "folder-demo"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "aichs-extension.json").write_text(
+        '{"name": "Folder Demo", "description": "Manifest description."}\n',
+        encoding="utf-8",
+    )
+    (ext_dir / "extension.py").write_text(
+        """
+EXTENSION_DESCRIPTION = "Folder extension demo."
+
+
+def register(registry):
+    registry.tool(
+        name="folder_ping",
+        description="Return folder pong",
+        input_schema={"type": "object", "properties": {}},
+        execute=lambda ctx, inputs: ctx.extension_id,
+    )
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    registry = ToolRegistry()
+
+    load_extensions(registry, str(workspace))
+    overview = extension_overview(str(workspace))
+
+    tool = registry.get("folder_ping")
+    assert tool is not None
+    assert tool.extension_id == "folder-demo"
+    assert Path(overview.files[0].path).name == "extension.py"
+    assert overview.files[0].display_name == "Folder Demo"
+    assert overview.files[0].description == "Manifest description."
 
 
 def test_runtime_command_api_callbacks():
@@ -213,6 +283,25 @@ def test_extension_overview(workspace_with_tool, workspace_with_broken_extension
     assert by_name["tooling.py"].description == "Project-local ping tools."
     assert by_name["broken.py"].status == "Failed"
     assert any(t.name == "ping" for t in by_name["tooling.py"].tools)
+
+
+def test_extension_overview_includes_language_features(workspace):
+    write_extension(
+        workspace,
+        "language.py",
+        """
+        def register(registry):
+            registry.language(
+                name="python",
+                file_patterns=["*.py"],
+                diagnostics=lambda ctx: [],
+            )
+        """,
+    )
+
+    overview = extension_overview(str(workspace))
+
+    assert overview.files[0].languages[0].name == "python"
 
 
 def test_extension_overview_reads_static_description_for_disabled_file(workspace):

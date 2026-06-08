@@ -5,8 +5,9 @@ import markdown as _md
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPlainTextEdit, QFrame, QTabWidget,
     QScrollArea, QLabel, QSizePolicy, QCheckBox, QPushButton, QTextBrowser, QLineEdit,
+    QCompleter,
 )
-from PyQt6.QtCore import pyqtSignal, Qt, QSize, QUrl
+from PyQt6.QtCore import pyqtSignal, Qt, QSize, QUrl, QStringListModel
 from PyQt6.QtGui import (
     QColor, QKeySequence, QPainter, QPixmap, QShortcut, QSyntaxHighlighter,
     QTextCharFormat, QTextCursor, QTextFormat,
@@ -20,6 +21,12 @@ from services.diff_html import changed_new_line_numbers
 from services.git_diff import can_diff_against_head, diff_against_head
 from services.git_status import is_git_repo
 from services.tool_policy import path_in_repo
+from services.language_features import (
+    Diagnostic, LanguageCompletionProvider, diagnostics as language_diagnostics,
+)
+from services.code_completion import (
+    CompletionItem, CompletionProvider, LocalCompletionProvider, prefix_at,
+)
 from storage.settings import FILE_EDITOR_AUTO_SAVE_KEY
 from ui.theme import (
     ACCENT, MONO_FONT_CSS, current_theme, palette, mono_font, meta_font_pt,
@@ -261,6 +268,10 @@ def _lexer_for_content(path: str, content: str):
             return TextLexer(stripnl=False)
 
 
+def _is_completion_text(text: str) -> bool:
+    return bool(text) and all(ch.isalnum() or ch == "_" for ch in text)
+
+
 class _PygmentsHighlighter(QSyntaxHighlighter):
     def __init__(self, document, path: str = "", content: str = ""):
         super().__init__(document)
@@ -363,6 +374,12 @@ class _FileTextEdit(QPlainTextEdit):
         self._line_number_area = _LineNumberArea(self)
         self._syntax_highlighter = _PygmentsHighlighter(self.document())
         self._changed_lines: set[int] = set()
+        self._diagnostics: list[Diagnostic] = []
+        self._completion_path = ""
+        self._completion_provider: CompletionProvider = LocalCompletionProvider()
+        self._completion_items: dict[str, CompletionItem] = {}
+        self._completion_model = QStringListModel(self)
+        self._completer: QCompleter | None = None
 
         self.blockCountChanged.connect(self._update_line_number_area_width)
         self.updateRequest.connect(self._update_line_number_area)
@@ -371,6 +388,15 @@ class _FileTextEdit(QPlainTextEdit):
 
     def configure_syntax(self, path: str, content: str):
         self._syntax_highlighter.set_source(path, content)
+
+    def configure_completion(
+        self,
+        path: str,
+        provider: CompletionProvider | None = None,
+    ):
+        self._completion_path = path
+        if provider is not None:
+            self._completion_provider = provider
 
     def minimap_color_for_line(self, text: str) -> QColor | None:
         return self._syntax_highlighter.minimap_color_for_line(text)
@@ -390,6 +416,12 @@ class _FileTextEdit(QPlainTextEdit):
 
     def set_changed_lines(self, lines: set[int]):
         self._changed_lines = set(lines)
+        self._update_extra_selections()
+        self._line_number_area.update()
+
+    def set_diagnostics(self, diagnostics: list[Diagnostic]):
+        self._diagnostics = list(diagnostics)
+        self._update_line_number_area_width(0)
         self._update_extra_selections()
         self._line_number_area.update()
 
@@ -417,6 +449,13 @@ class _FileTextEdit(QPlainTextEdit):
             self.setFocus()
 
     def release_resources(self):
+        self._hide_completion()
+        completer = getattr(self, "_completer", None)
+        if completer is not None:
+            try:
+                completer.setWidget(None)
+            except RuntimeError:
+                pass
         highlighter = getattr(self, "_syntax_highlighter", None)
         if highlighter is not None:
             try:
@@ -424,9 +463,14 @@ class _FileTextEdit(QPlainTextEdit):
             except RuntimeError:
                 pass
 
+    def closeEvent(self, event):
+        self.release_resources()
+        super().closeEvent(event)
+
     def line_number_area_width(self) -> int:
         digits = len(str(max(1, self.blockCount())))
-        return 12 + self.fontMetrics().horizontalAdvance("9") * digits
+        marker_width = 12 if self._diagnostics else 0
+        return 12 + marker_width + self.fontMetrics().horizontalAdvance("9") * digits
 
     def line_number_area_paint_event(self, event):
         p = palette()
@@ -440,12 +484,20 @@ class _FileTextEdit(QPlainTextEdit):
         current = self.textCursor().blockNumber()
         width = self._line_number_area.width()
         height = self.fontMetrics().height()
+        diagnostics_by_line = self._diagnostics_by_line()
+        marker_width = 12 if self._diagnostics else 0
 
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
+                line_diagnostics = diagnostics_by_line.get(block_number + 1)
+                if line_diagnostics:
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(_diagnostic_color(line_diagnostics[0].severity))
+                    marker_y = top + max(2, (height - 7) // 2)
+                    painter.drawEllipse(4, marker_y, 7, 7)
                 painter.setPen(QColor(p["TEXT"] if block_number == current else p["TEXT_DIM"]))
                 painter.drawText(
-                    0, top, width - 6, height,
+                    marker_width, top, width - 6, height,
                     Qt.AlignmentFlag.AlignRight,
                     str(block_number + 1),
                 )
@@ -463,6 +515,8 @@ class _FileTextEdit(QPlainTextEdit):
 
     def setReadOnly(self, ro: bool):
         super().setReadOnly(ro)
+        if ro:
+            self._hide_completion()
         self._update_extra_selections()
 
     def mousePressEvent(self, event):
@@ -471,11 +525,124 @@ class _FileTextEdit(QPlainTextEdit):
         super().mousePressEvent(event)
 
     def keyPressEvent(self, event):
+        if self._completion_popup_visible():
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Tab):
+                self._insert_completion(self._completer.currentCompletion() if self._completer else "")
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Escape:
+                self._hide_completion()
+                event.accept()
+                return
+
+        completion_shortcut = (
+            event.key() == Qt.Key.Key_Space
+            and event.modifiers()
+            & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier)
+        )
+        if completion_shortcut:
+            self._show_completion(manual=True)
+            event.accept()
+            return
+
         if event.key() == Qt.Key.Key_Escape and not self.isReadOnly():
             self.cancel_requested.emit()
             event.accept()
             return
         super().keyPressEvent(event)
+        self._maybe_update_completion(event)
+
+    def _maybe_update_completion(self, event):
+        if self.isReadOnly():
+            self._hide_completion()
+            return
+        key = event.key()
+        if key in (
+            Qt.Key.Key_Backspace,
+            Qt.Key.Key_Delete,
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+        ) or (event.text() and _is_completion_text(event.text())):
+            self._show_completion(manual=False)
+        elif key not in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            self._hide_completion()
+
+    def _show_completion(self, *, manual: bool):
+        if self.isReadOnly():
+            self._hide_completion()
+            return
+        cursor = self.textCursor()
+        content = self.toPlainText()
+        prefix = prefix_at(content, cursor.position())
+        minimum = 1 if manual else 2
+        if len(prefix) < minimum:
+            self._hide_completion()
+            return
+        items = self._completion_provider.complete(
+            path=self._completion_path,
+            content=content,
+            position=cursor.position(),
+            prefix=prefix,
+        )
+        if not items:
+            self._hide_completion()
+            return
+
+        self._completion_items = {item.label: item for item in items}
+        labels = [item.label for item in items]
+        self._completion_model.setStringList(labels)
+        if not self.isVisible():
+            return
+        completer = self._ensure_completer()
+        completer.setCompletionPrefix(prefix)
+        popup = completer.popup()
+        popup.setCurrentIndex(completer.completionModel().index(0, 0))
+
+        rect = self.cursorRect()
+        rect.setWidth(
+            max(
+                self.fontMetrics().horizontalAdvance(max(labels, key=len)) + 42,
+                completer.popup().sizeHintForColumn(0)
+                + completer.popup().verticalScrollBar().sizeHint().width(),
+            )
+        )
+        completer.complete(rect)
+
+    def _insert_completion(self, label: str):
+        item = self._completion_items.get(label)
+        if item is None:
+            return
+        cursor = self.textCursor()
+        content = self.toPlainText()
+        prefix = prefix_at(content, cursor.position())
+        if prefix:
+            cursor.movePosition(
+                QTextCursor.MoveOperation.Left,
+                QTextCursor.MoveMode.KeepAnchor,
+                len(prefix),
+            )
+        cursor.insertText(item.insert_text)
+        self.setTextCursor(cursor)
+        self._hide_completion()
+
+    def _completion_popup_visible(self) -> bool:
+        return self._completer is not None and self._completer.popup().isVisible()
+
+    def _hide_completion(self):
+        if self._completer is not None:
+            self._completer.popup().hide()
+        self._completion_model.setStringList([])
+        self._completion_items = {}
+
+    def _ensure_completer(self) -> QCompleter:
+        if self._completer is None:
+            self._completer = QCompleter(self._completion_model, self)
+            self._completer.setWidget(self)
+            self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+            self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            self._completer.setWrapAround(False)
+            self._completer.activated[str].connect(self._insert_completion)
+        return self._completer
 
     def _update_line_number_area_width(self, _block_count):
         self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
@@ -514,7 +681,27 @@ class _FileTextEdit(QPlainTextEdit):
             selection.cursor.clearSelection()
             selections.append(selection)
 
+        diagnostics_by_line = self._diagnostics_by_line()
+        for line, diagnostics in sorted(diagnostics_by_line.items()):
+            block = self.document().findBlockByNumber(line - 1)
+            if not block.isValid():
+                continue
+            selection = QTextEdit.ExtraSelection()
+            color = _diagnostic_color(diagnostics[0].severity)
+            color.setAlpha(28)
+            selection.format.setBackground(color)
+            selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+            selection.cursor = QTextCursor(block)
+            selection.cursor.clearSelection()
+            selections.append(selection)
+
         self.setExtraSelections(selections)
+
+    def _diagnostics_by_line(self) -> dict[int, list[Diagnostic]]:
+        by_line: dict[int, list[Diagnostic]] = {}
+        for diagnostic in self._diagnostics:
+            by_line.setdefault(max(1, diagnostic.line), []).append(diagnostic)
+        return by_line
 
 
 class _MarkdownPreview(QTextBrowser):
@@ -581,6 +768,9 @@ class _TextFileTab(QWidget):
         self._editable = self._file_backed and editable
         self._markdown = self._file_backed and Path(path).suffix.lower() in _MARKDOWN_EXTS
         self._read_only_reason = read_only_reason
+        self._diagnostics: list[Diagnostic] = []
+        self._language_errors: list[str] = []
+        self._completion_provider = LanguageCompletionProvider(self._repo_root)
         self._auto_save = auto_save
         self._dirty = False
         self._rendering = False
@@ -793,6 +983,8 @@ class _TextFileTab(QWidget):
         self._rendering = True
         self._editor.blockSignals(True)
         self._editor.configure_syntax(self._lang_hint, self._content)
+        self._completion_provider = LanguageCompletionProvider(self._repo_root)
+        self._editor.configure_completion(self._path, self._completion_provider)
         if self._editor.toPlainText() != self._content:
             self._editor.setPlainText(self._content)
         if self._is_markdown_preview():
@@ -802,18 +994,21 @@ class _TextFileTab(QWidget):
             self._minimap.hide()
             self._editor.setReadOnly(True)
             self._editor.set_changed_lines(set())
+            self._set_diagnostics([])
         elif self._is_showing_diff():
             self._preview.hide()
             self._editor.show()
             self._minimap.show()
             self._editor.setReadOnly(True)
             self._editor.set_changed_lines(changed_new_line_numbers(self._diff_text or ""))
+            self._set_diagnostics([])
         else:
             self._preview.hide()
             self._editor.show()
             self._minimap.show()
             self._editor.set_changed_lines(set())
             self._editor.setReadOnly(not (self._editable and self._edit_mode))
+            self._refresh_diagnostics()
         self._editor.blockSignals(False)
         self._rendering = False
         self._sync_actions()
@@ -913,6 +1108,7 @@ class _TextFileTab(QWidget):
             self._diff_text = diff_against_head(self._repo_root, self._path)
             self._diff_toggle.setVisible(self._diff_text is not None)
         if auto:
+            self._refresh_diagnostics()
             self._sync_actions()
         else:
             self._render()
@@ -956,6 +1152,12 @@ class _TextFileTab(QWidget):
         elif self._is_markdown_preview():
             self._set_status("Markdown preview")
         elif (
+            self._diagnostics
+            and not self._dirty
+            and self._status.text() not in ("Saved", "Auto-saved")
+        ):
+            self._set_status(_diagnostic_summary(self._diagnostics))
+        elif (
             self._editable
             and not self._edit_mode
             and not self._dirty
@@ -968,6 +1170,18 @@ class _TextFileTab(QWidget):
     def _set_status(self, text: str):
         self._status.setText(text)
         self._status.setVisible(bool(text))
+
+    def _refresh_diagnostics(self):
+        if not self._file_backed:
+            self._set_diagnostics([])
+            return
+        diagnostics, errors = language_diagnostics(self._repo_root, self._path, self._content)
+        self._language_errors = errors
+        self._set_diagnostics(diagnostics)
+
+    def _set_diagnostics(self, diagnostics: list[Diagnostic]):
+        self._diagnostics = list(diagnostics)
+        self._editor.set_diagnostics(self._diagnostics)
 
     def _set_dirty(self, dirty: bool):
         if self._dirty == dirty:
@@ -1196,6 +1410,29 @@ def _find_match_status(text: str, folded_query: str, pos: int) -> str:
         return "No matches"
     current = starts.index(pos) + 1 if pos in starts else 1
     return f"{current} of {len(starts)}"
+
+
+def _diagnostic_color(severity: str) -> QColor:
+    return QColor({
+        "error": "#ef4444",
+        "warning": "#f59e0b",
+        "hint": "#60a5fa",
+        "info": ACCENT,
+    }.get(str(severity or "info").lower(), ACCENT))
+
+
+def _diagnostic_summary(diagnostics: list[Diagnostic]) -> str:
+    count = len(diagnostics)
+    errors = sum(1 for item in diagnostics if item.severity == "error")
+    warnings = sum(1 for item in diagnostics if item.severity == "warning")
+    plural = "s" if count != 1 else ""
+    if errors and warnings:
+        return f"{count} problem{plural} ({errors} errors, {warnings} warnings)"
+    if errors:
+        return f"{count} problem{plural} ({errors} error{'s' if errors != 1 else ''})"
+    if warnings:
+        return f"{count} problem{plural} ({warnings} warning{'s' if warnings != 1 else ''})"
+    return f"{count} problem{plural}"
 
 
 def _read_text_preview(path: str) -> str:

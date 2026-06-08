@@ -20,7 +20,7 @@ Keep measured coverage **~91%+** (gate is 90%). A single-file/IDE run is not a v
 
 - Small diffs; match existing patterns.
 - Tool paths must stay in the workspace (`services/tool_policy.py`).
-- Extensions: `register(registry)` in `.aichs/extensions/*.py`.
+- Extensions: `register(registry)` in `.aichs/extensions/*.py` or `.aichs/extensions/*/extension.py`.
 - Do not commit or push unless asked.
 
 ## Docs
