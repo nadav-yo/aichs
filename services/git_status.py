@@ -9,6 +9,17 @@ from services.subprocess_utils import run_no_window
 
 
 @dataclass(frozen=True)
+class GitCommandResult:
+    returncode: int
+    stdout: str
+    stderr: str
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0
+
+
+@dataclass(frozen=True)
 class GitFileChange:
     code: str
     label: str
@@ -30,6 +41,54 @@ def run_git(cmd: list[str], cwd: str, timeout: float = 5) -> str:
         return (r.stdout or "").strip()
     except Exception:
         return ""
+
+
+def run_git_command(cmd: list[str], cwd: str, timeout: float = 60) -> GitCommandResult:
+    try:
+        r = run_no_window(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+        return GitCommandResult(
+            returncode=r.returncode,
+            stdout=(r.stdout or "").strip(),
+            stderr=(r.stderr or "").strip(),
+        )
+    except Exception as e:
+        return GitCommandResult(returncode=1, stdout="", stderr=str(e))
+
+
+def count_commits_to_push(repo_path: str) -> int:
+    """Return local commits ahead of the configured upstream branch."""
+    if not is_git_repo(repo_path):
+        return 0
+    upstream = run_git(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], repo_path)
+    if not upstream:
+        return 0
+    raw = run_git(["git", "rev-list", "--count", "@{u}..HEAD"], repo_path)
+    try:
+        return max(0, int(raw.strip()))
+    except (TypeError, ValueError):
+        return 0
+
+
+def count_commits_to_pull(repo_path: str) -> int:
+    """Return upstream commits not yet in HEAD, using local tracking info."""
+    if not is_git_repo(repo_path):
+        return 0
+    upstream = run_git(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], repo_path)
+    if not upstream:
+        return 0
+    raw = run_git(["git", "rev-list", "--count", "HEAD..@{u}"], repo_path)
+    try:
+        return max(0, int(raw.strip()))
+    except (TypeError, ValueError):
+        return 0
 
 
 def is_git_repo(repo_path: str) -> bool:

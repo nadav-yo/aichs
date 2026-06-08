@@ -30,6 +30,16 @@ def test_diff_to_html_empty():
     assert "(no differences)" in html
 
 
+def test_diff_to_html_uses_requested_theme_for_delete_background():
+    light = diff_to_html("-removed\n", theme="light")
+    dark = diff_to_html("-removed\n", theme="dark")
+    modern = diff_to_html("-removed\n", theme="modern")
+
+    assert "background:#fef2f2" in light
+    assert "background:#2a1518" in dark
+    assert "background:#2a1518" in modern
+
+
 def test_changed_new_line_numbers():
     assert _changed_new_line_numbers(SAMPLE_DIFF) == {2}
 

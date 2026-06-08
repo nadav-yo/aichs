@@ -1,13 +1,17 @@
 import shutil
+import subprocess
 
 import pytest
 
 from services.git_status import (
     GitFileChange,
+    count_commits_to_pull,
+    count_commits_to_push,
     is_git_repo,
     list_file_changes,
     parse_status_line,
     run_git,
+    run_git_command,
 )
 
 
@@ -49,3 +53,78 @@ class TestGitRepo:
 
     def test_run_git_returns_empty_on_failure(self, workspace):
         assert run_git(["git", "not-a-command"], str(workspace)) == ""
+
+    def test_run_git_command_returns_failure_detail(self, workspace):
+        result = run_git_command(["git", "not-a-command"], str(workspace))
+        assert not result.ok
+        assert result.returncode != 0
+
+    def test_count_commits_to_push_without_upstream(self, git_repo):
+        assert count_commits_to_push(str(git_repo)) == 0
+        assert count_commits_to_pull(str(git_repo)) == 0
+
+    def test_count_commits_to_push_with_ahead_commit(self, git_repo, tmp_path):
+        remote = tmp_path / "remote.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+
+        def git(*args: str) -> None:
+            subprocess.run(
+                ["git", *args],
+                cwd=git_repo,
+                check=True,
+                capture_output=True,
+            )
+
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        git("remote", "add", "origin", str(remote))
+        git("push", "-u", "origin", branch)
+        assert count_commits_to_push(str(git_repo)) == 0
+
+        main = git_repo / "src" / "main.py"
+        main.write_text("print('ahead')\n", encoding="utf-8")
+        git("add", "src/main.py")
+        git("commit", "-m", "ahead")
+
+        assert count_commits_to_push(str(git_repo)) == 1
+
+    def test_count_commits_to_pull_uses_fetched_tracking_info(self, git_repo, tmp_path):
+        remote = tmp_path / "remote.git"
+        clone = tmp_path / "clone"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+
+        def git(cwd, *args: str) -> None:
+            subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                check=True,
+                capture_output=True,
+            )
+
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        git(git_repo, "remote", "add", "origin", str(remote))
+        git(git_repo, "push", "-u", "origin", branch)
+        subprocess.run(["git", "clone", str(remote), str(clone)], check=True, capture_output=True)
+        git(clone, "config", "user.email", "test@example.com")
+        git(clone, "config", "user.name", "Test User")
+        (clone / "src" / "main.py").write_text("print('remote')\n", encoding="utf-8")
+        git(clone, "add", "src/main.py")
+        git(clone, "commit", "-m", "remote")
+        git(clone, "push")
+
+        assert count_commits_to_pull(str(git_repo)) == 0
+        git(git_repo, "fetch", "origin")
+        assert count_commits_to_pull(str(git_repo)) == 1

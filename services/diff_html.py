@@ -13,7 +13,7 @@ def diff_to_html(unified_diff: str, theme: str | None = None) -> str:
     bg = p["BG3"]
     add_bg = p["SUCCESS_BG"]
     add_fg = p["SUCCESS"]
-    del_bg = "#2a1518" if current_theme() != "light" else "#fef2f2"
+    del_bg = "#fef2f2" if _theme_name(theme) == "light" else "#2a1518"
     del_fg = "#f87171"
     meta = p["TEXT_DIM"]
 
@@ -71,6 +71,10 @@ def inline_new_file_diff_to_html(
         f'<pre style="font-family:{MONO_FONT_CSS}; font-size:{fs}px; line-height:1.5;'
         f'margin:0; padding:12px; background:{bg};">{body}</pre>'
     )
+
+
+def _theme_name(theme: str | None = None) -> str:
+    return theme or current_theme()
 
 
 def _changed_new_line_numbers(unified_diff: str) -> set[int]:

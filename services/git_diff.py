@@ -4,10 +4,20 @@ from __future__ import annotations
 
 import difflib
 import os
+import shlex
+from dataclasses import dataclass
 
 from config import MAX_FILE_PREVIEW_BYTES
 from services.git_status import GitFileChange, is_git_repo, list_file_changes, run_git
 from services.subprocess_utils import run_no_window
+
+
+@dataclass(frozen=True)
+class FileDiff:
+    path: str
+    diff: str
+    added: int
+    removed: int
 
 
 def _run_git(cmd: list[str], cwd: str) -> tuple[int, str]:
@@ -125,3 +135,72 @@ def diff_against_head(repo_path: str, abs_path: str) -> str | None:
     else:
         text = _unified(old, new, rel)
     return text or None
+
+
+def commit_diff(repo_path: str, commit_hash: str) -> str | None:
+    """
+    Unified diff for a committed change.
+    Returns None if the repo or commit cannot be read.
+    """
+    sha = str(commit_hash or "").strip()
+    if not sha or not is_git_repo(repo_path):
+        return None
+
+    code, _ = _run_git(["git", "show", "--no-patch", "--format=%H", sha], repo_path)
+    if code != 0:
+        return None
+
+    code, patch = _run_git(
+        ["git", "show", "--format=", "--no-color", "--patch", sha],
+        repo_path,
+    )
+    if code != 0:
+        return None
+    return patch
+
+
+def split_diff_by_file(unified_diff: str) -> list[FileDiff]:
+    """Split a git unified diff into per-file chunks."""
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    for line in str(unified_diff or "").splitlines():
+        if line.startswith("diff --git ") and current:
+            chunks.append(current)
+            current = []
+        current.append(line)
+    if current:
+        chunks.append(current)
+
+    files: list[FileDiff] = []
+    for chunk in chunks:
+        text = "\n".join(chunk)
+        path = _diff_chunk_path(chunk)
+        added = sum(1 for line in chunk if line.startswith("+") and not line.startswith("+++"))
+        removed = sum(1 for line in chunk if line.startswith("-") and not line.startswith("---"))
+        files.append(FileDiff(path=path, diff=text, added=added, removed=removed))
+    return files
+
+
+def _diff_chunk_path(lines: list[str]) -> str:
+    for prefix in ("+++ ", "--- "):
+        for line in lines:
+            if line.startswith(prefix):
+                path = line[len(prefix):].strip()
+                if path != "/dev/null":
+                    return _strip_diff_path_prefix(path)
+
+    first = lines[0] if lines else ""
+    try:
+        parts = shlex.split(first)
+    except ValueError:
+        parts = first.split()
+    if len(parts) >= 4 and parts[0] == "diff" and parts[1] == "--git":
+        return _strip_diff_path_prefix(parts[3])
+    return "(unknown file)"
+
+
+def _strip_diff_path_prefix(path: str) -> str:
+    path = path.strip().strip('"')
+    if path.startswith(("a/", "b/")):
+        return path[2:]
+    return path

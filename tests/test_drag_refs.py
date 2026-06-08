@@ -1,3 +1,5 @@
+import pytest
+
 from services.chat_drag import (
     AICHS_CHAT_DROP_MIME,
     AICHS_COMMIT_DROP_MIME,
@@ -12,7 +14,11 @@ from services.chat_drag import (
     parse_commit_drop,
     parse_file_drop,
 )
-from ui.widgets.git_panel import GitPanel
+from PyQt6.QtWidgets import QLabel, QListWidget, QTextBrowser
+
+from storage.settings import SettingsStore
+from ui.theme import palette
+from ui.widgets.git_panel import GitPanel, _CommitDiffDialog
 from ui.widgets.left_panel import FileTree
 from ui.widgets.conversation_panel import ConversationPanel
 
@@ -42,6 +48,83 @@ def test_git_log_drags_commit_reference(qapp, git_repo):
     assert commits[0]["subject"] == "initial"
     assert mime.text().startswith("commit ")
     assert "initial" in mime.text()
+
+
+def test_git_log_double_click_opens_commit_diff(qapp, git_repo, monkeypatch):
+    panel = GitPanel(str(git_repo))
+    item = panel.log.item(0)
+    calls = []
+
+    def fake_commit_diff(repo_path, commit_hash):
+        calls.append(("diff", repo_path, commit_hash))
+        return "@@ diff\n-old\n+new\n"
+
+    def fake_show(short_hash, subject, diff_text):
+        calls.append(("show", short_hash, subject, diff_text))
+
+    monkeypatch.setattr("ui.widgets.git_panel.commit_diff", fake_commit_diff)
+    monkeypatch.setattr(panel, "_show_commit_diff_dialog", fake_show)
+
+    panel.log.itemDoubleClicked.emit(item)
+
+    assert calls[0][0] == "diff"
+    assert calls[0][1] == str(git_repo)
+    assert len(calls[0][2]) >= 7
+    assert calls[1] == ("show", item.text().split(" ", 1)[0], "initial", "@@ diff\n-old\n+new\n")
+
+
+def test_commit_diff_dialog_uses_file_list_and_single_diff_viewer(qapp):
+    diff = "\n".join([
+        "diff --git a/src/main.py b/src/main.py",
+        "index 111..222 100644",
+        "--- a/src/main.py",
+        "+++ b/src/main.py",
+        "@@ -1 +1 @@",
+        "-old",
+        "+new",
+        "diff --git a/README.md b/README.md",
+        "index 333..444 100644",
+        "--- a/README.md",
+        "+++ b/README.md",
+        "@@ -0,0 +1 @@",
+        "+hello",
+    ])
+    dlg = _CommitDiffDialog("abc1234", "files", diff)
+
+    file_list = dlg.findChild(QListWidget, "commitFileList")
+    viewers = dlg.findChildren(QTextBrowser)
+    summary = dlg.findChild(QLabel, "commitSummary")
+
+    assert summary.text() == "2 files changed  +2 -1"
+    assert file_list is not None
+    assert [file_list.item(row).text() for row in range(file_list.count())] == [
+        "src/main.py (+1 -1)",
+        "README.md (+1)",
+    ]
+    assert len(viewers) == 1
+    assert "old" in viewers[0].toPlainText()
+    file_list.setCurrentRow(1)
+    assert "hello" in viewers[0].toPlainText()
+
+
+@pytest.mark.parametrize("theme_name", ["dark", "light", "modern"])
+def test_commit_diff_dialog_uses_active_theme(qapp, theme_name):
+    SettingsStore().update({"theme": theme_name})
+    dlg = _CommitDiffDialog(
+        "abc1234",
+        "theme check",
+        "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+    )
+    p = palette(theme_name)
+
+    css = dlg.styleSheet()
+    viewer = dlg.findChild(QTextBrowser, "commitDiffViewer")
+
+    assert p["BG2"] in css
+    assert p["BG3"] in css
+    assert p["BORDER"] in css
+    assert viewer is not None
+    assert p["BG3"] in viewer.toHtml()
 
 
 def test_conversation_list_drags_chat_reference(qapp, store):
