@@ -367,6 +367,23 @@ class TestSearchProjectChats:
         assert "Unscoped note" not in out
         assert "current workspace" in out
 
+    def test_search_project_chats_ignores_trashed_chat(self, cwd, workspace):
+        store = ConversationStore(cwd)
+        path = store.save("trashed", {
+            "id": "trashed",
+            "title": "Playwright trash",
+            "created_at": "2026-01-01T10:00:00",
+            "updated_at": "2026-01-01T11:00:00",
+            "cwd": str(workspace),
+            "messages": [{"role": "user", "content": "playwright in trash"}],
+        })
+        store.delete(str(path))
+
+        out = execute("search_project_chats", {"query": "playwright"}, cwd)
+
+        assert "Playwright trash" not in out
+        assert "no saved conversations" in out or "no matches" in out
+
     def test_search_project_chats_ignores_global_unscoped(self, cwd, tmp_path, monkeypatch):
         conv_dir = tmp_path / "conversations"
         conv_dir.mkdir()

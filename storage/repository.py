@@ -2,11 +2,12 @@ import json
 import os
 import re
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from config import AICHS_HOME, CONV_DIR, WORKSPACES_PATH
 from services.content import is_visible_message
+from storage.settings import SettingsStore, trash_retention_days
 
 
 class ConversationStore:
@@ -18,9 +19,16 @@ class ConversationStore:
             if self.workspace
             else CONV_DIR
         )
+        self.trash_dir = (
+            workspace_trash_dir(self.workspace)
+            if self.workspace
+            else AICHS_HOME / "trash"
+        )
         self.conv_dir.mkdir(parents=True, exist_ok=True)
+        self.trash_dir.mkdir(parents=True, exist_ok=True)
         if self.workspace:
             _register_workspace(self.workspace, self.workspace_id)
+        self.prune_trash()
         _prune_leaked_test_conversations()
 
     def list_all(self) -> list[tuple[Path, dict]]:
@@ -49,7 +57,62 @@ class ConversationStore:
         return json.loads(Path(path).read_text())
 
     def delete(self, path: str) -> None:
-        Path(path).unlink(missing_ok=True)
+        source = Path(path)
+        if not source.exists():
+            return
+        data = self.load(str(source))
+        conv_id = str(data.get("id") or source.stem)
+        data["id"] = conv_id
+        data["deleted_at"] = datetime.now().isoformat()
+        data["deleted_from"] = str(source)
+        self.trash_dir.mkdir(parents=True, exist_ok=True)
+        target = _available_path(self.trash_dir / f"{conv_id}.json")
+        target.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        source.unlink(missing_ok=True)
+
+    def list_trash(self) -> list[tuple[Path, dict]]:
+        self.prune_trash()
+        records: list[tuple[Path, dict]] = []
+        for path in sorted(self.trash_dir.glob("*.json")):
+            data = _load_json(path)
+            if data is None:
+                continue
+            summary = _summary(data)
+            summary["id"] = summary.get("id") or path.stem
+            summary["deleted_at"] = data.get("deleted_at", "")
+            records.append((path, summary))
+        return sorted(
+            records,
+            key=lambda item: item[1].get("deleted_at") or item[1].get("updated_at", ""),
+            reverse=True,
+        )
+
+    def restore(self, path: str) -> Path:
+        source = Path(path)
+        data = self.load(str(source))
+        conv_id = str(data.get("id") or source.stem)
+        data.pop("deleted_at", None)
+        data.pop("deleted_from", None)
+        restored = self.save(conv_id, data)
+        source.unlink(missing_ok=True)
+        return restored
+
+    def prune_trash(self, retention_days: int | None = None) -> int:
+        if retention_days is None:
+            retention_days = trash_retention_days(SettingsStore().load())
+        cutoff = datetime.now() - timedelta(days=trash_retention_days({
+            "trash_retention_days": retention_days,
+        }))
+        removed = 0
+        for path in list(self.trash_dir.glob("*.json")):
+            data = _load_json(path)
+            deleted_at = _parse_datetime((data or {}).get("deleted_at"))
+            if deleted_at is None:
+                continue
+            if deleted_at <= cutoff:
+                path.unlink(missing_ok=True)
+                removed += 1
+        return removed
 
     def save(self, conv_id: str, data: dict) -> Path:
         data["id"] = conv_id
@@ -144,6 +207,10 @@ def workspace_conversations_dir(workspace: str | Path) -> Path:
     return workspace_data_dir(workspace) / "conversations"
 
 
+def workspace_trash_dir(workspace: str | Path) -> Path:
+    return workspace_data_dir(workspace) / "trash"
+
+
 def project_conversation_records(cwd: str) -> list[tuple[Path, dict]]:
     return ConversationStore(cwd).iter_records()
 
@@ -175,6 +242,25 @@ def _load_json(path: Path) -> dict | None:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
+        return None
+
+
+def _available_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    for idx in range(1, 10_000):
+        candidate = path.with_name(f"{stem}-{idx}{suffix}")
+        if not candidate.exists():
+            return candidate
+    return path.with_name(f"{stem}-{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}{suffix}")
+
+
+def _parse_datetime(value) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
         return None
 
 

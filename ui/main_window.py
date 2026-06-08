@@ -62,7 +62,7 @@ class MainWindow(QMainWindow):
 
         self._inner = QSplitter(Qt.Orientation.Vertical)
 
-        self._viewer = FileViewerPanel(repo)
+        self._viewer = FileViewerPanel(repo, settings=self._settings)
         self._viewer.hide()
         self._viewer.all_closed.connect(self._close_file)
 
@@ -182,6 +182,7 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app:
             apply_app_theme(app, current_theme())
+        self._viewer.reload_settings()
         self._left.apply_appearance()
         self._chat.refresh_models()
         self._chat.apply_appearance()

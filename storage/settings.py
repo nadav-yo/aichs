@@ -4,10 +4,23 @@ import os
 from config import SETTINGS_PATH
 
 
+FILE_EDITOR_AUTO_SAVE_KEY = "file_editor_auto_save"
+TRASH_RETENTION_DAYS_KEY = "trash_retention_days"
+DEFAULT_TRASH_RETENTION_DAYS = 14
+
 _LEGACY_PROVIDER_KEYS = {
     "claude": "anthropic_api_key",
     "openai": "openai_api_key",
 }
+
+
+def trash_retention_days(data: dict | None) -> int:
+    data = data if isinstance(data, dict) else {}
+    try:
+        days = int(data.get(TRASH_RETENTION_DAYS_KEY, DEFAULT_TRASH_RETENTION_DAYS))
+    except (TypeError, ValueError):
+        days = DEFAULT_TRASH_RETENTION_DAYS
+    return max(1, min(3650, days))
 
 
 class SettingsStore:

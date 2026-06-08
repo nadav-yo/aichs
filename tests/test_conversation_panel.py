@@ -1,4 +1,10 @@
-from ui.widgets.conversation_panel import ConversationItem, ConversationPanel, TitleLabel
+from ui.widgets.conversation_panel import (
+    _ROLE_TRASH_HEADER,
+    ConversationItem,
+    ConversationPanel,
+    TrashHeader,
+    TitleLabel,
+)
 
 
 def test_title_label_single_line_elide(qapp):
@@ -79,3 +85,43 @@ def test_refresh_clears_editing_item(store, qapp):
     panel._editing_item = widget
     panel.refresh()
     assert panel._editing_item is None
+
+
+def test_trash_section_is_hidden_until_needed(store, qapp):
+    panel = ConversationPanel(store)
+
+    assert panel.list.count() == 0
+
+
+def test_trash_section_expands_and_restores_chat(store, qapp):
+    path = store.save(
+        "panel_trash",
+        {
+            "id": "panel_trash",
+            "title": "Trashed",
+            "messages": [],
+            "updated_at": "2026-02-01T12:00:00",
+        },
+    )
+    panel = ConversationPanel(store)
+    panel._delete(str(path))
+    qapp.processEvents()
+
+    assert panel.list.count() == 1
+    header = panel.list.item(0)
+    assert header.data(_ROLE_TRASH_HEADER) is True
+    header_widget = panel.list.itemWidget(header)
+    assert isinstance(header_widget, TrashHeader)
+    assert header_widget.title_lbl.text() == "Trash"
+    assert header_widget.count_lbl.text() == "1"
+    assert header_widget.minimumWidth() >= 140
+    assert header.sizeHint().height() == header_widget.height()
+    header_widget.clicked.emit()
+    qapp.processEvents()
+
+    widget = panel.list.itemWidget(panel.list.item(1))
+    assert not widget.restore_btn.isHidden()
+    widget.restore_btn.click()
+
+    assert store.list_trash() == []
+    assert [summary["id"] for _, summary in store.list_all()] == ["panel_trash"]

@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -51,6 +52,34 @@ class TestConversationStore:
         path = store.save("x", _sample_conv("x"))
         store.delete(str(path))
         assert store.list_all() == []
+        trashed = store.list_trash()
+        assert len(trashed) == 1
+        assert trashed[0][1]["id"] == "x"
+        assert trashed[0][1]["deleted_at"]
+
+    def test_restore_deleted_conversation(self, store):
+        path = store.save("x", _sample_conv("x"))
+        store.delete(str(path))
+        trash_path = store.list_trash()[0][0]
+
+        restored = store.restore(str(trash_path))
+
+        assert restored.exists()
+        assert store.load(str(restored))["title"] == "First chat"
+        assert "deleted_at" not in store.load(str(restored))
+        assert store.list_trash() == []
+        assert [summary["id"] for _, summary in store.list_all()] == ["x"]
+
+    def test_prune_trash_removes_expired_conversations(self, store):
+        path = store.save("old", _sample_conv("old"))
+        store.delete(str(path))
+        trash_path = store.list_trash()[0][0]
+        data = json.loads(trash_path.read_text(encoding="utf-8"))
+        data["deleted_at"] = (datetime.now() - timedelta(days=15)).isoformat()
+        trash_path.write_text(json.dumps(data), encoding="utf-8")
+
+        assert store.prune_trash(retention_days=14) == 1
+        assert store.list_trash() == []
 
     def test_rename(self, store):
         path = store.save("x", _sample_conv("x"))

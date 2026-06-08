@@ -1,5 +1,9 @@
 import services.model_registry as reg
-from storage.settings import SettingsStore
+from storage.settings import (
+    FILE_EDITOR_AUTO_SAVE_KEY,
+    TRASH_RETENTION_DAYS_KEY,
+    SettingsStore,
+)
 from ui.widgets.settings_dialog import SettingsDialog, _ProviderDialog
 from ui.widgets.chat_panel import ChatPanel
 from PyQt6.QtWidgets import QAbstractItemView
@@ -162,6 +166,28 @@ def test_model_order_list_disables_without_provider(qapp):
 
     assert not dialog.model_order_list.isEnabled()
     assert dialog.model_order_list.count() == 0
+
+
+def test_file_editor_auto_save_setting_is_saved(qapp):
+    store = SettingsStore()
+    dialog = SettingsDialog(store)
+
+    assert dialog.file_editor_auto_save_check.isChecked() is False
+    dialog.file_editor_auto_save_check.setChecked(True)
+    dialog._save()
+
+    assert store.load()[FILE_EDITOR_AUTO_SAVE_KEY] is True
+
+
+def test_trash_retention_setting_is_saved(qapp):
+    store = SettingsStore()
+    dialog = SettingsDialog(store)
+
+    assert dialog.trash_retention_spin.value() == 14
+    dialog.trash_retention_spin.setValue(30)
+    dialog._save()
+
+    assert store.load()[TRASH_RETENTION_DAYS_KEY] == 30
 
 
 def test_provider_order_drag_is_saved_and_reloaded(qapp, monkeypatch):

@@ -301,7 +301,7 @@ class LeftPanel(QWidget):
         tabs = QTabWidget()
         self._tabs = tabs
 
-        self._conv = ConversationPanel(store)
+        self._conv = ConversationPanel(store, settings=self._settings)
         self._conv.selected.connect(self.selected)
         self._conv.new_chat.connect(self.new_chat)
         self._conv.renamed.connect(self.renamed)

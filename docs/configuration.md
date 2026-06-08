@@ -11,6 +11,7 @@ Settings are stored in `~/.aichs/settings.json` (written by **Settings** in the 
 | `default_models` | Default model per provider |
 | `theme` | `"dark"`, `"modern"`, or `"light"` |
 | `font_size` | Chat font size (pt) |
+| `trash_retention_days` | Days to keep deleted chats in Trash before permanent removal (default 14) |
 | `compaction.reserve_tokens` | Optional. Tokens held back for the next reply before auto-compaction (omit to scale from each model's context window) |
 | `compaction.keep_recent_tokens` | Optional. Recent message tokens to keep verbatim when compacting (omit to scale automatically) |
 

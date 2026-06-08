@@ -10,6 +10,7 @@ from PyQt6.QtCore import Qt, QSize, pyqtSignal, QEvent, QMimeData
 from PyQt6.QtGui import QAction, QDrag, QFontMetrics, QPainter, QPalette
 
 from storage.repository import ConversationStore
+from storage.settings import SettingsStore, trash_retention_days
 from services.chat_drag import AICHS_CHAT_DROP_MIME, chat_drop_payload, chat_drop_text
 from services.export import export_conversation_file
 from ui.theme import (
@@ -20,6 +21,8 @@ from ui.theme import (
 _ROLE_PATH = Qt.ItemDataRole.UserRole
 _ROLE_CONV_ID = Qt.ItemDataRole.UserRole + 1
 _ROLE_TITLE = Qt.ItemDataRole.UserRole + 2
+_ROLE_TRASH_HEADER = Qt.ItemDataRole.UserRole + 3
+_TRASH_HEADER_HEIGHT = 48
 
 
 class TitleLabel(QLabel):
@@ -98,18 +101,21 @@ class RenameEdit(QLineEdit):
 
 class ConversationItem(QWidget):
     delete_requested = pyqtSignal()
+    restore_requested = pyqtSignal()
     rename_requested = pyqtSignal(str)
     pin_requested    = pyqtSignal()
     export_requested = pyqtSignal()
     edit_started     = pyqtSignal(object)
 
-    def __init__(self, title: str, date_str: str, pinned: bool = False, parent=None):
+    def __init__(self, title: str, date_str: str, pinned: bool = False,
+                 trashed: bool = False, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._context_menu)
         self._title = title
         self._pinned = pinned
+        self._trashed = trashed
         self._drag_start = None
         self._drag_data: dict | None = None
 
@@ -147,9 +153,16 @@ class ConversationItem(QWidget):
         self.del_btn = QLabel("✕")
         self.del_btn.setFixedSize(18, 18)
         self.del_btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.del_btn.setToolTip("Move to trash")
         self.del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.del_btn.mousePressEvent = lambda e: self.delete_requested.emit()
         row.addWidget(self.del_btn)
+
+        self.restore_btn = QPushButton("Restore")
+        self.restore_btn.setFixedHeight(24)
+        self.restore_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.restore_btn.clicked.connect(self.restore_requested.emit)
+        row.addWidget(self.restore_btn)
 
         self.apply_appearance()
         self._sync_delete_visibility()
@@ -170,7 +183,7 @@ class ConversationItem(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if not self._drag_data or not self._drag_start:
+        if self._trashed or not self._drag_data or not self._drag_start:
             super().mouseMoveEvent(event)
             return
         if not event.buttons() & Qt.MouseButton.LeftButton:
@@ -213,11 +226,19 @@ class ConversationItem(QWidget):
             f"QLabel {{ color:{p['TEXT_DIM']}; background:transparent; font-size:{icon_fs}px; }}"
             "QLabel:hover { color:#ff5555; }"
         )
+        self.restore_btn.setStyleSheet(
+            f"QPushButton {{ background:{p['BG3']}; color:{p['TEXT']};"
+            f"border:1px solid {p['BORDER']}; border-radius:6px; padding:2px 8px;"
+            f"font-size:{max(10, meta)}px; }}"
+            f"QPushButton:hover {{ background:{p['BORDER']}; }}"
+        )
         self.title_lbl.update()
         self._sync_delete_visibility()
 
     def _sync_delete_visibility(self):
-        self.del_btn.setVisible(not self._pinned)
+        self.pin_btn.setVisible(not self._trashed)
+        self.del_btn.setVisible(not self._pinned and not self._trashed)
+        self.restore_btn.setVisible(self._trashed)
 
     def _start_edit(self):
         self.edit_started.emit(self)
@@ -249,6 +270,12 @@ class ConversationItem(QWidget):
 
     def _context_menu(self, pos):
         menu = QMenu(self)
+        if self._trashed:
+            restore = QAction("Restore", self)
+            restore.triggered.connect(self.restore_requested.emit)
+            menu.addAction(restore)
+            menu.exec(self.mapToGlobal(pos))
+            return
         rename = QAction("Rename", self)
         rename.triggered.connect(self._start_edit)
         menu.addAction(rename)
@@ -291,16 +318,77 @@ class _ConversationList(QListWidget):
         return mime
 
 
+class TrashHeader(QWidget):
+    clicked = pyqtSignal()
+
+    def __init__(self, count: int, expanded: bool, parent=None):
+        super().__init__(parent)
+        self._count = count
+        self._expanded = expanded
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumWidth(140)
+        self.setFixedHeight(_TRASH_HEADER_HEIGHT)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 0, 8, 0)
+        row.setSpacing(7)
+
+        self.arrow_lbl = QLabel()
+        self.arrow_lbl.setFixedWidth(14)
+        self.arrow_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row.addWidget(self.arrow_lbl)
+
+        self.title_lbl = QLabel("Trash")
+        self.title_lbl.setMinimumWidth(54)
+        row.addWidget(self.title_lbl, 1)
+
+        self.count_lbl = QLabel()
+        self.count_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.count_lbl)
+
+        self.apply_appearance()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def apply_appearance(self):
+        p = palette()
+        fs = max(12, chat_font_pt() - 1)
+        meta = meta_font_pt()
+        self.setStyleSheet(
+            f"TrashHeader {{ background:{p['BG2']}; border-top:1px solid {p['BORDER']}; }}"
+            f"TrashHeader:hover {{ background:{p['BG3']}; }}"
+        )
+        self.arrow_lbl.setText("v" if self._expanded else ">")
+        self.arrow_lbl.setStyleSheet(
+            f"color:{p['TEXT_DIM']}; background:transparent; font-size:{fs}px; font-weight:700;"
+        )
+        self.title_lbl.setStyleSheet(
+            f"color:{p['TEXT']}; background:transparent; font-size:{fs}px; font-weight:600;"
+        )
+        self.count_lbl.setText(str(self._count))
+        self.count_lbl.setStyleSheet(
+            f"color:{p['TEXT_DIM']}; background:transparent; font-size:{meta}px;"
+        )
+
+
 class ConversationPanel(QWidget):
     selected = pyqtSignal(str)
     new_chat = pyqtSignal()
     renamed  = pyqtSignal(str, str)  # conv_id, title
     deleted  = pyqtSignal(str)       # conv_id
 
-    def __init__(self, store: ConversationStore, parent=None):
+    def __init__(self, store: ConversationStore, settings: SettingsStore | None = None, parent=None):
         super().__init__(parent)
         self.store = store
+        self._settings = settings or SettingsStore()
         self._editing_item = None
+        self._trash_expanded = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -354,9 +442,70 @@ class ConversationPanel(QWidget):
             widget = self.list.itemWidget(item)
             if isinstance(widget, ConversationItem):
                 widget.apply_appearance()
+            elif isinstance(widget, TrashHeader):
+                widget.apply_appearance()
 
     def _apply_filter(self):
         self.refresh()
+
+    def _trash_retention_days(self) -> int:
+        return trash_retention_days(self._settings.load())
+
+    def _toggle_trash(self):
+        self._trash_expanded = not self._trash_expanded
+        self.refresh()
+
+    def _add_trash_header(self, count: int):
+        item = QListWidgetItem()
+        item.setData(_ROLE_TRASH_HEADER, True)
+        item.setSizeHint(QSize(160, _TRASH_HEADER_HEIGHT))
+        self.list.addItem(item)
+
+        header = TrashHeader(count, self._trash_expanded)
+        header.clicked.connect(self._toggle_trash)
+        self.list.setItemWidget(item, header)
+
+    def _add_conversation_row(
+        self,
+        path: Path,
+        data: dict,
+        *,
+        today: date,
+        trashed: bool = False,
+    ) -> str:
+        title = data.get("title", "Untitled")
+        updated = data.get("deleted_at", "") if trashed else data.get("updated_at", "")
+        try:
+            dt = datetime.fromisoformat(updated)
+            date_str = dt.strftime("%H:%M") if dt.date() == today else dt.strftime("%b %d")
+        except Exception:
+            date_str = ""
+
+        item = QListWidgetItem()
+        conv_id = str(data.get("id") or Path(path).stem)
+        item.setData(_ROLE_PATH, str(path))
+        item.setData(_ROLE_CONV_ID, conv_id)
+        item.setData(_ROLE_TITLE, title)
+        item.setSizeHint(QSize(0, _conversation_item_height()))
+        self.list.addItem(item)
+
+        widget = ConversationItem(
+            title,
+            date_str,
+            pinned=data.get("pinned", False),
+            trashed=trashed,
+        )
+        if not trashed:
+            widget.set_drag_data(conv_id, title)
+            widget.delete_requested.connect(lambda p=str(path): self._delete(p))
+            widget.rename_requested.connect(lambda t, p=str(path): self._rename(p, t))
+            widget.pin_requested.connect(lambda p=str(path): self._toggle_pin(p))
+            widget.export_requested.connect(lambda p=str(path): self._export(p))
+        else:
+            widget.restore_requested.connect(lambda p=str(path): self._restore(p))
+        widget.edit_started.connect(self._on_edit_started)
+        self.list.setItemWidget(item, widget)
+        return conv_id
 
     def _on_item_clicked(self, item: QListWidgetItem):
         widget = self.list.itemWidget(item)
@@ -381,43 +530,35 @@ class ConversationPanel(QWidget):
 
         query = self.search.text().strip()
         self.list.clear()
+        self.store.prune_trash(self._trash_retention_days())
         today = date.today()
         visible = 0
+        trash_records = self.store.list_trash()
+        if not trash_records:
+            self._trash_expanded = False
 
         for path, data in self.store.list_all():
             if query and not self.store.matches_search(path, data, query):
                 continue
 
-            title = data.get("title", "Untitled")
-            updated = data.get("updated_at", "")
-            try:
-                dt = datetime.fromisoformat(updated)
-                date_str = dt.strftime("%H:%M") if dt.date() == today else dt.strftime("%b %d")
-            except Exception:
-                date_str = ""
-
-            item = QListWidgetItem()
-            conv_id = str(data.get("id") or Path(path).stem)
-            item.setData(_ROLE_PATH, str(path))
-            item.setData(_ROLE_CONV_ID, conv_id)
-            item.setData(_ROLE_TITLE, title)
-            item.setSizeHint(QSize(0, _conversation_item_height()))
-            self.list.addItem(item)
-
-            widget = ConversationItem(title, date_str, pinned=data.get("pinned", False))
-            widget.set_drag_data(conv_id, title)
-            widget.delete_requested.connect(lambda p=str(path): self._delete(p))
-            widget.rename_requested.connect(lambda t, p=str(path): self._rename(p, t))
-            widget.pin_requested.connect(lambda p=str(path): self._toggle_pin(p))
-            widget.export_requested.connect(lambda p=str(path): self._export(p))
-            widget.edit_started.connect(self._on_edit_started)
-            self.list.setItemWidget(item, widget)
+            conv_id = self._add_conversation_row(path, data, today=today)
 
             if (target_id and conv_id == target_id) or (target_path and str(path) == target_path):
-                self.list.setCurrentItem(item)
+                self.list.setCurrentItem(self.list.item(self.list.count() - 1))
 
             visible += 1
 
+        if trash_records:
+            self._add_trash_header(len(trash_records))
+            visible += 1
+            if self._trash_expanded:
+                for path, data in trash_records:
+                    if query and not self.store.matches_search(path, data, query):
+                        continue
+                    self._add_conversation_row(path, data, today=today, trashed=True)
+                    visible += 1
+
+        self.no_results.setText("No results")
         show_empty = bool(query) and visible == 0
         self.no_results.setVisible(show_empty)
         self.list.setVisible(not show_empty)
@@ -448,6 +589,10 @@ class ConversationPanel(QWidget):
             conv_id = Path(path).stem
         self.store.delete(path)
         self.deleted.emit(conv_id)
+        self.refresh()
+
+    def _restore(self, path: str):
+        self.store.restore(path)
         self.refresh()
 
     def _on_edit_started(self, item: ConversationItem):
