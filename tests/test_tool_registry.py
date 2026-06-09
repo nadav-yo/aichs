@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -130,6 +131,8 @@ def test_registry_validation_errors():
         registry.language(name="python", file_patterns=[], diagnostics=lambda ctx: [])
     with pytest.raises(ValueError, match="diagnostics, symbols, or completion"):
         registry.language(name="empty", file_patterns=["*.py"])
+    registry.language(name="fixes", file_patterns=["*.fix"], code_actions=lambda ctx: [])
+    registry.language(name="formatter", file_patterns=["*.fmt"], format_document=lambda ctx: {})
     registry.language(name="lang", file_patterns=["*.py"], diagnostics=lambda ctx: [])
     with pytest.raises(ValueError, match="language already registered"):
         registry.language(name="lang", file_patterns=["*.py"], diagnostics=lambda ctx: [])
@@ -146,6 +149,9 @@ def test_extension_language_registration(workspace):
                 file_patterns=["*.py"],
                 diagnostics=lambda ctx: [],
                 symbols=lambda ctx: [],
+                code_actions=lambda ctx: [],
+                apply_code_action=lambda ctx: {},
+                format_document=lambda ctx: {},
             )
         """,
     )
@@ -157,6 +163,9 @@ def test_extension_language_registration(workspace):
     assert languages[0].name == "python"
     assert languages[0].file_patterns == ["*.py"]
     assert languages[0].extension_id == "language"
+    assert languages[0].code_actions is not None
+    assert languages[0].apply_code_action is not None
+    assert languages[0].format_document is not None
 
 
 def test_folder_extension_entrypoint_loads_with_folder_id(workspace):
@@ -193,6 +202,103 @@ def register(registry):
     assert Path(overview.files[0].path).name == "extension.py"
     assert overview.files[0].display_name == "Folder Demo"
     assert overview.files[0].description == "Manifest description."
+
+
+def test_folder_extension_manifest_requirements_are_summarized(workspace):
+    ext_dir = workspace / ".aichs" / "extensions" / "requirements-demo"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "aichs-extension.json").write_text(
+        json.dumps({
+            "name": "Requirements Demo",
+            "requires": {
+                "executables": ["definitely-missing-aichs-tool"],
+                "python": ["json", "definitely-missing-aichs-module"],
+            },
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+    (ext_dir / "extension.py").write_text(
+        "def register(registry):\n    pass\n",
+        encoding="utf-8",
+    )
+
+    overview = extension_overview(str(workspace))
+    summary = overview.files[0]
+
+    assert summary.requirements.executables == ["definitely-missing-aichs-tool"]
+    assert summary.requirements.python == ["json", "definitely-missing-aichs-module"]
+    assert summary.missing_requirements == [
+        "executable:definitely-missing-aichs-tool",
+        "python:definitely-missing-aichs-module",
+    ]
+
+
+def test_folder_extension_manifest_requirements_accept_strings_and_dedupe(workspace):
+    ext_dir = workspace / ".aichs" / "extensions" / "string-requirements"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "aichs-extension.json").write_text(
+        json.dumps({
+            "requires": {
+                "executables": "definitely-missing-aichs-tool",
+                "python": ["json", "json", ""],
+            },
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+    (ext_dir / "extension.py").write_text(
+        "def register(registry):\n    pass\n",
+        encoding="utf-8",
+    )
+
+    summary = extension_overview(str(workspace)).files[0]
+
+    assert summary.requirements.executables == ["definitely-missing-aichs-tool"]
+    assert summary.requirements.python == ["json"]
+    assert summary.missing_requirements == ["executable:definitely-missing-aichs-tool"]
+
+
+def test_folder_extension_manifest_ignores_invalid_requirements_shape(workspace):
+    ext_dir = workspace / ".aichs" / "extensions" / "invalid-requirements"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "aichs-extension.json").write_text(
+        '{"requires": ["ruff"]}\n',
+        encoding="utf-8",
+    )
+    (ext_dir / "extension.py").write_text(
+        "def register(registry):\n    pass\n",
+        encoding="utf-8",
+    )
+
+    summary = extension_overview(str(workspace)).files[0]
+
+    assert summary.requirements.executables == []
+    assert summary.requirements.python == []
+    assert summary.missing_requirements == []
+
+
+def test_disabled_extension_manifest_requirements_are_visible(workspace):
+    ext_dir = workspace / ".aichs" / "extensions" / "disabled-requirements"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "aichs-extension.json").write_text(
+        '{"requires": {"executables": ["definitely-missing-aichs-tool"]}}\n',
+        encoding="utf-8",
+    )
+    entrypoint = ext_dir / "extension.py"
+    entrypoint.write_text(
+        "def register(registry):\n    raise RuntimeError('should not load')\n",
+        encoding="utf-8",
+    )
+    cwd = str(workspace)
+    set_extension_enabled(entrypoint, False, cwd)
+
+    overview = extension_overview(cwd)
+    summary = overview.files[0]
+
+    assert summary.status == "Disabled"
+    assert summary.requirements.executables == ["definitely-missing-aichs-tool"]
+    assert summary.missing_requirements == ["executable:definitely-missing-aichs-tool"]
 
 
 def test_runtime_command_api_callbacks():

@@ -1,5 +1,6 @@
 import copy
 import html
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -9,7 +10,7 @@ from uuid import uuid4
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QFrame,
-    QLabel, QPushButton, QComboBox, QSizePolicy,
+    QLabel, QPushButton, QComboBox, QSizePolicy, QMenu,
 )
 from PyQt6.QtCore import Qt, QPoint, QPointF, QSize, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap, QTextCursor
@@ -33,7 +34,7 @@ from services.crew import (
     summoned_members,
 )
 from services.crew_context import crew_context_window
-from services.tool_policy import ConversationToolPolicy, ToolApprovalBus
+from services.tool_policy import ConversationToolPolicy, ToolApprovalBus, path_in_repo
 from ui.widgets.tool_approval_dialog import confirm_process_start, handle_pending_approval
 from services.compaction import CompactionThread, should_compact, can_compact, _estimate_tokens
 from services.content import (
@@ -130,6 +131,8 @@ class _AssistantRun:
     rendered_chars: int = 0
     bubble: MessageBubble | None = None
     last_edit_path: str = ""
+    last_tool_name: str = ""
+    last_tool_inputs: dict = field(default_factory=dict)
     active_terminal: TerminalCard | None = None
     crew: dict | None = None
     crew_bubbles: dict[str, MessageBubble] = field(default_factory=dict)
@@ -251,6 +254,105 @@ def _tool_notice_html(text: str) -> str:
         f"<span style=\"color:{p['TEXT_DIM']};\">&nbsp;&nbsp;&middot;&nbsp;&nbsp;</span>"
         f"<span style=\"color:{p['TEXT']};\">{detail_html}</span>"
     )
+
+
+def _tool_debug_text(name: str, inputs: dict | None, output: str, cwd: str) -> str:
+    inputs = dict(inputs or {})
+    lines = [
+        f"Tool: {name}",
+        f"CWD: {cwd}",
+        "Inputs:",
+        _json_debug(inputs) if inputs else "(not captured)",
+    ]
+    if output:
+        lines.extend(["Output:", str(output)])
+    if name == "edit_file":
+        lines.extend(_edit_file_debug_lines(inputs, cwd))
+    return "\n".join(lines)
+
+
+def _edit_file_debug_lines(inputs: dict, cwd: str) -> list[str]:
+    lines = ["edit_file debug:"]
+    raw_path = str(inputs.get("path") or "")
+    if not raw_path:
+        lines.append("  path: (missing)")
+        return lines
+
+    try:
+        resolved = (Path(raw_path) if Path(raw_path).is_absolute() else Path(cwd) / raw_path).resolve()
+    except OSError as exc:
+        lines.append(f"  path resolve error: {exc}")
+        return lines
+
+    lines.append(f"  path: {raw_path}")
+    lines.append(f"  resolved: {resolved}")
+    inside = path_in_repo(resolved, cwd)
+    lines.append(f"  inside workspace: {inside}")
+    if not inside:
+        return lines
+    lines.append(f"  exists: {resolved.exists()}")
+    lines.append(f"  is file: {resolved.is_file()}")
+    if not resolved.is_file():
+        return lines
+
+    try:
+        with resolved.open("r", encoding="utf-8", errors="replace", newline="") as f:
+            current = f.read()
+    except OSError as exc:
+        lines.append(f"  read error: {exc}")
+        return lines
+
+    lines.append(f"  current size chars: {len(current)}")
+    edits = inputs.get("edits")
+    if not isinstance(edits, list):
+        lines.append("  edits: (not an edits-mode call)")
+        return lines
+    for idx, edit in enumerate(edits):
+        if not isinstance(edit, dict):
+            lines.append(f"  edits[{idx}]: non-object")
+            continue
+        old_text = edit.get("oldText")
+        if not isinstance(old_text, str):
+            lines.append(f"  edits[{idx}].oldText: non-string")
+            continue
+        exact = current.count(old_text)
+        lines.append(f"  edits[{idx}].oldText exact occurrences: {exact}")
+        newline_flexible = _newline_flexible_count(current, old_text)
+        if newline_flexible != exact:
+            lines.append(
+                f"  edits[{idx}].oldText newline-flexible occurrences: "
+                f"{newline_flexible}"
+            )
+        lines.append(f"  edits[{idx}].oldText repr: {_debug_repr(old_text)}")
+        stripped = old_text.rstrip("\r\n")
+        if stripped != old_text:
+            lines.append(
+                f"  edits[{idx}].oldText without trailing newline occurrences: "
+                f"{current.count(stripped)}"
+            )
+    return lines
+
+
+def _newline_flexible_count(current: str, old_text: str) -> int:
+    if not any(ch in old_text for ch in "\r\n"):
+        return current.count(old_text)
+    normalized_old = old_text.replace("\r\n", "\n").replace("\r", "\n")
+    pattern = "(?:\\r\\n|\\n|\\r)".join(
+        re.escape(part) for part in normalized_old.split("\n")
+    )
+    return len(list(re.finditer(pattern, current)))
+
+
+def _json_debug(value) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    except (TypeError, ValueError):
+        return repr(value)
+
+
+def _debug_repr(value: str, limit: int = 500) -> str:
+    text = repr(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 @dataclass
@@ -1520,13 +1622,18 @@ class ChatPanel(QWidget):
             bubble.finalize(bubble._copy_text)
         run.bubble = None
         self.active_bubble = None
+        run.last_tool_name = name
+        run.last_tool_inputs = copy.deepcopy(inputs)
         if name == "edit_file":
             path = inputs.get("path", "")
             run.last_edit_path = path
             self._last_edit_path = path
             if path:
                 self.file_written.emit(path)
-        self._add_tool_notice(_tool_call_notice(name, inputs, self.cwd))
+        self._add_tool_notice(
+            _tool_call_notice(name, inputs, self.cwd),
+            debug_text=_tool_debug_text(name, inputs, "", self.cwd),
+        )
         if is_shell_tool(name):
             run.active_terminal = self._add_terminal_card()
             self._active_terminal = run.active_terminal
@@ -1621,7 +1728,11 @@ class ChatPanel(QWidget):
             self._active_terminal = None
         elif name == "edit_file" and output.startswith("[tool error]"):
             preview = output[:200].replace("\n", " ") + ("…" if len(output) > 200 else "")
-            self._add_tool_notice(f"Tool error: {preview[len('[tool error] '):]}")
+            inputs = run.last_tool_inputs if run.last_tool_name == name else {}
+            self._add_tool_notice(
+                f"Tool error: {preview[len('[tool error] '):]}",
+                debug_text=_tool_debug_text(name, inputs, output, self.cwd),
+            )
             run.last_edit_path = ""
             self._last_edit_path = ""
         elif name == "edit_file" and run.last_edit_path:
@@ -1632,7 +1743,11 @@ class ChatPanel(QWidget):
         elif output.startswith("[tool error]"):
             preview = output[:200].replace("\n", " ") + ("…" if len(output) > 200 else "")
             message = preview.removeprefix("[tool error]").strip()
-            self._add_tool_notice(f"Tool error: {message}")
+            inputs = run.last_tool_inputs if run.last_tool_name == name else {}
+            self._add_tool_notice(
+                f"Tool error: {message}",
+                debug_text=_tool_debug_text(name, inputs, output, self.cwd),
+            )
         self._show_post_tool_thinking(run)
 
     def _on_user_terminal_done(
@@ -2084,7 +2199,7 @@ class ChatPanel(QWidget):
         row.addStretch()
         return wrapper
 
-    def _add_tool_notice(self, text: str):
+    def _add_tool_notice(self, text: str, debug_text: str = ""):
         wrapper = QWidget()
         row = QHBoxLayout(wrapper)
         row.setContentsMargins(60, 1, 24, 1)
@@ -2092,16 +2207,33 @@ class ChatPanel(QWidget):
         lbl = QLabel(text)
         lbl.setObjectName("aichs-tool-notice")
         lbl.setProperty("aichs-tool-text", text)
+        lbl.setProperty("aichs-tool-debug-text", debug_text or text)
         lbl.setTextFormat(Qt.TextFormat.RichText)
         lbl.setText(_tool_notice_html(text))
         lbl.setWordWrap(True)
         lbl.setMaximumWidth(880)
         lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         lbl.setStyleSheet(tool_notice_style())
+        lbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        lbl.customContextMenuRequested.connect(
+            lambda pos, label=lbl: self._show_tool_notice_menu(label, pos)
+        )
         row.addWidget(lbl, 1)
         row.addStretch()
         self.msg_layout.insertWidget(self.msg_layout.count() - 1, wrapper)
         self._bottom()
+
+    def _show_tool_notice_menu(self, label: QLabel, pos):
+        text = str(label.property("aichs-tool-text") or label.text() or "")
+        debug_text = str(label.property("aichs-tool-debug-text") or text)
+        menu = QMenu(self)
+        copy_message = menu.addAction("Copy message")
+        copy_debug = menu.addAction("Copy debug info")
+        selected = menu.exec(label.mapToGlobal(pos))
+        if selected == copy_message:
+            QGuiApplication.clipboard().setText(text)
+        elif selected == copy_debug:
+            QGuiApplication.clipboard().setText(debug_text)
 
     def _add_notice(self, text: str):
         lbl = QLabel(text)

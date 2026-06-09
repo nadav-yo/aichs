@@ -55,7 +55,11 @@ Extensions can declare a short description for the Extensions dialog:
 ```json
 {
   "name": "Python Language Support",
-  "description": "Adds Python diagnostics, symbols, and completion."
+  "description": "Adds Python diagnostics, symbols, and completion.",
+  "requires": {
+    "executables": ["ruff"],
+    "python": ["tree-sitter", "tree-sitter-python"]
+  }
 }
 ```
 
@@ -70,6 +74,18 @@ def register(registry):
 For folder extensions, `aichs-extension.json` `name` is used as the display
 name in the Extensions dialog. Its `description` is the first static description
 fallback.
+
+Folder manifests can also declare runtime requirements:
+
+| Field | Description |
+|---|---|
+| `requires.executables` | Executables that should be available on `PATH`, such as `ruff`. |
+| `requires.python` | Python import/package names. Dashes are also checked as underscores, so `tree-sitter-python` maps to `tree_sitter_python`. |
+
+Requirements are read statically from the manifest, including while an extension
+is disabled or fails to load. Core records missing requirements on the extension
+summary so installers, future registries, and UI surfaces can explain degraded
+language support without executing extension code.
 
 `registry.metadata(...)` is used when the extension is loaded. If there is no
 manifest description, the module-level `EXTENSION_DESCRIPTION` constant,
@@ -374,6 +390,9 @@ def register(registry):
         diagnostics=diagnostics,
         symbols=symbols,
         completion=completion,
+        code_actions=code_actions,
+        apply_code_action=apply_code_action,
+        format_document=format_document,
     )
 
 
@@ -396,6 +415,8 @@ Language providers receive:
 | `ctx.content` | Current file text. |
 | `ctx.position` | Cursor offset when requesting completion. |
 | `ctx.prefix` | Current word prefix when requesting completion. |
+| `ctx.action_id` | Requested code action id when applying an action. |
+| `ctx.diagnostics` | Diagnostics selected for a code-action request. |
 | `ctx.extension_id` | Safe id derived from the extension filename. |
 | `ctx.storage.load_config(scope)` | Load project/global extension JSON config. |
 | `ctx.storage.save_config(data, scope)` | Save project/global extension JSON config. |
@@ -413,6 +434,9 @@ Diagnostic fields:
 | `message` | Diagnostic message. |
 | `source` | Optional source label, such as a linter name. |
 | `code` | Optional diagnostic code. |
+| `fix_available` | Optional boolean indicating whether the provider knows a fix exists. |
+| `fix_safety` | Optional: `safe`, `unsafe`, or empty when unknown. |
+| `data` / `metadata` | Optional provider-specific object, such as rule URLs. |
 
 Symbol fields:
 
@@ -425,6 +449,88 @@ Symbol fields:
 
 Completion providers may return strings or objects with `label`, `insert_text`,
 and optional `detail`.
+
+Code actions are split into listing and applying. `code_actions(ctx)` returns
+available actions for the current file or selected diagnostics:
+
+```python
+def code_actions(ctx):
+    return [{
+        "id": "ruff.fix",
+        "title": "Apply Ruff safe fixes in file",
+        "kind": "quickfix",
+        "source": "ruff",
+        "diagnostic_code": "F401",
+        "safety": "safe",
+    }]
+```
+
+Code action fields:
+
+| Field | Description |
+|---|---|
+| `id` | Stable id passed back to `apply_code_action`. |
+| `title` | Human-readable action label. |
+| `kind` | Optional action kind, such as `quickfix` or `source.fixAll`. |
+| `source` | Optional provider label. |
+| `diagnostic_code` / `code` | Optional diagnostic code the action relates to. |
+| `safety` | `safe` or `unsafe`. If omitted, `safe` defaults to true. |
+| `safe` | Backward-compatible boolean. `safety` is preferred for new extensions. |
+| `data` / `metadata` | Optional provider-specific object. |
+
+`apply_code_action(ctx)` receives `ctx.action_id`, `ctx.content`, and any
+selected `ctx.diagnostics`. It returns replacement content and/or a message:
+
+```python
+def apply_code_action(ctx):
+    if ctx.action_id != "ruff.fix":
+        return None
+    return {
+        "content": fixed_content,
+        "message": "Applied Ruff safe fixes.",
+    }
+```
+
+For backward compatibility, extensions may still implement apply behavior inside
+`code_actions(ctx)` by checking `ctx.action_id`; `apply_code_action` is preferred
+for new extensions.
+
+Document formatting is separate from lint fixes:
+
+```python
+def format_document(ctx):
+    return {
+        "content": formatted_content,
+        "message": "Formatted with Ruff.",
+    }
+```
+
+Formatting and code-action providers should return replacement text rather than
+writing files directly. Core decides when and how that text is applied or saved.
+
+Core routes language features through `services.language_features.LanguageService`.
+The module-level functions (`diagnostics`, `symbols`, `completions`,
+`code_actions`, `apply_code_action`, `format_document`, and `format_file`) remain stable
+compatibility wrappers over that service.
+
+`format_file(cwd, path, content=None)` is a core formatting command path for
+future UI, tools, or extension commands. If `content` is provided, core formats
+that buffer. If `content` is omitted, core reads the file from the workspace.
+In both cases it returns replacement content and never writes the formatted text
+back to disk.
+
+`language_status(cwd)` reports registered language support without invoking
+linters or formatters. Each status includes:
+
+| Field | Description |
+|---|---|
+| `extension_id` | Extension that registered the language. |
+| `language` | Registered language name. |
+| `file_patterns` | Patterns handled by the language contribution. |
+| `features` | Enabled feature names, such as `diagnostics` or `format_document`. |
+| `requirements` | Static manifest requirements grouped by type. |
+| `missing_requirements` | Missing requirements, such as `executable:ruff`. |
+| `ready` | True when no requirements are missing. |
 
 ## UI Contributions
 

@@ -531,6 +531,7 @@ class LeftPanel(QWidget):
     renamed          = pyqtSignal(str, str)
     deleted          = pyqtSignal(str)
     file_open        = pyqtSignal(str)
+    git_file_open    = pyqtSignal(str)
     file_attach      = pyqtSignal(str)
     settings_changed = pyqtSignal()
 
@@ -579,7 +580,7 @@ class LeftPanel(QWidget):
             settings=self._settings,
             current_model_getter=current_model_getter,
         )
-        self._git.file_open.connect(self.file_open)
+        self._git.file_open.connect(self.git_file_open)
 
         git_wrap = QWidget()
         git_layout = QVBoxLayout(git_wrap)
@@ -660,6 +661,7 @@ class LeftPanel(QWidget):
         QTimer.singleShot(250, self._file_tree.refresh)
         QTimer.singleShot(250, self._git.refresh)
 
-    def reveal_file(self, path: str) -> bool:
-        self._tabs.setCurrentWidget(self._files_wrap)
+    def reveal_file(self, path: str, *, activate: bool = True) -> bool:
+        if activate:
+            self._tabs.setCurrentWidget(self._files_wrap)
         return self._file_tree.reveal_file(path)

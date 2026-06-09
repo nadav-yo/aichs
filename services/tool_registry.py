@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import ast
 import json
+import shutil
 import sys
 import traceback
 from dataclasses import dataclass, field
@@ -183,8 +184,17 @@ class LanguageContribution:
     diagnostics: LanguageProvider | None = None
     symbols: LanguageProvider | None = None
     completion: LanguageProvider | None = None
+    code_actions: LanguageProvider | None = None
+    apply_code_action: LanguageProvider | None = None
+    format_document: LanguageProvider | None = None
     source: str = "extension"
     extension_id: str = "extension"
+
+
+@dataclass(frozen=True)
+class ExtensionRequirements:
+    executables: list[str] = field(default_factory=list)
+    python: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -201,6 +211,8 @@ class ExtensionFileSummary:
     description: str = ""
     display_name: str = ""
     languages: list[LanguageContribution] = field(default_factory=list)
+    requirements: ExtensionRequirements = field(default_factory=ExtensionRequirements)
+    missing_requirements: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -389,6 +401,9 @@ class ToolRegistry:
         diagnostics: LanguageProvider | None = None,
         symbols: LanguageProvider | None = None,
         completion: LanguageProvider | None = None,
+        code_actions: LanguageProvider | None = None,
+        apply_code_action: LanguageProvider | None = None,
+        format_document: LanguageProvider | None = None,
         source: str = "extension",
     ) -> None:
         if not name or not name.replace("_", "").isalnum():
@@ -398,14 +413,27 @@ class ToolRegistry:
         patterns = [str(pattern).strip() for pattern in file_patterns if str(pattern).strip()]
         if not patterns:
             raise ValueError("language file_patterns are required")
-        if diagnostics is None and symbols is None and completion is None:
-            raise ValueError("language must provide diagnostics, symbols, or completion")
+        if (
+            diagnostics is None
+            and symbols is None
+            and completion is None
+            and code_actions is None
+            and apply_code_action is None
+            and format_document is None
+        ):
+            raise ValueError(
+                "language must provide diagnostics, symbols, or completion "
+                "(or code_actions, apply_code_action, or format_document)"
+            )
         self._languages[name] = LanguageContribution(
             name=name,
             file_patterns=patterns,
             diagnostics=diagnostics,
             symbols=symbols,
             completion=completion,
+            code_actions=code_actions,
+            apply_code_action=apply_code_action,
+            format_document=format_document,
             source=source,
             extension_id="builtin" if source == "builtin" else self._current_extension_id,
         )
@@ -660,6 +688,8 @@ def _extension_file_summary(path: Path, cwd: str | None = None) -> ExtensionFile
     manifest = _extension_manifest_metadata(path)
     static_description = _static_extension_description(path)
     display_name = _clean_description(str(manifest.get("name") or ""))
+    requirements = _extension_manifest_requirements(manifest)
+    missing_requirements = _missing_extension_requirements(requirements)
     if is_extension_disabled(path, cwd):
         return ExtensionFileSummary(
             path=str(path),
@@ -674,6 +704,8 @@ def _extension_file_summary(path: Path, cwd: str | None = None) -> ExtensionFile
             description=static_description,
             display_name=display_name,
             languages=[],
+            requirements=requirements,
+            missing_requirements=missing_requirements,
         )
     registry = ToolRegistry()
     before = registry.errors[:]
@@ -692,6 +724,8 @@ def _extension_file_summary(path: Path, cwd: str | None = None) -> ExtensionFile
         description=registry._description or static_description,
         display_name=display_name,
         languages=registry.languages(),
+        requirements=requirements,
+        missing_requirements=missing_requirements,
     )
 
 
@@ -747,6 +781,54 @@ def _extension_manifest_metadata(path: Path) -> dict:
     except (OSError, ValueError, json.JSONDecodeError):
         return {}
     return data
+
+
+def _extension_manifest_requirements(manifest: dict) -> ExtensionRequirements:
+    requires = manifest.get("requires")
+    if not isinstance(requires, dict):
+        return ExtensionRequirements()
+    return ExtensionRequirements(
+        executables=_manifest_string_list(requires.get("executables")),
+        python=_manifest_string_list(requires.get("python")),
+    )
+
+
+def _manifest_string_list(value) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    seen = set()
+    items = []
+    for item in value:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        items.append(text)
+    return items
+
+
+def _missing_extension_requirements(requirements: ExtensionRequirements) -> list[str]:
+    missing = []
+    for executable in requirements.executables:
+        if shutil.which(executable) is None:
+            missing.append(f"executable:{executable}")
+    for module in requirements.python:
+        if not _python_requirement_available(module):
+            missing.append(f"python:{module}")
+    return missing
+
+
+def _python_requirement_available(name: str) -> bool:
+    candidates = [name, name.replace("-", "_")]
+    for candidate in candidates:
+        try:
+            if importlib.util.find_spec(candidate) is not None:
+                return True
+        except (ImportError, AttributeError, ValueError):
+            continue
+    return False
 
 
 def _extension_manifest_path(path: Path) -> Path | None:

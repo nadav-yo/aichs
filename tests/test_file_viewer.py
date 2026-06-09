@@ -1,7 +1,9 @@
 from PyQt6.QtCore import QPoint, QPointF, Qt
 from PyQt6.QtGui import QColor, QGuiApplication, QTextCursor
+from PyQt6.QtTest import QTest
 
 from services.file_editor_refs import AICHS_EDITOR_REF_MIME, parse_editor_refs
+from services.language_features import CodeActionResult
 from storage.settings import FILE_EDITOR_AUTO_SAVE_KEY
 from tests.conftest import write_extension
 from ui.theme import palette
@@ -21,6 +23,18 @@ class _Settings:
 
     def load(self) -> dict:
         return dict(self._data)
+
+
+def _wait_until(qapp, predicate, timeout_ms: int = 1500):
+    elapsed = 0
+    while elapsed < timeout_ms:
+        qapp.processEvents()
+        if predicate():
+            return
+        QTest.qWait(25)
+        elapsed += 25
+    qapp.processEvents()
+    assert predicate()
 
 
 def test_read_text_preview_truncates(workspace):
@@ -97,6 +111,8 @@ def test_file_viewer_auto_saves_when_enabled(qapp, workspace):
     tab._editor.edit_requested.emit()
     tab._editor.setPlainText("print('auto')\n")
 
+    assert tab._dirty is True
+    _wait_until(qapp, lambda: path.read_text(encoding="utf-8") == "print('auto')\n")
     assert path.read_text(encoding="utf-8") == "print('auto')\n"
     assert tab._dirty is False
     assert tab._edit_mode is True
@@ -142,6 +158,23 @@ def test_file_viewer_open_file_can_jump_to_line(qapp, workspace):
     tab = panel._tabs.widget(0)
 
     assert tab._editor.textCursor().blockNumber() == 2
+    panel.close()
+
+
+def test_file_viewer_runs_diagnostics_immediately_on_open(qapp, workspace, monkeypatch):
+    calls = []
+
+    def record_refresh(self, delay_ms=None):
+        calls.append(delay_ms)
+        self._set_diagnostics([])
+
+    monkeypatch.setattr(_TextFileTab, "_refresh_diagnostics", record_refresh)
+    path = workspace / "src" / "main.py"
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace))
+
+    assert 0 in calls
     panel.close()
 
 
@@ -436,6 +469,37 @@ def test_text_file_tab_right_click_diagnostic_marker_drafts_fix_request(qapp, wo
     qapp.processEvents()
 
 
+def test_text_file_tab_code_action_marks_buffer_dirty_without_saving(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    path.write_text("print('old')\n", encoding="utf-8")
+    tab = _TextFileTab(str(path), "print('old')\n", str(workspace), None)
+
+    tab._apply_code_action_content("print('new')\n", "Applied test fix.")
+
+    assert tab._dirty is True
+    assert tab._edit_mode is True
+    assert tab._editor.toPlainText() == "print('new')\n"
+    assert path.read_text(encoding="utf-8") == "print('old')\n"
+    assert tab._status.text() == "Applied test fix."
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
+def test_text_file_tab_code_action_no_content_keeps_buffer(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    tab = _TextFileTab(str(path), "print('old')\n", str(workspace), None)
+
+    tab._on_code_action_ready(0, CodeActionResult(message="Nothing changed."), [])
+
+    assert tab._dirty is False
+    assert tab._editor.toPlainText() == "print('old')\n"
+    assert tab._status.text() == "Nothing changed."
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
 def test_diagnostic_details_limits_output():
     from services.language_features import Diagnostic
 
@@ -479,6 +543,7 @@ def test_file_viewer_applies_extension_diagnostics(qapp, workspace):
 
     panel.open_file(str(path), repo_root=str(workspace))
     tab = panel._tabs.widget(0)
+    _wait_until(qapp, lambda: bool(tab._diagnostics))
 
     assert tab._diagnostics[0].message == "syntax problem"
     assert tab._editor._diagnostics == tab._diagnostics
@@ -545,6 +610,7 @@ def test_file_viewer_markdown_uses_preview_until_edit(qapp, workspace):
 
     panel.open_file(str(path), repo_root=str(workspace))
     tab = panel._tabs.widget(0)
+    _wait_until(qapp, lambda: "<h1" in tab._preview.toHtml().lower())
 
     assert tab._status.text() == "Markdown preview"
     assert tab._preview.isVisibleTo(tab)
@@ -559,6 +625,7 @@ def test_file_viewer_markdown_uses_preview_until_edit(qapp, workspace):
 
     tab._editor.setPlainText("# Saved\n")
     tab._save()
+    _wait_until(qapp, lambda: "Saved" in tab._preview.toPlainText())
 
     assert path.read_text(encoding="utf-8") == "# Saved\n"
     assert tab._status.text() == "Markdown preview"
@@ -589,6 +656,7 @@ def test_file_viewer_escape_discards_markdown_edit_and_returns_to_preview(qapp, 
     assert tab._status.text() == "Reverted"
     assert tab._preview.isVisibleTo(tab)
     assert tab._editor.isHidden()
+    _wait_until(qapp, lambda: "Original" in tab._preview.toPlainText())
     assert "Original" in tab._preview.toPlainText()
     panel.close()
 

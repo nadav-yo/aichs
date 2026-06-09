@@ -74,6 +74,7 @@ class MainWindow(QMainWindow):
         self._viewer.hide()
         self._viewer.all_closed.connect(self._close_file)
         self._viewer.diagnostic_fix_requested.connect(self._chat_draft_diagnostic_fix)
+        self._viewer.active_file_changed.connect(self._reveal_active_file)
 
         self._chat = ChatPanel(store, cwd=repo, settings=self._settings)
 
@@ -87,6 +88,7 @@ class MainWindow(QMainWindow):
         self._left.renamed.connect(self._chat.update_title)
         self._left.deleted.connect(self._chat.on_conversation_deleted)
         self._left.file_open.connect(self._open_file)
+        self._left.git_file_open.connect(self._open_git_file)
         self._left.file_attach.connect(self._chat.attach_file)
         self._chat.saved.connect(self._left.refresh)
         self._chat.conversation_created.connect(self._left.select_conversation)
@@ -227,6 +229,7 @@ class MainWindow(QMainWindow):
         diff_text: str | None = None,
         *,
         line_no: int | None = None,
+        activate_files: bool = True,
     ):
         self._viewer.open_file(
             path,
@@ -234,10 +237,16 @@ class MainWindow(QMainWindow):
             diff_text=diff_text,
             line_no=line_no,
         )
-        self._left.reveal_file(path)
+        self._left.reveal_file(path, activate=activate_files)
         self._viewer.show()
         total = self._inner.height()
         self._inner.setSizes([total * 2 // 3, total // 3])
+
+    def _open_git_file(self, path: str):
+        self._open_file(path, activate_files=False)
+
+    def _reveal_active_file(self, path: str):
+        self._left.reveal_file(path, activate=False)
 
     def _open_content(self, content: str, title: str):
         self._viewer.open_content(content, title)

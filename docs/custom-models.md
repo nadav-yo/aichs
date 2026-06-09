@@ -30,6 +30,11 @@ Custom providers appear automatically in the provider dropdown — no code chang
 | `apiKey` | yes | Key resolution — see below |
 | `models` | yes (new providers) | List of models to expose |
 | `contextWindow` | no | Context size in **tokens** for compaction and the usage ring (defaults: Claude 180k, OpenAI-compatible 100k) |
+| `temperature` | no | Top-level request temperature, `0.0` to `2.0` |
+| `topK` | no | OpenAI-compatible `extra_body.top_k`, integer `-1` or greater |
+| `minP` | no | OpenAI-compatible `extra_body.min_p`, `0.0` to `1.0` |
+
+Generation fields can be set on a provider as defaults or on an individual model as an override. `topK` and `minP` are only sent for OpenAI-compatible requests.
 
 ### API key formats
 

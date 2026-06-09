@@ -57,6 +57,31 @@ def test_context_window_tokens_honors_per_model_override(tmp_path, monkeypatch):
     assert reg.context_window_tokens("claude-sonnet-4-6") == 180_000
 
 
+def test_generation_params_honor_provider_defaults_and_model_overrides(tmp_path, monkeypatch):
+    path = tmp_path / ".aichs" / "models.json"
+    monkeypatch.setattr(reg, "_MODELS_PATH", path)
+    reg.save_user_providers({
+        "local": {
+            "api": "openai-compatible",
+            "apiKey": "LOCAL_KEY",
+            "baseUrl": "http://localhost:11434/v1",
+            "temperature": 0.6,
+            "topK": -1,
+            "minP": 0.05,
+            "models": [
+                {"id": "model-a", "name": "Model A"},
+                {"id": "model-b", "temperature": 0.2, "topK": 8, "minP": 0.1},
+            ],
+        }
+    })
+    reg.reload()
+
+    cfg_a = reg.get_model_config("model-a")
+    cfg_b = reg.get_model_config("model-b")
+    assert (cfg_a.temperature, cfg_a.top_k, cfg_a.min_p) == (0.6, -1, 0.05)
+    assert (cfg_b.temperature, cfg_b.top_k, cfg_b.min_p) == (0.2, 8, 0.1)
+
+
 def test_load_save_user_providers(tmp_path, monkeypatch):
     path = tmp_path / ".aichs" / "models.json"
     monkeypatch.setattr(reg, "_MODELS_PATH", path)

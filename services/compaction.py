@@ -9,6 +9,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from config import SYSTEM_PROMPT
 from services.model_registry import context_window_tokens, get_model_config, resolve_api_key
+from services.model_requests import apply_generation_params
 from services.content import content_length, content_preview
 from services.continuation import (
     continuation_prompt,
@@ -237,23 +238,27 @@ def _call_model(model: str, prompt: str, max_tokens: int) -> str:
 
     if cfg.api == "anthropic":
         client = anthropic.Anthropic(**kwargs)
-        resp = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        request = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        apply_generation_params(request, cfg, include_extra_body=False)
+        resp = client.messages.create(**request)
         return resp.content[0].text
     else:
         client = OpenAI(**kwargs)
-        resp = client.chat.completions.create(
-            model=model,
-            max_tokens=max_tokens,
-            messages=[
+        request = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user",   "content": prompt},
             ],
-        )
+        }
+        apply_generation_params(request, cfg)
+        resp = client.chat.completions.create(**request)
         return resp.choices[0].message.content
 
 

@@ -6,6 +6,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from services.content import content_preview
 from services.model_registry import get_model_config, resolve_api_key
+from services.model_requests import apply_generation_params
 
 _TITLE_MODELS: dict[str, str] = {
     "anthropic": "claude-haiku-4-5-20251001",
@@ -46,19 +47,23 @@ def generate_title(model: str, user_text: str) -> str:
     prompt = TITLE_PROMPT.format(user=content_preview(user_text)[:100])
     if cfg.api == "anthropic":
         client = anthropic.Anthropic(**kwargs)
-        resp = client.messages.create(
-            model=title_model,
-            max_tokens=32,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        request = {
+            "model": title_model,
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        apply_generation_params(request, cfg, include_extra_body=False)
+        resp = client.messages.create(**request)
         raw = resp.content[0].text
     else:
         client = OpenAI(**kwargs)
-        resp = client.chat.completions.create(
-            model=title_model,
-            max_tokens=32,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        request = {
+            "model": title_model,
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        apply_generation_params(request, cfg)
+        resp = client.chat.completions.create(**request)
         raw = resp.choices[0].message.content or ""
 
     title = clean_title(raw)

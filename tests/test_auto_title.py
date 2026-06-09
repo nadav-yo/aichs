@@ -69,9 +69,15 @@ def test_generate_title_openai(monkeypatch):
             api="openai-compatible",
             api_key_spec="OPENAI_API_KEY",
             base_url="https://api.example.com",
+            temperature=0.6,
+            top_k=20,
+            min_p=0.05,
         )
         title = generate_title("gpt-5.4-nano", "hi")
     assert title == "OpenAI title"
+    request = mock_client.chat.completions.create.call_args.kwargs
+    assert request["temperature"] == 0.6
+    assert request["extra_body"] == {"top_k": 20, "min_p": 0.05}
 
 
 def test_generate_title_uses_current_model_for_custom_provider(monkeypatch):

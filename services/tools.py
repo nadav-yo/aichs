@@ -533,14 +533,14 @@ def _edit_file(inputs: dict, cwd: str) -> str:
         newline_err = _literal_newline_error(f"edits[{idx}].newText", new_text)
         if newline_err:
             return newline_err
-        matches = [m.start() for m in re.finditer(re.escape(old_text), current)]
+        matches = _edit_matches(old_text, current)
         if len(matches) != 1:
             return (
                 f"[tool error] edits[{idx}].oldText in {_display_path(path, cwd)} "
                 f"must match exactly once; found {len(matches)}."
             )
-        start = matches[0]
-        replacements.append((start, start + len(old_text), new_text, idx))
+        start, end, matched_text = matches[0]
+        replacements.append((start, end, _adapt_new_text_newlines(new_text, matched_text), idx))
 
     replacements.sort(key=lambda item: item[0])
     for prev, cur in zip(replacements, replacements[1:]):
@@ -588,6 +588,38 @@ def _literal_newline_error(label: str, text: str) -> str | None:
             "Use actual newline characters in the JSON string."
         )
     return None
+
+
+def _edit_matches(old_text: str, current: str) -> list[tuple[int, int, str]]:
+    exact = [
+        (match.start(), match.end(), match.group(0))
+        for match in re.finditer(re.escape(old_text), current)
+    ]
+    if exact or not any(ch in old_text for ch in "\r\n"):
+        return exact
+
+    normalized_old = _normalize_newlines(old_text)
+    pattern = "(?:\\r\\n|\\n|\\r)".join(
+        re.escape(part) for part in normalized_old.split("\n")
+    )
+    return [
+        (match.start(), match.end(), match.group(0))
+        for match in re.finditer(pattern, current)
+    ]
+
+
+def _normalize_newlines(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _adapt_new_text_newlines(new_text: str, matched_text: str) -> str:
+    if "\n" not in new_text or "\r" in new_text:
+        return new_text
+    if "\r\n" in matched_text:
+        return new_text.replace("\n", "\r\n")
+    if "\r" in matched_text:
+        return new_text.replace("\n", "\r")
+    return new_text
 
 
 def _run_shell_command(command: str, cwd: str, on_line=None, cancel=None) -> str:

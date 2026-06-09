@@ -1,6 +1,12 @@
 from types import SimpleNamespace
 
-from ui.widgets.chat_panel import ChatPanel, _chat_ref_context, _history_ends_with_assistant_text, _message_files
+from ui.widgets.chat_panel import (
+    ChatPanel,
+    _chat_ref_context,
+    _history_ends_with_assistant_text,
+    _message_files,
+    _tool_debug_text,
+)
 
 
 class _Button:
@@ -248,6 +254,100 @@ def test_edit_file_result_emits_completion_signal(qapp, store, workspace, monkey
     assert cards == ["src/main.py"]
     assert run.last_edit_path == ""
     panel.close()
+
+
+def test_edit_file_tool_debug_counts_old_text_matches(workspace):
+    target = workspace / "src" / "main.py"
+    target.write_bytes(b"import sys\r\nfrom pathlib import Path\r\n")
+
+    text = _tool_debug_text(
+        "edit_file",
+        {
+            "path": "src/main.py",
+            "edits": [{"oldText": "import sys\n", "newText": ""}],
+        },
+        "[tool error] edits[0].oldText in src/main.py must match exactly once; found 0.",
+        str(workspace),
+    )
+
+    assert "Tool: edit_file" in text
+    assert "Output:" in text
+    assert "resolved:" in text
+    assert "edits[0].oldText exact occurrences: 0" in text
+    assert "edits[0].oldText newline-flexible occurrences: 1" in text
+    assert "edits[0].oldText repr: 'import sys\\n'" in text
+
+
+def test_edit_file_tool_debug_omits_newline_flexible_when_same(workspace):
+    target = workspace / "src" / "main.py"
+    target.write_text("import sys\n", encoding="utf-8")
+
+    text = _tool_debug_text(
+        "edit_file",
+        {
+            "path": "src/main.py",
+            "edits": [{"oldText": "import sys", "newText": ""}],
+        },
+        "",
+        str(workspace),
+    )
+
+    assert "edits[0].oldText exact occurrences: 1" in text
+    assert "newline-flexible occurrences" not in text
+
+
+def test_tool_notice_context_menu_copies_debug_info(qapp, store, workspace, monkeypatch):
+    from PyQt6.QtCore import QPoint
+    from PyQt6.QtWidgets import QLabel, QMenu
+
+    panel = ChatPanel(store, cwd=str(workspace))
+    panel._add_tool_notice("Tool error: exact match failed", debug_text="debug payload")
+    label = panel.findChild(QLabel, "aichs-tool-notice")
+    copied = []
+
+    def choose_copy_debug(menu, _pos):
+        return menu.actions()[1]
+
+    clipboard = SimpleNamespace(setText=copied.append)
+    monkeypatch.setattr(QMenu, "exec", choose_copy_debug)
+    monkeypatch.setattr(
+        "ui.widgets.chat_panel.QGuiApplication",
+        SimpleNamespace(clipboard=lambda: clipboard),
+    )
+
+    panel._show_tool_notice_menu(label, QPoint(0, 0))
+
+    assert copied == ["debug payload"]
+    panel.close()
+    panel.deleteLater()
+    qapp.processEvents()
+
+
+def test_tool_notice_context_menu_copies_message(qapp, store, workspace, monkeypatch):
+    from PyQt6.QtCore import QPoint
+    from PyQt6.QtWidgets import QLabel, QMenu
+
+    panel = ChatPanel(store, cwd=str(workspace))
+    panel._add_tool_notice("Tool error: exact match failed", debug_text="debug payload")
+    label = panel.findChild(QLabel, "aichs-tool-notice")
+    copied = []
+
+    def choose_copy_message(menu, _pos):
+        return menu.actions()[0]
+
+    clipboard = SimpleNamespace(setText=copied.append)
+    monkeypatch.setattr(QMenu, "exec", choose_copy_message)
+    monkeypatch.setattr(
+        "ui.widgets.chat_panel.QGuiApplication",
+        SimpleNamespace(clipboard=lambda: clipboard),
+    )
+
+    panel._show_tool_notice_menu(label, QPoint(0, 0))
+
+    assert copied == ["Tool error: exact match failed"]
+    panel.close()
+    panel.deleteLater()
+    qapp.processEvents()
 
 
 def test_chat_ref_context_dedupes_and_names_exact_tool():

@@ -6,6 +6,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from services.git_status import run_git
 from services.model_registry import get_model_config, resolve_api_key
+from services.model_requests import apply_generation_params
 
 COMMIT_MESSAGE_PROMPT_ADDITION_KEY = "commit_message_prompt_addition"
 MAX_STAGED_DIFF_CHARS = 24_000
@@ -146,11 +147,13 @@ def _final_max_tokens(cfg) -> int | None:
 def _call_model_text(model: str, cfg, kwargs: dict, prompt: str, max_tokens: int | None):
     if cfg.api == "anthropic":
         client = anthropic.Anthropic(**kwargs)
-        resp = client.messages.create(
-            model=model,
-            max_tokens=max_tokens or COMMIT_MESSAGE_MAX_TOKENS,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        request = {
+            "model": model,
+            "max_tokens": max_tokens or COMMIT_MESSAGE_MAX_TOKENS,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        apply_generation_params(request, cfg, include_extra_body=False)
+        resp = client.messages.create(**request)
         raw = resp.content[0].text
     else:
         client = OpenAI(**kwargs)
@@ -160,6 +163,7 @@ def _call_model_text(model: str, cfg, kwargs: dict, prompt: str, max_tokens: int
         }
         if max_tokens is not None:
             request["max_tokens"] = max_tokens
+        apply_generation_params(request, cfg)
         resp = client.chat.completions.create(**request)
         raw = _openai_message_text(resp)
     return raw, resp

@@ -89,7 +89,14 @@ def test_generate_commit_message_uses_anthropic_current_model(monkeypatch):
 
 
 def test_generate_commit_message_uses_openai_compatible_current_model(monkeypatch):
-    cfg = SimpleNamespace(api="openai-compatible", api_key_spec="OPENAI_API_KEY", base_url="http://local")
+    cfg = SimpleNamespace(
+        api="openai-compatible",
+        api_key_spec="OPENAI_API_KEY",
+        base_url="http://local",
+        temperature=0.6,
+        top_k=20,
+        min_p=0.05,
+    )
     mock_client = patch("services.commit_message.OpenAI").start()
     mock_client.return_value.chat.completions.create.return_value = SimpleNamespace(
         choices=[
@@ -117,6 +124,8 @@ def test_generate_commit_message_uses_openai_compatible_current_model(monkeypatc
     kwargs = mock_client.return_value.chat.completions.create.call_args.kwargs
     assert kwargs["model"] == "local-model"
     assert "max_tokens" not in kwargs
+    assert kwargs["temperature"] == 0.6
+    assert kwargs["extra_body"] == {"top_k": 20, "min_p": 0.05}
 
 
 def test_generate_commit_message_reports_length_empty_response(monkeypatch):

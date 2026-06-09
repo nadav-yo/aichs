@@ -5,12 +5,15 @@ import markdown as _md
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPlainTextEdit, QFrame, QTabWidget,
     QScrollArea, QLabel, QSizePolicy, QCheckBox, QPushButton, QTextBrowser, QLineEdit,
-    QCompleter, QApplication, QToolTip,
+    QCompleter, QApplication, QToolTip, QMenu,
 )
-from PyQt6.QtCore import pyqtSignal, Qt, QSize, QUrl, QStringListModel, QMimeData
+from PyQt6.QtCore import (
+    QObject, QRunnable, QThreadPool, QTimer, pyqtSignal, pyqtSlot,
+    Qt, QSize, QUrl, QStringListModel, QMimeData,
+)
 from PyQt6.QtGui import (
-    QColor, QDrag, QGuiApplication, QKeySequence, QPainter, QPixmap, QShortcut, QSyntaxHighlighter,
-    QTextCharFormat, QTextCursor, QTextFormat,
+    QColor, QCursor, QDrag, QGuiApplication, QKeySequence, QPainter, QPixmap,
+    QShortcut, QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextFormat,
 )
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_for_filename, guess_lexer, TextLexer
@@ -23,7 +26,10 @@ from services.git_diff import can_diff_against_head, diff_against_head
 from services.git_status import is_git_repo
 from services.tool_policy import path_in_repo
 from services.language_features import (
-    Diagnostic, LanguageCompletionProvider, diagnostics as language_diagnostics,
+    CodeAction, CodeActionResult, Diagnostic, LanguageCompletionProvider,
+    apply_code_action as language_apply_code_action,
+    code_actions as language_code_actions,
+    diagnostics as language_diagnostics,
 )
 from services.code_completion import (
     CompletionItem, CompletionProvider, LocalCompletionProvider, prefix_at,
@@ -59,24 +65,125 @@ _BINARY_PREVIEW_EXTS = {
 }
 
 
+class _DiagnosticsSignals(QObject):
+    done = pyqtSignal(int, object, object)
+
+
+class _DiagnosticsWorker(QRunnable):
+    def __init__(self, generation: int, repo_root: str, path: str, content: str):
+        super().__init__()
+        self.signals = _DiagnosticsSignals()
+        self._generation = generation
+        self._repo_root = repo_root
+        self._path = path
+        self._content = content
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            diagnostics, errors = language_diagnostics(
+                self._repo_root,
+                self._path,
+                self._content,
+            )
+        except Exception as e:
+            diagnostics, errors = [], [f"language diagnostics failed: {e}"]
+        self.signals.done.emit(self._generation, diagnostics, errors)
+
+
+class _CodeActionSignals(QObject):
+    done = pyqtSignal(int, object, object)
+
+
+class _CodeActionWorker(QRunnable):
+    def __init__(
+        self,
+        generation: int,
+        repo_root: str,
+        path: str,
+        content: str,
+        action_id: str,
+        diagnostics: list[Diagnostic],
+    ):
+        super().__init__()
+        self.signals = _CodeActionSignals()
+        self._generation = generation
+        self._repo_root = repo_root
+        self._path = path
+        self._content = content
+        self._action_id = action_id
+        self._diagnostics = list(diagnostics)
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            result, errors = language_apply_code_action(
+                self._repo_root,
+                self._path,
+                self._content,
+                self._action_id,
+                self._diagnostics,
+            )
+        except Exception as e:
+            result, errors = CodeActionResult(message=f"Code action failed: {e}"), [
+                f"language code action failed: {e}",
+            ]
+        self.signals.done.emit(self._generation, result, errors)
+
+
+class _DiffSignals(QObject):
+    done = pyqtSignal(int, object)
+
+
+class _DiffWorker(QRunnable):
+    def __init__(self, generation: int, repo_root: str, path: str):
+        super().__init__()
+        self.signals = _DiffSignals()
+        self._generation = generation
+        self._repo_root = repo_root
+        self._path = path
+
+    @pyqtSlot()
+    def run(self):
+        diff_text = None
+        try:
+            if (
+                is_git_repo(self._repo_root)
+                and can_diff_against_head(self._repo_root, self._path)
+            ):
+                diff_text = diff_against_head(self._repo_root, self._path)
+        except Exception:
+            diff_text = None
+        self.signals.done.emit(self._generation, diff_text)
+
+
 class _TextMinimap(QWidget):
     """Tiny overview strip that mirrors and controls a plain text editor."""
 
     _WIDTH = 86
     _MIN_THUMB_HEIGHT = 28
+    _MAX_PAINTED_LINES = 1200
 
     def __init__(self, editor: QPlainTextEdit, parent=None):
         super().__init__(parent)
         self._editor = editor
+        self._update_timer = QTimer(self)
+        self._update_timer.setSingleShot(True)
+        self._update_timer.setInterval(40)
+        self._update_timer.timeout.connect(self.update)
         self.setFixedWidth(self._WIDTH)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Minimap")
         self.setMouseTracking(True)
 
         scroll = self._editor.verticalScrollBar()
-        scroll.valueChanged.connect(lambda _value: self.update())
-        scroll.rangeChanged.connect(lambda _minimum, _maximum: self.update())
-        self._editor.document().contentsChanged.connect(lambda: self.update())
+        scroll.valueChanged.connect(lambda _value: self._schedule_update())
+        scroll.rangeChanged.connect(lambda _minimum, _maximum: self._schedule_update())
+        self._editor.document().contentsChanged.connect(self._schedule_update)
+
+    def _schedule_update(self):
+        if not self._update_timer.isActive():
+            self._update_timer.start()
 
     def apply_appearance(self):
         p = palette()
@@ -117,10 +224,13 @@ class _TextMinimap(QWidget):
         height = max(1, self.height())
         width = max(1, self.width())
         scale = height / blocks
+        step = max(1, blocks // self._MAX_PAINTED_LINES)
+        document = self._editor.document()
 
-        block = self._editor.document().firstBlock()
-        index = 0
-        while block.isValid():
+        for index in range(0, blocks, step):
+            block = document.findBlockByNumber(index)
+            if not block.isValid():
+                continue
             text = block.text().rstrip()
             if text:
                 y = int(index * scale)
@@ -131,8 +241,6 @@ class _TextMinimap(QWidget):
                 usable = max(8, width - x - 8)
                 line_w = max(4, int(usable * min(1.0, len(stripped) / 100)))
                 painter.fillRect(x, y, line_w, line_h, self._line_color(stripped, p, index + 1))
-            index += 1
-            block = block.next()
 
     def _line_color(self, text: str, p: dict, line_number: int) -> QColor:
         changed_lines = getattr(self._editor, "_changed_lines", set())
@@ -387,6 +495,7 @@ class _FileTextEdit(QPlainTextEdit):
         self._syntax_highlighter = _PygmentsHighlighter(self.document())
         self._changed_lines: set[int] = set()
         self._diagnostics: list[Diagnostic] = []
+        self._diagnostics_by_line_cache: dict[int, list[Diagnostic]] = {}
         self._completion_path = ""
         self._completion_provider: CompletionProvider = LocalCompletionProvider()
         self._completion_items: dict[str, CompletionItem] = {}
@@ -448,6 +557,7 @@ class _FileTextEdit(QPlainTextEdit):
 
     def set_diagnostics(self, diagnostics: list[Diagnostic]):
         self._diagnostics = list(diagnostics)
+        self._diagnostics_by_line_cache = _diagnostics_by_line(self._diagnostics)
         self._update_line_number_area_width(0)
         self._update_extra_selections()
         self._line_number_area.update()
@@ -865,10 +975,7 @@ class _FileTextEdit(QPlainTextEdit):
         self.setExtraSelections(selections)
 
     def _diagnostics_by_line(self) -> dict[int, list[Diagnostic]]:
-        by_line: dict[int, list[Diagnostic]] = {}
-        for diagnostic in self._diagnostics:
-            by_line.setdefault(max(1, diagnostic.line), []).append(diagnostic)
-        return by_line
+        return self._diagnostics_by_line_cache
 
     def _diagnostic_line_at_gutter_pos(self, pos) -> int | None:
         if not self._diagnostics or pos.x() > 16:
@@ -937,6 +1044,11 @@ def _markdown_preview_html(text: str) -> str:
 class _TextFileTab(QWidget):
     """Editable file tab with optional read-only git diff vs HEAD."""
 
+    _AUTO_SAVE_DELAY_MS = 450
+    _DIAGNOSTICS_DELAY_MS = 500
+    _DIFF_DELAY_MS = 200
+    _MARKDOWN_DELAY_MS = 80
+
     dirty_changed = pyqtSignal(bool)
     diagnostic_fix_requested = pyqtSignal(str, object)
 
@@ -969,6 +1081,23 @@ class _TextFileTab(QWidget):
         self._rendering = False
         self._edit_mode = False
         self._force_text_view = False
+        self._diagnostics_generation = 0
+        self._code_action_generation = 0
+        self._diff_generation = 0
+        self._worker_pool = QThreadPool.globalInstance()
+        self._auto_save_timer = QTimer(self)
+        self._auto_save_timer.setSingleShot(True)
+        self._auto_save_timer.timeout.connect(lambda: self._save(auto=True))
+        self._diagnostics_timer = QTimer(self)
+        self._diagnostics_timer.setSingleShot(True)
+        self._diagnostics_timer.timeout.connect(self._start_diagnostics_refresh)
+        self._diff_timer = QTimer(self)
+        self._diff_timer.setSingleShot(True)
+        self._diff_timer.timeout.connect(self._start_diff_refresh)
+        self._markdown_timer = QTimer(self)
+        self._markdown_timer.setSingleShot(True)
+        self._markdown_timer.timeout.connect(self._apply_markdown_preview)
+        self._pending_markdown: tuple[str, str] | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1023,7 +1152,7 @@ class _TextFileTab(QWidget):
         self._editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self._editor.edit_requested.connect(self._enter_edit_mode)
         self._editor.cancel_requested.connect(self._cancel_edit)
-        self._editor.diagnostic_fix_requested.connect(self._draft_diagnostic_fix)
+        self._editor.diagnostic_fix_requested.connect(self._show_diagnostic_actions)
         self._editor.textChanged.connect(self._on_text_changed)
         self._preview = _MarkdownPreview()
         self._preview.edit_requested.connect(self._enter_edit_mode)
@@ -1048,12 +1177,16 @@ class _TextFileTab(QWidget):
         self._find_shortcut.activated.connect(self._show_find)
 
         self.apply_appearance()
-        self._render()
+        self._render(diagnostics_delay_ms=0)
+        if diff_text is None:
+            self._schedule_diff_refresh(delay_ms=0)
 
     def set_auto_save(self, enabled: bool):
         self._auto_save = enabled
         if enabled and self._dirty:
-            self._save(auto=True)
+            self._schedule_auto_save()
+        else:
+            self._auto_save_timer.stop()
         self._sync_actions()
 
     def apply_appearance(self):
@@ -1123,12 +1256,14 @@ class _TextFileTab(QWidget):
         self._force_text_view = False
         self._diff_toggle.setChecked(bool(diff_text))
         self._diff_toggle.setVisible(diff_text is not None)
-        self._render()
+        self._render(diagnostics_delay_ms=0)
+        if diff_text is None:
+            self._schedule_diff_refresh(delay_ms=0)
 
     def _on_diff_toggled(self, checked: bool):
         if not checked and self._editable and self._edit_mode:
             self._editor.setFocus()
-        self._render()
+        self._render(diagnostics_delay_ms=0 if not checked else None)
 
     def _enter_edit_mode(self):
         if not self._editable or self._is_showing_diff():
@@ -1155,11 +1290,10 @@ class _TextFileTab(QWidget):
             or self._is_showing_diff()
         ):
             return
-        self._content = self._editor.toPlainText()
-        if self._auto_save:
-            self._save(auto=True)
-            return
         self._set_dirty(True)
+        if self._auto_save:
+            self._schedule_auto_save()
+            return
         self._sync_actions()
 
     def _is_showing_diff(self) -> bool:
@@ -1173,7 +1307,7 @@ class _TextFileTab(QWidget):
             and not self._is_showing_diff()
         )
 
-    def _render(self):
+    def _render(self, *, diagnostics_delay_ms: int | None = None):
         self._rendering = True
         self._editor.blockSignals(True)
         self._editor.configure_syntax(self._lang_hint, self._content)
@@ -1183,7 +1317,7 @@ class _TextFileTab(QWidget):
         if self._editor.toPlainText() != self._content:
             self._editor.setPlainText(self._content)
         if self._is_markdown_preview():
-            self._preview.set_markdown(self._content, self._path)
+            self._schedule_markdown_preview()
             self._preview.show()
             self._editor.hide()
             self._minimap.hide()
@@ -1203,7 +1337,7 @@ class _TextFileTab(QWidget):
             self._minimap.show()
             self._editor.set_changed_lines(set())
             self._editor.setReadOnly(not (self._editable and self._edit_mode))
-            self._refresh_diagnostics()
+            self._refresh_diagnostics(delay_ms=diagnostics_delay_ms)
         self._editor.blockSignals(False)
         self._rendering = False
         self._sync_actions()
@@ -1275,11 +1409,13 @@ class _TextFileTab(QWidget):
             return
         self._editor.select_range(pos, len(query), focus=False)
         self._find_query.setFocus()
-        self._find_status.setText(_find_match_status(text, folded_query, pos))
+        self._find_status.setText(_find_match_status(folded_text, folded_query, pos))
 
     def _save(self, *, auto: bool = False):
         if not self._editable or self._is_showing_diff():
             return
+        if not auto:
+            self._auto_save_timer.stop()
         path = Path(self._path)
         if not path_in_repo(path, self._repo_root):
             self._set_dirty(True)
@@ -1297,16 +1433,12 @@ class _TextFileTab(QWidget):
         if not auto:
             self._edit_mode = False
         self._set_status("Auto-saved" if auto else "Saved")
-        if is_git_repo(self._repo_root) and can_diff_against_head(
-            self._repo_root, self._path,
-        ):
-            self._diff_text = diff_against_head(self._repo_root, self._path)
-            self._diff_toggle.setVisible(self._diff_text is not None)
+        self._schedule_diff_refresh(delay_ms=0)
         if auto:
-            self._refresh_diagnostics()
+            self._refresh_diagnostics(delay_ms=self._DIAGNOSTICS_DELAY_MS)
             self._sync_actions()
         else:
-            self._render()
+            self._render(diagnostics_delay_ms=0)
 
     def _revert(self):
         if not self._file_backed or self._is_showing_diff():
@@ -1323,12 +1455,8 @@ class _TextFileTab(QWidget):
             self._read_only_reason = _read_only_reason(truncated, decode_error, blocked_preview)
         self._edit_mode = False
         self._set_dirty(False)
-        if is_git_repo(self._repo_root) and can_diff_against_head(
-            self._repo_root, self._path,
-        ):
-            self._diff_text = diff_against_head(self._repo_root, self._path)
-            self._diff_toggle.setVisible(self._diff_text is not None)
-        self._render()
+        self._render(diagnostics_delay_ms=0)
+        self._schedule_diff_refresh(delay_ms=0)
         self._set_status("Reverted" if self._editable else self._read_only_reason)
 
     def _sync_actions(self):
@@ -1366,17 +1494,177 @@ class _TextFileTab(QWidget):
         self._status.setText(text)
         self._status.setVisible(bool(text))
 
-    def _refresh_diagnostics(self):
-        if not self._file_backed:
+    def _schedule_auto_save(self):
+        self._auto_save_timer.start(self._AUTO_SAVE_DELAY_MS)
+
+    def _schedule_markdown_preview(self, delay_ms: int | None = None):
+        self._pending_markdown = (self._content, self._path)
+        self._markdown_timer.start(
+            self._MARKDOWN_DELAY_MS if delay_ms is None else max(0, delay_ms)
+        )
+
+    def _apply_markdown_preview(self):
+        if self._pending_markdown is None:
+            return
+        text, path = self._pending_markdown
+        self._pending_markdown = None
+        self._preview.set_markdown(text, path)
+
+    def _refresh_diagnostics(self, delay_ms: int | None = None):
+        if not self._file_backed or self._is_showing_diff():
             self._set_diagnostics([])
             return
-        diagnostics, errors = language_diagnostics(self._repo_root, self._path, self._content)
-        self._language_errors = errors
-        self._set_diagnostics(diagnostics)
+        self._diagnostics_timer.start(
+            self._DIAGNOSTICS_DELAY_MS if delay_ms is None else max(0, delay_ms)
+        )
+
+    def _start_diagnostics_refresh(self):
+        if not self._file_backed or self._is_showing_diff():
+            self._set_diagnostics([])
+            return
+        self._diagnostics_generation += 1
+        generation = self._diagnostics_generation
+        content = self._current_editor_content()
+        worker = _DiagnosticsWorker(generation, self._repo_root, self._path, content)
+        worker.signals.done.connect(self._on_diagnostics_ready)
+        self._worker_pool.start(worker)
+
+    def _on_diagnostics_ready(self, generation: int, diagnostics, errors):
+        if generation != self._diagnostics_generation:
+            return
+        if self._is_showing_diff():
+            self._set_diagnostics([])
+            return
+        self._language_errors = list(errors or [])
+        self._set_diagnostics(list(diagnostics or []))
+        self._sync_actions()
+
+    def _schedule_diff_refresh(self, delay_ms: int | None = None):
+        if not self._file_backed:
+            return
+        self._diff_timer.start(
+            self._DIFF_DELAY_MS if delay_ms is None else max(0, delay_ms)
+        )
+
+    def _start_diff_refresh(self):
+        if not self._file_backed:
+            return
+        self._diff_generation += 1
+        generation = self._diff_generation
+        worker = _DiffWorker(generation, self._repo_root, self._path)
+        worker.signals.done.connect(self._on_diff_ready)
+        self._worker_pool.start(worker)
+
+    def _on_diff_ready(self, generation: int, diff_text):
+        if generation != self._diff_generation or not self._file_backed:
+            return
+        was_showing = self._is_showing_diff()
+        self._diff_text = diff_text
+        has_diff = self._diff_text is not None
+        self._diff_toggle.setVisible(has_diff)
+        if not has_diff and self._diff_toggle.isChecked():
+            self._diff_toggle.setChecked(False)
+        elif was_showing and has_diff:
+            self._render()
+        self._sync_actions()
 
     def _set_diagnostics(self, diagnostics: list[Diagnostic]):
         self._diagnostics = list(diagnostics)
         self._editor.set_diagnostics(self._diagnostics)
+
+    def _current_editor_content(self) -> str:
+        return self._editor.toPlainText() if self._edit_mode else self._content
+
+    def _show_diagnostic_actions(self, diagnostics: list[Diagnostic]):
+        if not diagnostics:
+            return
+        actions, errors = language_code_actions(
+            self._repo_root,
+            self._path,
+            self._current_editor_content(),
+            diagnostics,
+        )
+        self._language_errors = list(errors or [])
+        if not actions:
+            self._draft_diagnostic_fix(diagnostics)
+            return
+
+        menu = QMenu(self)
+        action_items = {}
+        for action in actions:
+            label = action.title if action.safe else f"{action.title} (unsafe)"
+            item = menu.addAction(label)
+            item.setEnabled(action.safe)
+            action_items[item] = action
+        menu.addSeparator()
+        ask_chat = menu.addAction("Ask chat to fix")
+
+        selected = menu.exec(QCursor.pos())
+        if selected == ask_chat:
+            self._draft_diagnostic_fix(diagnostics)
+        elif selected in action_items:
+            self._run_code_action(action_items[selected], diagnostics)
+
+    def _run_code_action(self, action: CodeAction, diagnostics: list[Diagnostic]):
+        if not self._editable or self._is_showing_diff():
+            self._set_status("Code action unavailable")
+            return
+        if not action.safe:
+            self._set_status("Unsafe code action skipped")
+            return
+        self._code_action_generation += 1
+        generation = self._code_action_generation
+        self._set_status(f"Running {action.title}...")
+        worker = _CodeActionWorker(
+            generation,
+            self._repo_root,
+            self._path,
+            self._current_editor_content(),
+            action.id,
+            diagnostics,
+        )
+        worker.signals.done.connect(self._on_code_action_ready)
+        self._worker_pool.start(worker)
+
+    def _on_code_action_ready(self, generation: int, result, errors):
+        if generation != self._code_action_generation:
+            return
+        if errors:
+            self._language_errors = list(errors)
+        if not isinstance(result, CodeActionResult):
+            result = CodeActionResult(message=str(result or "Code action returned no result."))
+        self._apply_code_action_content(result.content, result.message)
+
+    def _apply_code_action_content(self, content: str | None, message: str = ""):
+        if not self._editable or self._is_showing_diff():
+            self._set_status("Code action unavailable")
+            return
+        if content is None:
+            self._set_status(message or "Code action made no changes")
+            return
+        if content == self._current_editor_content():
+            self._set_status(message or "Code action made no changes")
+            self._refresh_diagnostics(delay_ms=0)
+            return
+
+        self._edit_mode = True
+        self._force_text_view = False
+        self._content = content
+        self._preview.hide()
+        self._editor.show()
+        self._minimap.show()
+        self._editor.setReadOnly(False)
+        self._editor.blockSignals(True)
+        self._editor.setPlainText(content)
+        self._editor.configure_syntax(self._lang_hint, content)
+        self._editor.blockSignals(False)
+        self._set_dirty(True)
+        if message:
+            self._set_status(message)
+        if self._auto_save:
+            self._schedule_auto_save()
+        self._refresh_diagnostics(delay_ms=0)
+        self._sync_actions()
 
     def _draft_diagnostic_fix(self, diagnostics: list[Diagnostic]):
         if not diagnostics:
@@ -1408,6 +1696,16 @@ class _TextFileTab(QWidget):
             self._set_status("Unsaved changes")
 
     def release_resources(self):
+        for timer in (
+            self._auto_save_timer,
+            self._diagnostics_timer,
+            self._diff_timer,
+            self._markdown_timer,
+        ):
+            timer.stop()
+        self._diagnostics_generation += 1
+        self._code_action_generation += 1
+        self._diff_generation += 1
         self._editor.release_resources()
 
     def closeEvent(self, event):
@@ -1418,6 +1716,7 @@ class _TextFileTab(QWidget):
 class FileViewerPanel(QWidget):
     all_closed = pyqtSignal()
     diagnostic_fix_requested = pyqtSignal(str, object)
+    active_file_changed = pyqtSignal(str)
 
     def __init__(self, repo_root: str = "", settings=None, parent=None):
         super().__init__(parent)
@@ -1437,6 +1736,7 @@ class FileViewerPanel(QWidget):
         tab_bar.setElideMode(Qt.TextElideMode.ElideRight)
         tab_bar.setExpanding(False)
         self._tabs.tabCloseRequested.connect(self._on_tab_close_requested)
+        self._tabs.currentChanged.connect(self._on_current_tab_changed)
 
         root.addWidget(self._tabs)
         self._apply_tab_style()
@@ -1576,12 +1876,6 @@ class FileViewerPanel(QWidget):
             editable = not truncated and not decode_error and not blocked_preview
             read_only_reason = _read_only_reason(truncated, decode_error, blocked_preview)
 
-        if (
-            diff_text is None
-            and is_git_repo(self._repo_root)
-            and can_diff_against_head(self._repo_root, path)
-        ):
-            diff_text = diff_against_head(self._repo_root, path)
         return content, diff_text, editable, read_only_reason
 
     def open_content(self, content: str, title: str):
@@ -1608,6 +1902,13 @@ class FileViewerPanel(QWidget):
         if self._tabs.count() == 0:
             self.all_closed.emit()
         return True
+
+    def _on_current_tab_changed(self, index: int):
+        if index < 0:
+            return
+        key = str(self._tabs.tabBar().tabData(index) or "")
+        if key and not key.startswith("\0"):
+            self.active_file_changed.emit(key)
 
     def closeEvent(self, event):
         for i in range(self._tabs.count()):
@@ -1645,12 +1946,12 @@ class FileViewerPanel(QWidget):
             widget.release_resources()
 
 
-def _find_match_status(text: str, folded_query: str, pos: int) -> str:
+def _find_match_status(folded_text: str, folded_query: str, pos: int) -> str:
     starts = []
-    start = text.casefold().find(folded_query)
+    start = folded_text.find(folded_query)
     while start >= 0:
         starts.append(start)
-        start = text.casefold().find(folded_query, start + max(1, len(folded_query)))
+        start = folded_text.find(folded_query, start + max(1, len(folded_query)))
     if not starts:
         return "No matches"
     current = starts.index(pos) + 1 if pos in starts else 1
@@ -1688,6 +1989,13 @@ def _diagnostic_color(severity: str) -> QColor:
         "hint": "#60a5fa",
         "info": ACCENT,
     }.get(str(severity or "info").lower(), ACCENT))
+
+
+def _diagnostics_by_line(diagnostics: list[Diagnostic]) -> dict[int, list[Diagnostic]]:
+    by_line: dict[int, list[Diagnostic]] = {}
+    for diagnostic in diagnostics:
+        by_line.setdefault(max(1, diagnostic.line), []).append(diagnostic)
+    return by_line
 
 
 def _diagnostic_summary(diagnostics: list[Diagnostic]) -> str:

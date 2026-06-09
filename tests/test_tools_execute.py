@@ -102,6 +102,76 @@ class TestEditFile:
         assert "Edited" in out
         assert "print('bye')" in (workspace / "src" / "main.py").read_text(encoding="utf-8")
 
+    def test_edit_matches_lf_old_text_in_crlf_file(self, cwd, workspace):
+        path = workspace / "src" / "crlf.py"
+        path.write_bytes(b"def f():\r\n    a = 3\r\n    return 4\r\n")
+
+        out = execute(
+            "edit_file",
+            {
+                "path": "src/crlf.py",
+                "edits": [{"oldText": "    a = 3\n", "newText": ""}],
+            },
+            cwd,
+        )
+
+        assert "Edited" in out
+        assert path.read_bytes() == b"def f():\r\n    return 4\r\n"
+
+    def test_edit_preserves_crlf_when_replacing_lf_block(self, cwd, workspace):
+        path = workspace / "src" / "crlf.py"
+        path.write_bytes(b"def f():\r\n    a = 3\r\n    return 4\r\n")
+
+        out = execute(
+            "edit_file",
+            {
+                "path": "src/crlf.py",
+                "edits": [{
+                    "oldText": "def f():\n    a = 3\n    return 4",
+                    "newText": "def f():\n    return 4",
+                }],
+            },
+            cwd,
+        )
+
+        assert "Edited" in out
+        assert path.read_bytes() == b"def f():\r\n    return 4\r\n"
+
+    def test_edit_preserves_cr_when_replacing_lf_block(self, cwd, workspace):
+        path = workspace / "src" / "cr.py"
+        path.write_bytes(b"def f():\r    a = 3\r    return 4\r")
+
+        out = execute(
+            "edit_file",
+            {
+                "path": "src/cr.py",
+                "edits": [{
+                    "oldText": "def f():\n    a = 3\n    return 4",
+                    "newText": "def f():\n    return 4",
+                }],
+            },
+            cwd,
+        )
+
+        assert "Edited" in out
+        assert path.read_bytes() == b"def f():\r    return 4\r"
+
+    def test_newline_flexible_edit_still_requires_unique_match(self, cwd, workspace):
+        path = workspace / "src" / "ambiguous.py"
+        path.write_bytes(b"    a = 3\r\n    a = 3\r")
+
+        out = execute(
+            "edit_file",
+            {
+                "path": "src/ambiguous.py",
+                "edits": [{"oldText": "    a = 3\n", "newText": ""}],
+            },
+            cwd,
+        )
+
+        assert "found 2" in out
+        assert path.read_bytes() == b"    a = 3\r\n    a = 3\r"
+
     def test_rejects_multiple_modes(self, cwd):
         out = execute(
             "edit_file",

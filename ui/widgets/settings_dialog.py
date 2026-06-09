@@ -7,10 +7,11 @@ from PyQt6.QtWidgets import (
     QTextEdit, QComboBox, QWidget, QFileDialog, QScrollArea, QSlider,
     QListWidget, QListWidgetItem, QStackedWidget, QFrame, QTableWidget,
     QTableWidgetItem, QHeaderView, QMessageBox, QToolButton, QStyle, QCheckBox,
-    QSpinBox, QColorDialog, QTabWidget, QAbstractItemView, QSizePolicy,
+    QSpinBox, QDoubleSpinBox, QColorDialog, QTabWidget, QAbstractItemView,
+    QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QColor, QFont, QIcon, QIntValidator, QPainter, QPen, QPixmap
 
 from config import MODELS, SYSTEM_PROMPT
 from services import model_registry
@@ -53,6 +54,9 @@ _PROVIDER_MODEL_EDITOR_HEIGHTS = {
     "openai": 132,
     "custom": 88,
 }
+_TEMPERATURE_TIP = "Randomness. Lower is steadier; higher explores more. Default lets the provider decide."
+_TOP_K_TIP = "Limits sampling to the top token candidates when supported. Default omits it."
+_MIN_P_TIP = "Filters low-probability tokens relative to the best token when supported. Default omits it."
 
 
 def _provider_title(provider_id: str) -> str:
@@ -77,6 +81,53 @@ def _model_context_window(model: dict) -> int | None:
     except (TypeError, ValueError):
         return None
     return value if value > 0 else None
+
+
+def _float_range(value, minimum: float, maximum: float) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if minimum <= parsed <= maximum else None
+
+
+def _provider_temperature(source) -> float | None:
+    return _float_range((source or {}).get("temperature"), 0.0, 2.0)
+
+
+def _provider_top_k(source) -> int | None:
+    raw = (source or {}).get("topK", (source or {}).get("top_k"))
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return None
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= -1 else None
+
+
+def _provider_min_p(source) -> float | None:
+    return _float_range((source or {}).get("minP", (source or {}).get("min_p")), 0.0, 1.0)
+
+
+def _generation_values(source) -> dict:
+    values = {}
+    temperature = _provider_temperature(source)
+    top_k = _provider_top_k(source)
+    min_p = _provider_min_p(source)
+    if temperature is not None:
+        values["temperature"] = temperature
+    if top_k is not None:
+        values["top_k"] = top_k
+    if min_p is not None:
+        values["min_p"] = min_p
+    return values
 
 
 def _models_to_text(models: list[dict], *, include_context: bool = False) -> str:
@@ -401,8 +452,8 @@ class _ProviderDialog(QDialog):
         self._data = data or {}
         self._original_id = (data or {}).get("id", "")
         self.setWindowTitle("Provider")
-        self.resize(480, 540)
-        self.setMinimumHeight(540)
+        self.resize(480, 620)
+        self.setMinimumHeight(620)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 16, 18, 16)
@@ -430,6 +481,33 @@ class _ProviderDialog(QDialog):
         self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key.setStyleSheet(styles["field"])
         self._field(root, "API key", self.api_key)
+
+        generation_row = QHBoxLayout()
+        generation_row.setSpacing(8)
+        self.temperature = QDoubleSpinBox()
+        self.temperature.setRange(-1.0, 2.0)
+        self.temperature.setSingleStep(0.05)
+        self.temperature.setDecimals(2)
+        self.temperature.setSpecialValueText("Default")
+        self.temperature.setValue(-1.0)
+        self.temperature.setStyleSheet(styles["field"])
+        self._generation_field(generation_row, "Temperature", self.temperature, _TEMPERATURE_TIP)
+
+        self.top_k = QLineEdit()
+        self.top_k.setPlaceholderText("Default")
+        self.top_k.setValidator(QIntValidator(-1, 100000, self.top_k))
+        self.top_k.setStyleSheet(styles["field"])
+        self._generation_field(generation_row, "Top K", self.top_k, _TOP_K_TIP)
+
+        self.min_p = QDoubleSpinBox()
+        self.min_p.setRange(-1.0, 1.0)
+        self.min_p.setSingleStep(0.01)
+        self.min_p.setDecimals(2)
+        self.min_p.setSpecialValueText("Default")
+        self.min_p.setValue(-1.0)
+        self.min_p.setStyleSheet(styles["field"])
+        self._generation_field(generation_row, "Min P", self.min_p, _MIN_P_TIP)
+        root.addLayout(generation_row)
 
         self.models = QTextEdit()
         self.models.setPlaceholderText("model-id\nmodel-id = Display Name")
@@ -466,6 +544,9 @@ class _ProviderDialog(QDialog):
             self.provider_id.setText(data.get("id", ""))
             self.base_url.setText(data.get("base_url", ""))
             self.api_key.setText(data.get("api_key", ""))
+            self._set_optional_double(self.temperature, data.get("temperature"))
+            self._set_optional_int_text(self.top_k, data.get("top_k"))
+            self._set_optional_double(self.min_p, data.get("min_p"))
             self._apply_kind_ui(kind)
             self.models.setPlainText(
                 _models_to_text(
@@ -517,6 +598,47 @@ class _ProviderDialog(QDialog):
         layout.addWidget(lbl)
         layout.addWidget(widget)
 
+    def _generation_field(self, layout: QHBoxLayout, label: str, widget: QWidget, tooltip: str):
+        col = QVBoxLayout()
+        col.setSpacing(4)
+        lbl = QLabel(label)
+        lbl.setStyleSheet(self._styles["label"])
+        lbl.setToolTip(tooltip)
+        widget.setToolTip(tooltip)
+        col.addWidget(lbl)
+        col.addWidget(widget)
+        layout.addLayout(col, 1)
+
+    def _set_optional_double(self, spin: QDoubleSpinBox, value):
+        parsed = _float_range(value, 0.0, spin.maximum())
+        spin.setValue(parsed if parsed is not None else spin.minimum())
+
+    def _set_optional_int_text(self, edit: QLineEdit, value):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            edit.clear()
+            return
+        if parsed >= -1:
+            edit.setText(str(parsed))
+        else:
+            edit.clear()
+
+    def _optional_double(self, spin: QDoubleSpinBox) -> float | None:
+        if spin.value() <= spin.minimum():
+            return None
+        return round(float(spin.value()), 4)
+
+    def _optional_int_text(self, edit: QLineEdit) -> int | None:
+        text = edit.text().strip()
+        if not text:
+            return None
+        try:
+            value = int(text)
+        except ValueError:
+            return None
+        return value if value >= -1 else None
+
     def _apply_kind_defaults(self):
         kind = self.kind.currentData()
         self._apply_kind_ui(kind)
@@ -560,7 +682,7 @@ class _ProviderDialog(QDialog):
         else:
             api = "openai-compatible"
             api_key_spec = self._data.get("api_key_spec") or _provider_env_var(provider_id)
-        return {
+        value = {
             "id": provider_id,
             "kind": kind,
             "api": api,
@@ -569,6 +691,16 @@ class _ProviderDialog(QDialog):
             "api_key_spec": api_key_spec,
             "models": _parse_models(self.models.toPlainText()),
         }
+        temperature = self._optional_double(self.temperature)
+        top_k = self._optional_int_text(self.top_k)
+        min_p = self._optional_double(self.min_p)
+        if temperature is not None:
+            value["temperature"] = temperature
+        if top_k is not None:
+            value["top_k"] = top_k
+        if min_p is not None:
+            value["min_p"] = min_p
+        return value
 
 
 def _provider_compaction_example(provider: dict) -> str:
@@ -691,7 +823,7 @@ class SettingsDialog(QDialog):
             "border-radius:6px; padding:8px 10px; font-size:13px;"
         )
         self._field_style = (
-            f"QLineEdit, QTextEdit, QComboBox, QSpinBox {{ {field_base} }}"
+            f"QLineEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{ {field_base} }}"
             "QComboBox::drop-down { border:none; width:22px; }"
             "QComboBox::down-arrow { image:none; }"
             f"QComboBox QAbstractItemView {{ background:{p['BG3']}; color:{p['TEXT']};"
@@ -1034,6 +1166,13 @@ class SettingsDialog(QDialog):
         )
         if kind == "custom":
             models = _apply_legacy_provider_context(models, provider_window)
+        generation = _generation_values(raw or {})
+        if not raw and cfg:
+            generation = _generation_values({
+                "temperature": getattr(cfg, "temperature", None),
+                "top_k": getattr(cfg, "top_k", None),
+                "min_p": getattr(cfg, "min_p", None),
+            })
         return {
             "id": provider_id,
             "kind": kind,
@@ -1042,6 +1181,7 @@ class SettingsDialog(QDialog):
             "api_key": self._saved_provider_key(saved, provider_id),
             "api_key_spec": api_key_spec,
             "models": models,
+            **generation,
         }
 
 
@@ -1421,7 +1561,17 @@ class SettingsDialog(QDialog):
                 provider_id,
                 provider.get("models", []),
             )
-            has_override = bool(provider.get("base_url")) or not is_builtin or has_model_override
+            generation = _generation_values(provider)
+            has_model_generation_override = any(
+                _generation_values(model) for model in provider.get("models", [])
+            )
+            has_override = (
+                bool(provider.get("base_url"))
+                or not is_builtin
+                or has_model_override
+                or bool(generation)
+                or has_model_generation_override
+            )
             if not has_override:
                 continue
             entry = {
@@ -1430,7 +1580,13 @@ class SettingsDialog(QDialog):
             }
             if provider.get("base_url"):
                 entry["baseUrl"] = provider["base_url"]
-            if not is_builtin or has_model_override:
+            if generation.get("temperature") is not None:
+                entry["temperature"] = generation["temperature"]
+            if generation.get("top_k") is not None:
+                entry["topK"] = generation["top_k"]
+            if generation.get("min_p") is not None:
+                entry["minP"] = generation["min_p"]
+            if not is_builtin or has_model_override or has_model_generation_override:
                 models = []
                 for model in provider.get("models", []):
                     model_entry = {"id": model["id"]}
@@ -1440,6 +1596,13 @@ class SettingsDialog(QDialog):
                         window = _model_context_window(model)
                         if window:
                             model_entry["contextWindow"] = window
+                    model_generation = _generation_values(model)
+                    if model_generation.get("temperature") is not None:
+                        model_entry["temperature"] = model_generation["temperature"]
+                    if model_generation.get("top_k") is not None:
+                        model_entry["topK"] = model_generation["top_k"]
+                    if model_generation.get("min_p") is not None:
+                        model_entry["minP"] = model_generation["min_p"]
                     models.append(model_entry)
                 entry["models"] = models
             user_providers[provider_id] = entry

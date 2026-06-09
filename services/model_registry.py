@@ -73,6 +73,42 @@ def _parse_context_window(value) -> int | None:
     return n if n > 0 else None
 
 
+def _parse_float_range(value, minimum: float, maximum: float) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if minimum <= parsed <= maximum else None
+
+
+def _parse_temperature(value) -> float | None:
+    return _parse_float_range(value, 0.0, 2.0)
+
+
+def _parse_top_k(value) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= -1 else None
+
+
+def _parse_min_p(value) -> float | None:
+    return _parse_float_range(value, 0.0, 1.0)
+
+
+def _coalesce_config_value(primary, fallback):
+    return primary if primary is not None else fallback
+
+
 @dataclass
 class ModelConfig:
     provider_id:  str
@@ -81,6 +117,9 @@ class ModelConfig:
     api_key_spec: str         # env var name, "!command", or literal key
     display_name: str
     context_window: int | None = None  # tokens; None = api default
+    temperature: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
 
 
 @dataclass
@@ -91,6 +130,9 @@ class ProviderConfig:
     api_key_spec: str
     model_ids:    list[str]
     context_window: int | None = None
+    temperature: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
 
 
 def api_key_env_var(spec: str) -> str | None:
@@ -175,6 +217,9 @@ def _merge(builtin: dict, user: dict) -> dict:
         context_window = _parse_context_window(
             ucfg.get("contextWindow", ucfg.get("context_window")),
         )
+        temperature = _parse_temperature(ucfg.get("temperature"))
+        top_k = _parse_top_k(ucfg.get("topK", ucfg.get("top_k")))
+        min_p = _parse_min_p(ucfg.get("minP", ucfg.get("min_p")))
         user_models  = ucfg.get("models", [])
 
         if api not in _VALID_APIS:
@@ -191,6 +236,12 @@ def _merge(builtin: dict, user: dict) -> dict:
                 existing["api"] = api
             if context_window is not None:
                 existing["context_window"] = context_window
+            if temperature is not None:
+                existing["temperature"] = temperature
+            if top_k is not None:
+                existing["top_k"] = top_k
+            if min_p is not None:
+                existing["min_p"] = min_p
             if user_models:
                 existing_models = existing.get("models", [])
                 existing_by_id = {m["id"]: m for m in existing_models if "id" in m}
@@ -218,6 +269,12 @@ def _merge(builtin: dict, user: dict) -> dict:
             }
             if context_window is not None:
                 entry["context_window"] = context_window
+            if temperature is not None:
+                entry["temperature"] = temperature
+            if top_k is not None:
+                entry["top_k"] = top_k
+            if min_p is not None:
+                entry["min_p"] = min_p
             merged[name] = entry
     return merged
 
@@ -237,6 +294,9 @@ def _build(providers: dict) -> tuple[dict, dict, dict, dict]:
         provider_window = _parse_context_window(
             pcfg.get("context_window", pcfg.get("contextWindow")),
         )
+        provider_temperature = _parse_temperature(pcfg.get("temperature"))
+        provider_top_k = _parse_top_k(pcfg.get("top_k", pcfg.get("topK")))
+        provider_min_p = _parse_min_p(pcfg.get("min_p", pcfg.get("minP")))
 
         ids: list[str] = []
         for m in pcfg.get("models", []):
@@ -251,6 +311,18 @@ def _build(providers: dict) -> tuple[dict, dict, dict, dict]:
             model_window = _parse_context_window(
                 m.get("contextWindow", m.get("context_window")),
             ) or provider_window
+            model_temperature = _coalesce_config_value(
+                _parse_temperature(m.get("temperature")),
+                provider_temperature,
+            )
+            model_top_k = _coalesce_config_value(
+                _parse_top_k(m.get("topK", m.get("top_k"))),
+                provider_top_k,
+            )
+            model_min_p = _coalesce_config_value(
+                _parse_min_p(m.get("minP", m.get("min_p"))),
+                provider_min_p,
+            )
             model_config[mid] = ModelConfig(
                 provider_id=provider_id,
                 api=api,
@@ -258,6 +330,9 @@ def _build(providers: dict) -> tuple[dict, dict, dict, dict]:
                 api_key_spec=api_key_spec,
                 display_name=m.get("name", mid),
                 context_window=model_window,
+                temperature=model_temperature,
+                top_k=model_top_k,
+                min_p=model_min_p,
             )
         models[provider_id] = ids
         provider_config[provider_id] = ProviderConfig(
@@ -267,6 +342,9 @@ def _build(providers: dict) -> tuple[dict, dict, dict, dict]:
             api_key_spec=api_key_spec,
             model_ids=ids,
             context_window=provider_window,
+            temperature=provider_temperature,
+            top_k=provider_top_k,
+            min_p=provider_min_p,
         )
 
     return models, model_provider, model_config, provider_config

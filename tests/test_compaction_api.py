@@ -27,9 +27,15 @@ def test_call_model_openai():
             api="openai-compatible",
             api_key_spec="OPENAI_API_KEY",
             base_url="https://api.example.com/v1",
+            temperature=0.6,
+            top_k=20,
+            min_p=0.05,
         )
         assert _call_model("gpt-5.4-nano", "prompt", 4096) == "openai summary"
         assert openai_cls.call_args.kwargs["base_url"] == "https://api.example.com/v1"
+        request = mock_client.chat.completions.create.call_args.kwargs
+        assert request["temperature"] == 0.6
+        assert request["extra_body"] == {"top_k": 20, "min_p": 0.05}
 
 
 def test_compact_noop_when_nothing_to_cut():

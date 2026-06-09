@@ -10,6 +10,7 @@ from typing import Protocol
 
 
 _WORD_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{1,}\b")
+_LOCAL_COMPLETION_SCAN_CHARS = 160_000
 
 _LANGUAGE_KEYWORDS = {
     ".js": {
@@ -102,6 +103,7 @@ class LocalCompletionProvider:
         prefix = prefix.strip()
         if not prefix:
             return []
+        content = _completion_scan_window(content, position)
 
         candidates: dict[str, CompletionItem] = {}
         for word in _language_keywords(path):
@@ -122,6 +124,17 @@ def prefix_at(content: str, position: int) -> str:
     while start > 0 and _is_word_char(content[start - 1]):
         start -= 1
     return content[start:position]
+
+
+def _completion_scan_window(content: str, position: int) -> str:
+    if len(content) <= _LOCAL_COMPLETION_SCAN_CHARS:
+        return content
+    position = max(0, min(position, len(content)))
+    before = _LOCAL_COMPLETION_SCAN_CHARS // 2
+    start = max(0, position - before)
+    end = min(len(content), start + _LOCAL_COMPLETION_SCAN_CHARS)
+    start = max(0, end - _LOCAL_COMPLETION_SCAN_CHARS)
+    return content[start:end]
 
 
 def _language_keywords(path: str) -> set[str]:

@@ -24,6 +24,15 @@ def _stream_mock(text="hi", tool_blocks=None):
 
 def test_loop_anthropic_text_only(workspace, qapp):
     thread = ChatThread("claude-sonnet-4-6", [{"role": "user", "content": "hi"}], "sys", str(workspace))
+    thread._model_cfg = SimpleNamespace(
+        provider_id="claude",
+        api="anthropic",
+        api_key_spec="ANTHROPIC_API_KEY",
+        base_url=None,
+        temperature=0.4,
+        top_k=20,
+        min_p=0.05,
+    )
     mock_client = MagicMock()
     mock_client.messages.stream.return_value = _stream_mock("answer")
 
@@ -34,10 +43,22 @@ def test_loop_anthropic_text_only(workspace, qapp):
     assert text == "answer"
     assert thread.last_usage["input_tokens"] == 30
     assert thread.last_usage["cached_input_tokens"] == 20
+    request = mock_client.messages.stream.call_args.kwargs
+    assert request["temperature"] == 0.4
+    assert "extra_body" not in request
 
 
 def test_loop_openai_text_only(workspace, qapp):
     thread = ChatThread("gpt-5.4-nano", [{"role": "user", "content": "hi"}], "sys", str(workspace))
+    thread._model_cfg = SimpleNamespace(
+        provider_id="local",
+        api="openai-compatible",
+        api_key_spec="OPENAI_API_KEY",
+        base_url="http://localhost:11434/v1",
+        temperature=0.6,
+        top_k=20,
+        min_p=0.05,
+    )
 
     chunk = MagicMock()
     chunk.choices = [MagicMock(delta=MagicMock(content="yo", tool_calls=None))]
@@ -65,6 +86,9 @@ def test_loop_openai_text_only(workspace, qapp):
     assert text == "yo"
     assert thread.last_usage["cached_input_tokens"] == 80
     assert thread.last_usage["output_tokens"] == 5
+    request = mock_client.chat.completions.create.call_args.kwargs
+    assert request["temperature"] == 0.6
+    assert request["extra_body"] == {"top_k": 20, "min_p": 0.05}
 
 
 def _openai_stream(*deltas):

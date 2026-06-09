@@ -25,6 +25,7 @@ from services.crew import (
 from services.crew_context import crew_context_window
 from services.compaction import compact_with_result, compaction_threshold
 from services.model_registry import context_window_tokens, get_model_config, resolve_api_key
+from services.model_requests import apply_generation_params
 from services.content import content_preview, prepare_for_anthropic, prepare_for_openai
 from services.tool_policy import ConversationToolPolicy, ToolApprovalBus, resolve_path
 from services.shell_tool import is_shell_tool
@@ -206,13 +207,15 @@ class ChatThread(QThread):
                 break
             tools = self._tools_anthropic()
             self._ensure_context_budget("anthropic", tools)
-            with client.messages.stream(
-                model=self.model,
-                max_tokens=4096,
-                system=self.system,
-                tools=tools,
-                messages=prepare_for_anthropic(self.history),
-            ) as stream:
+            request = {
+                "model": self.model,
+                "max_tokens": 4096,
+                "system": self.system,
+                "tools": tools,
+                "messages": prepare_for_anthropic(self.history),
+            }
+            apply_generation_params(request, cfg, include_extra_body=False)
+            with client.messages.stream(**request) as stream:
                 for text in stream.text_stream:
                     if self._cancel.is_set():
                         break
@@ -293,6 +296,7 @@ class ChatThread(QThread):
                 "tools": tools,
                 "stream": True,
             }
+            apply_generation_params(request, cfg)
             if cfg.provider_id == "openai" and not cfg.base_url:
                 request["stream_options"] = {"include_usage": True}
             turn_usage = {}

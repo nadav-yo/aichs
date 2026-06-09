@@ -57,6 +57,94 @@ def test_provider_dialog_resizes_models_for_selected_provider_type(qapp):
         dialog.close()
 
 
+def test_provider_dialog_generation_params_have_tooltips_and_values(qapp):
+    styles = {"hint": "", "btn": "", "field": "", "label": ""}
+    dialog = _ProviderDialog(styles, set())
+    try:
+        dialog.kind.setCurrentIndex(dialog.kind.findData("custom"))
+        dialog.provider_id.setText("local")
+        dialog.models.setPlainText("model-a")
+        dialog.temperature.setValue(0.6)
+        dialog.top_k.setText("20")
+        dialog.min_p.setValue(0.05)
+
+        value = dialog.value()
+
+        assert dialog.temperature.toolTip()
+        assert dialog.top_k.toolTip()
+        assert dialog.min_p.toolTip()
+        assert value["temperature"] == 0.6
+        assert value["top_k"] == 20
+        assert value["min_p"] == 0.05
+    finally:
+        dialog.close()
+
+
+def test_provider_dialog_top_k_zero_is_not_default(qapp):
+    styles = {"hint": "", "btn": "", "field": "", "label": ""}
+    dialog = _ProviderDialog(styles, set())
+    try:
+        dialog.kind.setCurrentIndex(dialog.kind.findData("custom"))
+        dialog.provider_id.setText("local")
+        dialog.models.setPlainText("model-a")
+        dialog.top_k.setText("0")
+
+        value = dialog.value()
+
+        assert value["top_k"] == 0
+    finally:
+        dialog.close()
+
+
+def test_provider_dialog_top_k_negative_one_is_not_default(qapp):
+    styles = {"hint": "", "btn": "", "field": "", "label": ""}
+    dialog = _ProviderDialog(styles, set())
+    try:
+        dialog.kind.setCurrentIndex(dialog.kind.findData("custom"))
+        dialog.provider_id.setText("local")
+        dialog.models.setPlainText("model-a")
+        dialog.top_k.setText("-1")
+
+        value = dialog.value()
+
+        assert value["top_k"] == -1
+    finally:
+        dialog.close()
+
+
+def test_settings_save_writes_generation_params_to_models_json(qapp, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    reg.save_user_providers({})
+    reg.reload()
+
+    try:
+        store = SettingsStore()
+        dialog = SettingsDialog(store)
+        dialog._providers = [{
+            "id": "local",
+            "kind": "custom",
+            "api": "openai-compatible",
+            "base_url": "http://localhost:11434/v1",
+            "api_key": "test-key",
+            "api_key_spec": "LOCAL_KEY",
+            "temperature": 0.6,
+            "top_k": 0,
+            "min_p": 0.05,
+            "models": [{"id": "model-a", "name": "Model A"}],
+        }]
+
+        dialog._save()
+
+        provider = reg.load_user_providers()["local"]
+        assert provider["temperature"] == 0.6
+        assert provider["topK"] == 0
+        assert provider["minP"] == 0.05
+    finally:
+        reg.save_user_providers({})
+        reg.reload()
+
+
 def test_model_order_drag_updates_provider_order_without_default_column(qapp, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
