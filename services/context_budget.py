@@ -78,7 +78,7 @@ def analyze_context(
     ]
     if agents:
         segments.append(ContextSegment("Rules", agents, "AGENTS.md"))
-    segments.append(ContextSegment("Workspace", workspace, "File tree & git status"))
+    segments.append(ContextSegment("Workspace", workspace, "CWD & tool guidance"))
     if extensions:
         segments.append(ContextSegment("Extensions", extensions, "Context snippets"))
     segments.append(ContextSegment("Tool definitions", tools_json))

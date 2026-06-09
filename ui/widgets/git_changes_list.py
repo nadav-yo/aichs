@@ -28,6 +28,7 @@ from services.commit_message import (
     COMMIT_MESSAGE_PROMPT_ADDITION_KEY,
     CommitMessageThread,
 )
+from services.chat_drag import AICHS_FILE_DROP_MIME, file_drop_payload, file_drop_text
 from services.git_status import (
     GitCommandResult,
     GitFileChange,
@@ -79,7 +80,8 @@ class _GitChangeList(QListWidget):
         if paths:
             payload = json.dumps({"staged": self.staged, "paths": paths}).encode("utf-8")
             mime.setData(_GIT_CHANGE_MIME, payload)
-            mime.setText("\n".join(paths))
+            mime.setData(AICHS_FILE_DROP_MIME, file_drop_payload(paths))
+            mime.setText(file_drop_text(paths))
         return mime
 
     def dragEnterEvent(self, event):
@@ -180,9 +182,9 @@ class GitChangesList(QWidget):
         self.apply_appearance()
         self.refresh()
 
-        timer = QTimer(self)
-        timer.timeout.connect(self.refresh)
-        timer.start(5000)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self.refresh)
+        self._refresh_timer.start(5000)
 
     def _configure_list(self, widget: QListWidget):
         widget.itemDoubleClicked.connect(self._on_open)
@@ -420,6 +422,10 @@ class GitChangesList(QWidget):
     def set_repo_path(self, path: str):
         self.repo_path = path
         self.refresh()
+
+    def shutdown(self):
+        self._refresh_timer.stop()
+        self._generate_timer.stop()
 
 
 def _default_stash_message(paths: list[str]) -> str:

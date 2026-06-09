@@ -1,6 +1,15 @@
 import os
 
-from PyQt6.QtWidgets import QMainWindow, QSplitter, QApplication
+from PyQt6.QtWidgets import (
+    QHBoxLayout,
+    QMainWindow,
+    QSplitter,
+    QApplication,
+    QPushButton,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 from PyQt6.QtCore import Qt, QByteArray
 from PyQt6.QtGui import QShortcut, QKeySequence
 
@@ -12,6 +21,7 @@ from ui.theme import apply_app_theme, current_theme
 from ui.widgets.left_panel import LeftPanel
 from ui.widgets.chat_panel import ChatPanel
 from ui.widgets.file_viewer import FileViewerPanel
+from ui.widgets.workbench_context import WorkbenchContextPanel
 from ui.widgets.command_palette import CommandPalette
 from ui.widgets.file_search_dialog import FileSearchDialog
 from ui.widgets.text_search_dialog import TextSearchDialog
@@ -42,6 +52,7 @@ class MainWindow(QMainWindow):
     ):
         super().__init__()
         self.setWindowTitle("AICHS")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
 
         self._settings = SettingsStore()
         saved = self._settings.load()
@@ -57,18 +68,14 @@ class MainWindow(QMainWindow):
         repo  = os.getcwd()
         store = ConversationStore(repo)
 
-        self._outer = QSplitter(Qt.Orientation.Horizontal)
-
         self._left = LeftPanel(
             store,
             repo,
             settings=self._settings,
             current_model_getter=lambda: self._chat.current_model(),
         )
-        self._left.setMinimumWidth(150)
-        self._left.setMaximumWidth(400)
-
-        self._inner = QSplitter(Qt.Orientation.Vertical)
+        self._left.setMinimumWidth(240)
+        self._left.setMaximumWidth(480)
 
         self._viewer = FileViewerPanel(repo, settings=self._settings)
         self._viewer.hide()
@@ -78,10 +85,55 @@ class MainWindow(QMainWindow):
 
         self._chat = ChatPanel(store, cwd=repo, settings=self._settings)
 
-        self._inner.addWidget(self._viewer)
-        self._inner.addWidget(self._chat)
-        self._inner.setStretchFactor(0, 2)
-        self._inner.setStretchFactor(1, 1)
+        self._context = WorkbenchContextPanel()
+        self._context.setMinimumWidth(220)
+        self._context.setMaximumWidth(380)
+        self._context.collapse_requested.connect(self._collapse_context)
+
+        self._context_tab = QPushButton("A\nc\nt\ni\nv\ni\nt\ny")
+        self._context_tab.setToolTip("Show activity")
+        self._context_tab.setFixedWidth(30)
+        self._context_tab.setMinimumHeight(112)
+        self._context_tab.clicked.connect(self._expand_context)
+
+        context_handle = QWidget()
+        context_handle.setObjectName("contextHandle")
+        context_handle_layout = QVBoxLayout(context_handle)
+        context_handle_layout.setContentsMargins(0, 0, 0, 0)
+        context_handle_layout.setSpacing(0)
+        context_handle_layout.addStretch()
+        context_handle_layout.addWidget(
+            self._context_tab,
+            0,
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+        )
+        context_handle_layout.addStretch()
+
+        self._context_shell = QWidget()
+        self._context_shell.setMinimumWidth(30)
+        self._context_shell.setMaximumWidth(420)
+        context_shell_layout = QHBoxLayout(self._context_shell)
+        context_shell_layout.setContentsMargins(0, 0, 0, 0)
+        context_shell_layout.setSpacing(0)
+
+        self._context_stack = QStackedWidget()
+        self._context_stack.addWidget(self._context)
+        self._context_stack.addWidget(context_handle)
+        context_shell_layout.addWidget(self._context_stack, 1)
+
+        self._workbench = QSplitter(Qt.Orientation.Horizontal)
+        self._workbench.addWidget(self._chat)
+        self._workbench.addWidget(self._viewer)
+        self._workbench.setStretchFactor(0, 3)
+        self._workbench.setStretchFactor(1, 2)
+
+        self._root_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._root_splitter.addWidget(self._left)
+        self._root_splitter.addWidget(self._workbench)
+        self._root_splitter.addWidget(self._context_shell)
+        self._root_splitter.setStretchFactor(0, 0)
+        self._root_splitter.setStretchFactor(1, 1)
+        self._root_splitter.setStretchFactor(2, 0)
 
         self._left.selected.connect(self._chat.load_conversation)
         self._left.new_chat.connect(self._new_conversation)
@@ -90,22 +142,22 @@ class MainWindow(QMainWindow):
         self._left.file_open.connect(self._open_file)
         self._left.git_file_open.connect(self._open_git_file)
         self._left.file_attach.connect(self._chat.attach_file)
+        self._left.file_search_requested.connect(self._open_file_search)
+        self._left.text_search_requested.connect(self._open_text_search)
+        self._left.extensions_requested.connect(self._chat.show_extensions)
+        self._left.activity_panel_collapsed_changed.connect(self._on_activity_panel_collapsed)
         self._chat.saved.connect(self._left.refresh)
         self._chat.conversation_created.connect(self._left.select_conversation)
         self._chat.open_code.connect(self._open_content)
         self._chat.open_file.connect(self._open_file)
         self._chat.file_written.connect(self._left.mark_file_touched)
         self._chat.file_write_completed.connect(self._refresh_open_file)
+        self._chat.tool_activity.connect(self._context.add_tool_activity)
         self._left.settings_changed.connect(self._apply_appearance)
 
         self._setup_shortcuts()
 
-        self._outer.addWidget(self._left)
-        self._outer.addWidget(self._inner)
-        self._outer.setStretchFactor(0, 0)
-        self._outer.setStretchFactor(1, 1)
-
-        self.setCentralWidget(self._outer)
+        self.setCentralWidget(self._root_splitter)
         self._restore_layout(saved)
         self._apply_appearance()
 
@@ -189,28 +241,46 @@ class MainWindow(QMainWindow):
         if geom:
             self.restoreGeometry(QByteArray.fromHex(geom.encode()))
 
-        outer = saved.get("outer_sizes")
-        if outer:
-            if len(outer) == 3:
-                self._outer.setSizes([outer[0], outer[1] + outer[2]])
-            elif len(outer) == 2:
-                self._outer.setSizes(outer)
-        else:
-            self.resize(1280, 800)
-            self._outer.setSizes([360, 920])
+        self.resize(1360, 820)
 
-        inner = saved.get("inner_sizes")
-        if inner and len(inner) == 2:
-            self._inner.setSizes(inner)
+        activity = saved.get("activity_sizes")
+        if activity and len(activity) == 3:
+            self._root_splitter.setSizes(activity)
+        else:
+            self._root_splitter.setSizes([320, 780, 260])
+
+        workbench = saved.get("workbench_sizes")
+        if workbench and len(workbench) == 2:
+            self._workbench.setSizes(workbench)
+        else:
+            self._workbench.setSizes([620, 500])
+
+        active_activity = str(saved.get("active_activity") or "chats")
+        self._left.set_active_activity(active_activity)
+        if bool(saved.get("activity_collapsed", False)):
+            self._left.collapse_activity_panel()
+        if bool(saved.get("context_collapsed", True)):
+            self._collapse_context()
+        else:
+            self._expand_context()
 
     def closeEvent(self, event):
+        context_collapsed = self._is_context_collapsed()
+        activity_collapsed = self._left.is_activity_panel_collapsed()
         self._settings.update({
             "workspace_path": os.getcwd(),
             "window_geometry": self.saveGeometry().toHex().data().decode(),
-            "outer_sizes": self._outer.sizes(),
-            "inner_sizes": self._inner.sizes(),
+            "activity_sizes": self._root_splitter.sizes(),
+            "workbench_sizes": self._workbench.sizes(),
+            "context_sizes": [self._context.width()],
+            "context_collapsed": context_collapsed,
+            "active_activity": self._left.active_activity(),
+            "activity_collapsed": activity_collapsed,
         })
-        self._chat.stop_managed_processes()
+        self._prepare_splitters_for_close()
+        self._left.shutdown()
+        self._viewer.shutdown()
+        self._chat.shutdown()
         super().closeEvent(event)
 
     def _apply_appearance(self):
@@ -222,6 +292,10 @@ class MainWindow(QMainWindow):
         self._chat.refresh_models()
         self._chat.apply_appearance()
         self._viewer.apply_appearance()
+        self._context.apply_appearance()
+        self._context_tab.setStyleSheet(
+            "QPushButton { padding:6px 0px; border-radius:0px; text-align:center; }"
+        )
 
     def _open_file(
         self,
@@ -239,8 +313,8 @@ class MainWindow(QMainWindow):
         )
         self._left.reveal_file(path, activate=activate_files)
         self._viewer.show()
-        total = self._inner.height()
-        self._inner.setSizes([total * 2 // 3, total // 3])
+        total = max(1, self._workbench.width())
+        self._workbench.setSizes([total * 55 // 100, total * 45 // 100])
 
     def _open_git_file(self, path: str):
         self._open_file(path, activate_files=False)
@@ -251,8 +325,8 @@ class MainWindow(QMainWindow):
     def _open_content(self, content: str, title: str):
         self._viewer.open_content(content, title)
         self._viewer.show()
-        total = self._inner.height()
-        self._inner.setSizes([total * 2 // 3, total // 3])
+        total = max(1, self._workbench.width())
+        self._workbench.setSizes([total * 55 // 100, total * 45 // 100])
 
     def _refresh_open_file(self, path: str):
         self._viewer.refresh_file(path, repo_root=os.getcwd())
@@ -262,3 +336,51 @@ class MainWindow(QMainWindow):
 
     def _chat_draft_diagnostic_fix(self, text: str, file_refs: list[str]):
         self._chat.draft_diagnostic_fix(text, file_refs)
+
+    def _collapse_context(self):
+        self._context_stack.setCurrentIndex(1)
+        self._context_shell.setMinimumWidth(30)
+        self._context_shell.setMaximumWidth(30)
+        sizes = self._root_splitter.sizes()
+        if len(sizes) == 3:
+            self._root_splitter.setSizes([
+                sizes[0],
+                sizes[1] + max(0, sizes[2] - 30),
+                30,
+            ])
+
+    def _expand_context(self):
+        self._context_shell.setMinimumWidth(220)
+        self._context_shell.setMaximumWidth(420)
+        self._context_stack.setCurrentIndex(0)
+        sizes = self._root_splitter.sizes()
+        if len(sizes) == 3:
+            total = max(1, sum(sizes))
+            context_width = min(300, max(240, total // 5))
+            left_width = sizes[0]
+            self._root_splitter.setSizes([
+                left_width,
+                max(1, total - left_width - context_width),
+                context_width,
+            ])
+
+    def _is_context_collapsed(self) -> bool:
+        return self._context_stack.currentIndex() == 1
+
+    def _prepare_splitters_for_close(self):
+        self._context_stack.setCurrentIndex(0)
+        self._context_shell.setMinimumWidth(0)
+        self._context_shell.setMaximumWidth(16777215)
+
+    def _on_activity_panel_collapsed(self, collapsed: bool):
+        sizes = self._root_splitter.sizes()
+        if len(sizes) != 3:
+            return
+        total = max(1, sum(sizes))
+        right_width = sizes[2]
+        left_width = 64 if collapsed else 320
+        self._root_splitter.setSizes([
+            left_width,
+            max(1, total - left_width - right_width),
+            right_width,
+        ])

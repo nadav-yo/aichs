@@ -28,10 +28,15 @@ from services.model_registry import (
     save_user_providers,
 )
 from storage.settings import (
+    DEFAULT_FILE_EDITOR_TAB_SPACES,
     DEFAULT_TRASH_RETENTION_DAYS,
     FILE_EDITOR_AUTO_SAVE_KEY,
+    FILE_EDITOR_TAB_SPACES_KEY,
+    MAX_FILE_EDITOR_TAB_SPACES,
+    MIN_FILE_EDITOR_TAB_SPACES,
     TRASH_RETENTION_DAYS_KEY,
     SettingsStore,
+    file_editor_tab_spaces,
     trash_retention_days,
 )
 from ui.avatars import avatar_pixmap, clear_cache, persist_portrait
@@ -42,6 +47,7 @@ from ui.theme import (
 
 _NAV = [
     ("general", "General"),
+    ("editor", "Editor"),
     ("models", "Models"),
     ("crew", "Crew"),
 ]
@@ -847,6 +853,14 @@ class SettingsDialog(QDialog):
             f"border:1px solid {p['BORDER']}; border-radius:6px; padding:3px; }}"
             f"QToolButton:hover {{ color:{p['TEXT']}; background:{p['BORDER']}; }}"
         )
+        check_icon = (Path(__file__).resolve().parents[2] / "assets" / "checkmark.svg").as_posix()
+        self._checkbox_style = (
+            f"QCheckBox {{ color:{p['TEXT']}; font-size:13px; spacing:8px; }}"
+            f"QCheckBox::indicator {{ width:16px; height:16px;"
+            f"background:{p['BG3']}; border:1px solid {p['TEXT_DIM']}; border-radius:3px; }}"
+            f"QCheckBox::indicator:hover {{ border:1px solid {ACCENT}; }}"
+            f"QCheckBox::indicator:checked {{ image:url({check_icon}); border:1px solid {ACCENT}; }}"
+        )
         self._styles = {
             "hint": self._hint_style,
             "btn": self._btn_style,
@@ -892,6 +906,7 @@ class SettingsDialog(QDialog):
         self._stack.setStyleSheet(f"background:{p['BG2']};")
 
         self._stack.addWidget(_scroll_page(self._page_general(saved)))
+        self._stack.addWidget(_scroll_page(self._page_editor(saved)))
         self._stack.addWidget(_scroll_page(self._page_models()))
         self._stack.addWidget(_scroll_page(self._page_crew(saved)))
 
@@ -975,16 +990,8 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(self._section_separator())
 
-        check_icon = (Path(__file__).resolve().parents[2] / "assets" / "checkmark.svg").as_posix()
-        checkbox_style = (
-            f"QCheckBox {{ color:{p['TEXT']}; font-size:13px; spacing:8px; }}"
-            f"QCheckBox::indicator {{ width:16px; height:16px;"
-            f"background:{p['BG3']}; border:1px solid {p['TEXT_DIM']}; border-radius:3px; }}"
-            f"QCheckBox::indicator:hover {{ border:1px solid {ACCENT}; }}"
-            f"QCheckBox::indicator:checked {{ image:url({check_icon}); border:1px solid {ACCENT}; }}"
-        )
         self.enter_to_send_check = QCheckBox("Enter sends message")
-        self.enter_to_send_check.setStyleSheet(checkbox_style)
+        self.enter_to_send_check.setStyleSheet(self._checkbox_style)
         layout.addWidget(self.enter_to_send_check)
 
         enter_hint = QLabel("When enabled, Shift+Enter inserts a new line.")
@@ -992,18 +999,6 @@ class SettingsDialog(QDialog):
         enter_hint.setStyleSheet(self._hint_style)
         layout.addWidget(enter_hint)
 
-        self.file_editor_auto_save_check = QCheckBox("Auto-save file editor changes")
-        self.file_editor_auto_save_check.setStyleSheet(checkbox_style)
-        layout.addWidget(self.file_editor_auto_save_check)
-
-        auto_save_hint = QLabel(
-            "When disabled, edited files are marked in the tab bar until you save or revert."
-        )
-        auto_save_hint.setWordWrap(True)
-        auto_save_hint.setStyleSheet(self._hint_style)
-        layout.addWidget(auto_save_hint)
-
-        layout.addWidget(self._section_separator())
         self.trash_retention_spin = QSpinBox()
         self.trash_retention_spin.setRange(1, 3650)
         self.trash_retention_spin.setSuffix(" days")
@@ -1031,6 +1026,42 @@ class SettingsDialog(QDialog):
             "human", "Your avatar", saved.get("avatar_human", "human"), self._styles,
         )
         layout.addWidget(self.human_portrait)
+        layout.addStretch()
+        return page
+
+    def _page_editor(self, saved: dict) -> QWidget:
+        page, layout = self._page_shell(
+            "Editor",
+            "File editor behavior.",
+        )
+
+        self.file_editor_auto_save_check = QCheckBox("Auto-save file editor changes")
+        self.file_editor_auto_save_check.setStyleSheet(self._checkbox_style)
+        layout.addWidget(self.file_editor_auto_save_check)
+
+        auto_save_hint = QLabel(
+            "When disabled, edited files are marked in the tab bar until you save or revert."
+        )
+        auto_save_hint.setWordWrap(True)
+        auto_save_hint.setStyleSheet(self._hint_style)
+        layout.addWidget(auto_save_hint)
+
+        layout.addWidget(self._section_separator())
+        self.file_editor_tab_spaces_spin = QSpinBox()
+        self.file_editor_tab_spaces_spin.setRange(
+            MIN_FILE_EDITOR_TAB_SPACES,
+            MAX_FILE_EDITOR_TAB_SPACES,
+        )
+        self.file_editor_tab_spaces_spin.setStyleSheet(self._field_style)
+        self._field(layout, "Tab width (spaces)", self.file_editor_tab_spaces_spin)
+
+        tab_hint = QLabel(
+            f"Controls visual tab width and Shift+Tab outdent size. Default is {DEFAULT_FILE_EDITOR_TAB_SPACES}."
+        )
+        tab_hint.setWordWrap(True)
+        tab_hint.setStyleSheet(self._hint_style)
+        layout.addWidget(tab_hint)
+
         layout.addStretch()
         return page
 
@@ -1488,6 +1519,7 @@ class SettingsDialog(QDialog):
         self.file_editor_auto_save_check.setChecked(
             bool(saved.get(FILE_EDITOR_AUTO_SAVE_KEY, False))
         )
+        self.file_editor_tab_spaces_spin.setValue(file_editor_tab_spaces(saved))
         self.trash_retention_spin.setValue(trash_retention_days(saved))
         self.commit_message_guidance.setPlainText(
             str(saved.get(COMMIT_MESSAGE_PROMPT_ADDITION_KEY, ""))
@@ -1626,6 +1658,7 @@ class SettingsDialog(QDialog):
             "font_size": self.font_combo.currentText(),
             "enter_to_send": self.enter_to_send_check.isChecked(),
             FILE_EDITOR_AUTO_SAVE_KEY: self.file_editor_auto_save_check.isChecked(),
+            FILE_EDITOR_TAB_SPACES_KEY: self.file_editor_tab_spaces_spin.value(),
             TRASH_RETENTION_DAYS_KEY: self.trash_retention_spin.value(),
             COMMIT_MESSAGE_PROMPT_ADDITION_KEY: self.commit_message_guidance.toPlainText().strip(),
             "default_models": default_models,

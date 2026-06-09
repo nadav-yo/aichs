@@ -5,7 +5,7 @@ import markdown as _md
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPlainTextEdit, QFrame, QTabWidget,
     QScrollArea, QLabel, QSizePolicy, QCheckBox, QPushButton, QTextBrowser, QLineEdit,
-    QCompleter, QApplication, QToolTip, QMenu,
+    QCompleter, QApplication, QToolTip, QMenu, QTabBar,
 )
 from PyQt6.QtCore import (
     QObject, QRunnable, QThreadPool, QTimer, pyqtSignal, pyqtSlot,
@@ -20,6 +20,7 @@ from pygments.lexers import get_lexer_for_filename, guess_lexer, TextLexer
 from pygments.token import Token
 
 from config import MAX_FILE_PREVIEW_BYTES
+from services.chat_drag import AICHS_FILE_DROP_MIME, file_drop_payload, file_drop_text
 from services.diff_html import changed_new_line_numbers
 from services.file_editor_refs import AICHS_EDITOR_REF_MIME, editor_ref_payload, editor_ref_text
 from services.git_diff import can_diff_against_head, diff_against_head
@@ -34,9 +35,14 @@ from services.language_features import (
 from services.code_completion import (
     CompletionItem, CompletionProvider, LocalCompletionProvider, prefix_at,
 )
-from storage.settings import FILE_EDITOR_AUTO_SAVE_KEY
+from storage.settings import (
+    FILE_EDITOR_AUTO_SAVE_KEY,
+    FILE_EDITOR_TAB_SPACES_KEY,
+    DEFAULT_FILE_EDITOR_TAB_SPACES,
+    file_editor_tab_spaces,
+)
 from ui.theme import (
-    ACCENT, MONO_FONT_CSS, current_theme, palette, mono_font, meta_font_pt,
+    ACCENT, current_theme, palette, mono_font, meta_font_pt,
     markdown_css, apply_flat_tab_style,
 )
 
@@ -505,6 +511,7 @@ class _FileTextEdit(QPlainTextEdit):
         self._drag_start_pos = None
         self._drag_start_in_selection = False
         self._hovered_diagnostic_line: int | None = None
+        self._tab_spaces = DEFAULT_FILE_EDITOR_TAB_SPACES
 
         self.blockCountChanged.connect(self._update_line_number_area_width)
         self.updateRequest.connect(self._update_line_number_area)
@@ -537,14 +544,25 @@ class _FileTextEdit(QPlainTextEdit):
     def minimap_color_for_line(self, text: str) -> QColor | None:
         return self._syntax_highlighter.minimap_color_for_line(text)
 
+    def set_tab_spaces(self, spaces: int):
+        self._tab_spaces = file_editor_tab_spaces({
+            FILE_EDITOR_TAB_SPACES_KEY: spaces,
+        })
+        self._apply_tab_stop()
+
+    def _apply_tab_stop(self):
+        self.setTabStopDistance(
+            self.fontMetrics().horizontalAdvance(" ") * self._tab_spaces
+        )
+
     def apply_appearance(self):
         p = palette()
         self.setFont(mono_font())
         self.setStyleSheet(
             f"QPlainTextEdit {{ background:{p['BG3']}; color:{p['TEXT']};"
-            f"border:none; selection-background-color:{ACCENT};"
-            f"font-family:{MONO_FONT_CSS}; }}"
+            f"border:none; selection-background-color:{ACCENT}; }}"
         )
+        self._apply_tab_stop()
         self._syntax_highlighter.apply_appearance()
         self._update_line_number_area_width(0)
         self._line_number_area.update()
@@ -718,6 +736,17 @@ class _FileTextEdit(QPlainTextEdit):
                 event.accept()
                 return
 
+        if not self.isReadOnly() and (
+            event.key() == Qt.Key.Key_Backtab
+            or (
+                event.key() == Qt.Key.Key_Tab
+                and event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+            )
+        ):
+            self._outdent_current_line()
+            event.accept()
+            return
+
         completion_shortcut = (
             event.key() == Qt.Key.Key_Space
             and event.modifiers()
@@ -732,8 +761,49 @@ class _FileTextEdit(QPlainTextEdit):
             self.cancel_requested.emit()
             event.accept()
             return
+        if (
+            event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+            and not self.isReadOnly()
+            and not event.modifiers()
+            & (
+                Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.AltModifier
+                | Qt.KeyboardModifier.MetaModifier
+            )
+        ):
+            cursor = self.textCursor()
+            block_text = cursor.block().text()
+            indent = block_text[: len(block_text) - len(block_text.lstrip(" \t"))]
+            cursor.insertText("\n" + indent)
+            self.setTextCursor(cursor)
+            event.accept()
+            return
         super().keyPressEvent(event)
         self._maybe_update_completion(event)
+
+    def _outdent_current_line(self) -> bool:
+        cursor = self.textCursor()
+        block = cursor.block()
+        block_text = block.text()
+        if block_text.startswith("\t"):
+            remove_count = 1
+        else:
+            leading_spaces = len(block_text) - len(block_text.lstrip(" "))
+            remove_count = min(self._tab_spaces, leading_spaces)
+        if remove_count <= 0:
+            return False
+
+        block_pos = block.position()
+        position = cursor.position()
+        edit = QTextCursor(block)
+        edit.setPosition(block_pos)
+        edit.setPosition(block_pos + remove_count, QTextCursor.MoveMode.KeepAnchor)
+        edit.removeSelectedText()
+
+        if not cursor.hasSelection():
+            cursor.setPosition(max(block_pos, position - remove_count))
+            self.setTextCursor(cursor)
+        return True
 
     def _copy_with_reference(self) -> bool:
         mime = self._mime_data_for_selection()
@@ -1061,6 +1131,7 @@ class _TextFileTab(QWidget):
         editable: bool = True,
         read_only_reason: str = "",
         auto_save: bool = False,
+        tab_spaces: int = DEFAULT_FILE_EDITOR_TAB_SPACES,
         parent=None,
     ):
         super().__init__(parent)
@@ -1077,6 +1148,9 @@ class _TextFileTab(QWidget):
         self._language_errors: list[str] = []
         self._completion_provider = LanguageCompletionProvider(self._repo_root)
         self._auto_save = auto_save
+        self._tab_spaces = file_editor_tab_spaces({
+            FILE_EDITOR_TAB_SPACES_KEY: tab_spaces,
+        })
         self._dirty = False
         self._rendering = False
         self._edit_mode = False
@@ -1148,6 +1222,7 @@ class _TextFileTab(QWidget):
         root.addWidget(self._find_bar)
 
         self._editor = _FileTextEdit()
+        self._editor.set_tab_spaces(self._tab_spaces)
         self._editor.setFrameShape(QFrame.Shape.NoFrame)
         self._editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self._editor.edit_requested.connect(self._enter_edit_mode)
@@ -1188,6 +1263,12 @@ class _TextFileTab(QWidget):
         else:
             self._auto_save_timer.stop()
         self._sync_actions()
+
+    def set_tab_spaces(self, spaces: int):
+        self._tab_spaces = file_editor_tab_spaces({
+            FILE_EDITOR_TAB_SPACES_KEY: spaces,
+        })
+        self._editor.set_tab_spaces(self._tab_spaces)
 
     def apply_appearance(self):
         p = palette()
@@ -1713,6 +1794,62 @@ class _TextFileTab(QWidget):
         super().closeEvent(event)
 
 
+class _FileViewerTabBar(QTabBar):
+    def __init__(self, repo_root_getter, parent=None):
+        super().__init__(parent)
+        self._repo_root_getter = repo_root_getter
+        self._drag_start_pos = None
+        self._drag_start_index = -1
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = _event_pos(event)
+            index = self.tabAt(pos)
+            self._drag_start_pos = pos
+            self._drag_start_index = index if self.mime_data_for_tab(index) is not None else -1
+        else:
+            self._clear_drag_start()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._drag_start_index >= 0
+            and self._drag_start_pos is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+            and (_event_pos(event) - self._drag_start_pos).manhattanLength()
+            >= QApplication.startDragDistance()
+        ):
+            mime = self.mime_data_for_tab(self._drag_start_index)
+            if mime is not None:
+                drag = QDrag(self)
+                drag.setMimeData(mime)
+                self._clear_drag_start()
+                drag.exec(Qt.DropAction.CopyAction)
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._clear_drag_start()
+        super().mouseReleaseEvent(event)
+
+    def mime_data_for_tab(self, index: int) -> QMimeData | None:
+        if index < 0 or index >= self.count():
+            return None
+        path = str(self.tabData(index) or "")
+        ref = _file_drop_ref(path, str(self._repo_root_getter() or ""))
+        if not ref:
+            return None
+        mime = QMimeData()
+        mime.setData(AICHS_FILE_DROP_MIME, file_drop_payload([ref]))
+        mime.setText(file_drop_text([ref]))
+        return mime
+
+    def _clear_drag_start(self):
+        self._drag_start_pos = None
+        self._drag_start_index = -1
+
+
 class FileViewerPanel(QWidget):
     all_closed = pyqtSignal()
     diagnostic_fix_requested = pyqtSignal(str, object)
@@ -1723,12 +1860,14 @@ class FileViewerPanel(QWidget):
         self._repo_root = repo_root or os.getcwd()
         self._settings = settings
         self._auto_save = self._load_auto_save()
+        self._tab_spaces = self._load_tab_spaces()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         self._tabs = QTabWidget()
+        self._tabs.setTabBar(_FileViewerTabBar(lambda: self._repo_root))
         self._tabs.setDocumentMode(True)
         self._tabs.setTabsClosable(True)
         tab_bar = self._tabs.tabBar()
@@ -1744,8 +1883,28 @@ class FileViewerPanel(QWidget):
     def set_repo_root(self, path: str):
         self._repo_root = path
 
+    def open_paths(self) -> list[str]:
+        paths: list[str] = []
+        tab_bar = self._tabs.tabBar()
+        for i in range(self._tabs.count()):
+            key = str(tab_bar.tabData(i) or "")
+            if key and not key.startswith("\0"):
+                paths.append(key)
+        return paths
+
+    def active_path(self) -> str:
+        index = self._tabs.currentIndex()
+        if index < 0:
+            return ""
+        key = str(self._tabs.tabBar().tabData(index) or "")
+        return "" if key.startswith("\0") else key
+
+    def has_open_tabs(self) -> bool:
+        return self._tabs.count() > 0
+
     def reload_settings(self):
         self.set_auto_save(self._load_auto_save())
+        self.set_tab_spaces(self._load_tab_spaces())
 
     def set_auto_save(self, enabled: bool):
         self._auto_save = enabled
@@ -1754,6 +1913,15 @@ class FileViewerPanel(QWidget):
             if isinstance(widget, _TextFileTab):
                 widget.set_auto_save(enabled)
                 self._sync_tab_title(widget)
+
+    def set_tab_spaces(self, spaces: int):
+        self._tab_spaces = file_editor_tab_spaces({
+            FILE_EDITOR_TAB_SPACES_KEY: spaces,
+        })
+        for i in range(self._tabs.count()):
+            widget = self._tabs.widget(i)
+            if isinstance(widget, _TextFileTab):
+                widget.set_tab_spaces(self._tab_spaces)
 
     def apply_appearance(self):
         self._apply_tab_style()
@@ -1792,6 +1960,7 @@ class FileViewerPanel(QWidget):
             diff_text=None,
             editable=False,
             auto_save=self._auto_save,
+            tab_spaces=self._tab_spaces,
         )
         self._add_tab_widget(key, title, tab)
 
@@ -1838,6 +2007,7 @@ class FileViewerPanel(QWidget):
             editable=editable,
             read_only_reason=read_only_reason,
             auto_save=self._auto_save,
+            tab_spaces=self._tab_spaces,
         )
         self._add_tab_widget(path, os.path.basename(path), tab)
         if line_no is not None:
@@ -1911,9 +2081,12 @@ class FileViewerPanel(QWidget):
             self.active_file_changed.emit(key)
 
     def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
+
+    def shutdown(self):
         for i in range(self._tabs.count()):
             self._release_tab_widget(self._tabs.widget(i))
-        super().closeEvent(event)
 
     def _load_auto_save(self) -> bool:
         if self._settings is None:
@@ -1923,6 +2096,15 @@ class FileViewerPanel(QWidget):
         except Exception:
             return False
         return bool(data.get(FILE_EDITOR_AUTO_SAVE_KEY, False))
+
+    def _load_tab_spaces(self) -> int:
+        if self._settings is None:
+            return DEFAULT_FILE_EDITOR_TAB_SPACES
+        try:
+            data = self._settings.load()
+        except Exception:
+            return DEFAULT_FILE_EDITOR_TAB_SPACES
+        return file_editor_tab_spaces(data)
 
     def _sync_tab_title(self, widget: QWidget):
         idx = self._tabs.indexOf(widget)
@@ -2039,6 +2221,15 @@ def _relative_file_reference(path: str, repo_root: str) -> str:
         return Path(path).resolve().relative_to(Path(repo_root).resolve()).as_posix()
     except (OSError, ValueError):
         return Path(path).name
+
+
+def _file_drop_ref(path: str, repo_root: str) -> str:
+    if not path or str(path).startswith("\0") or not os.path.isfile(path):
+        return ""
+    try:
+        return Path(path).resolve().relative_to(Path(repo_root).resolve()).as_posix()
+    except (OSError, ValueError):
+        return ""
 
 
 def _read_text_preview(path: str) -> str:

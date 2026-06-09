@@ -15,14 +15,16 @@ def test_agents_md_present(workspace):
     assert p.name == "AGENTS.md"
 
 
-def test_system_parts_includes_tree_and_cwd(workspace):
+def test_system_parts_includes_cwd_and_tool_guidance_without_repo_snapshot(workspace):
     base, agents, ctx, extensions = system_parts(str(workspace))
     assert "senior coding agent" in base.lower() or "coding agent" in base.lower()
     assert agents == ""
     assert extensions == ""
     assert str(workspace) in ctx
-    assert "src" in ctx
-    assert "File tree:" in ctx
+    assert "use list_files/search_files first" in ctx
+    assert "File tree:" not in ctx
+    assert "Git status:" not in ctx
+    assert "Recent commits:" not in ctx
 
 
 def test_build_system_includes_agents_section(workspace):

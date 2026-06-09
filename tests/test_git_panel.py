@@ -1,9 +1,12 @@
 import subprocess
 
+from PyQt6.QtWidgets import QMenu
+
 from services.git_status import GitCommandResult
 from ui.theme import ACCENT, palette
 from ui.widgets.git_panel import (
     GitPanel,
+    _ROLE_HASH,
     _ROLE_REF_BADGES,
     _commit_ref_badges,
     _git_action_button_style,
@@ -112,6 +115,38 @@ def test_git_log_marks_origin_ref(qapp, git_repo, tmp_path):
     assert ("HEAD", "head") in item.data(_ROLE_REF_BADGES)
     assert (f"origin/{branch}", "origin") in item.data(_ROLE_REF_BADGES)
     assert f"origin/{branch}" in item.toolTip()
+
+
+def test_git_log_context_menu_offers_copy_actions(qapp, git_repo, monkeypatch):
+    panel = GitPanel(str(git_repo))
+    item = panel.log.item(0)
+    panel.log.setCurrentItem(item)
+    monkeypatch.setattr(panel.log, "itemAt", lambda _pos: item)
+    action_texts = []
+
+    def capture_menu(menu, _pos):
+        action_texts.extend(action.text() for action in menu.actions())
+        return None
+
+    monkeypatch.setattr(QMenu, "exec", capture_menu)
+
+    panel.log._context_menu(panel.log.visualItemRect(item).center())
+
+    assert action_texts == ["Copy commit message", "Copy commit hash"]
+
+
+def test_git_log_copy_helpers_copy_commit_message_and_hash(qapp, git_repo):
+    panel = GitPanel(str(git_repo))
+    item = panel.log.item(0)
+    qapp.clipboard().clear()
+
+    panel.log._copy_commit_message(item)
+
+    assert qapp.clipboard().text() == "initial"
+
+    panel.log._copy_commit_hash(item)
+
+    assert qapp.clipboard().text() == item.data(_ROLE_HASH)
 
 
 def test_git_log_push_button_follows_ahead_state(qapp, workspace, monkeypatch):

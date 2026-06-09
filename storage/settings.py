@@ -5,6 +5,10 @@ from config import SETTINGS_PATH
 
 
 FILE_EDITOR_AUTO_SAVE_KEY = "file_editor_auto_save"
+FILE_EDITOR_TAB_SPACES_KEY = "file_editor_tab_spaces"
+DEFAULT_FILE_EDITOR_TAB_SPACES = 4
+MIN_FILE_EDITOR_TAB_SPACES = 1
+MAX_FILE_EDITOR_TAB_SPACES = 12
 TRASH_RETENTION_DAYS_KEY = "trash_retention_days"
 DEFAULT_TRASH_RETENTION_DAYS = 14
 
@@ -21,6 +25,15 @@ def trash_retention_days(data: dict | None) -> int:
     except (TypeError, ValueError):
         days = DEFAULT_TRASH_RETENTION_DAYS
     return max(1, min(3650, days))
+
+
+def file_editor_tab_spaces(data: dict | None) -> int:
+    data = data if isinstance(data, dict) else {}
+    try:
+        spaces = int(data.get(FILE_EDITOR_TAB_SPACES_KEY, DEFAULT_FILE_EDITOR_TAB_SPACES))
+    except (TypeError, ValueError):
+        spaces = DEFAULT_FILE_EDITOR_TAB_SPACES
+    return max(MIN_FILE_EDITOR_TAB_SPACES, min(MAX_FILE_EDITOR_TAB_SPACES, spaces))
 
 
 class SettingsStore:

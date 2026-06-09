@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QStyle,
     QStyledItemDelegate,
@@ -20,7 +21,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from PyQt6.QtCore import QRect, Qt, QTimer, pyqtSignal, QMimeData
-from PyQt6.QtGui import QColor, QFont, QFontMetrics
+from PyQt6.QtGui import QAction, QColor, QFont, QFontMetrics
 
 from services.chat_drag import AICHS_COMMIT_DROP_MIME, commit_drop_payload, commit_drop_text
 from services.diff_html import diff_to_html
@@ -155,6 +156,8 @@ class _CommitLogList(QListWidget):
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.setDefaultDropAction(Qt.DropAction.CopyAction)
         self.setItemDelegate(_CommitLogDelegate(self))
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._context_menu)
 
     def mimeData(self, items: list[QListWidgetItem]) -> QMimeData:
         commits = []
@@ -171,6 +174,44 @@ class _CommitLogList(QListWidget):
             mime.setData(AICHS_COMMIT_DROP_MIME, commit_drop_payload(commits))
             mime.setText(commit_drop_text(commits))
         return mime
+
+    def _context_menu(self, pos):
+        item = self.itemAt(pos)
+        if item is None:
+            return
+        if not item.isSelected():
+            self.clearSelection()
+            self.setCurrentItem(item)
+            item.setSelected(True)
+
+        menu = QMenu(self)
+        copy_message = QAction("Copy commit message", self)
+        copy_message.setData("message")
+        copy_message.setEnabled(bool(str(item.data(_ROLE_SUBJECT) or "").strip()))
+        copy_message.triggered.connect(lambda _checked=False: self._copy_commit_message(item))
+        menu.addAction(copy_message)
+        copy_hash = QAction("Copy commit hash", self)
+        copy_hash.setData("hash")
+        copy_hash.setEnabled(bool(str(item.data(_ROLE_HASH) or "").strip()))
+        copy_hash.triggered.connect(lambda _checked=False: self._copy_commit_hash(item))
+        menu.addAction(copy_hash)
+
+        chosen = menu.exec(self.viewport().mapToGlobal(pos))
+        choice = _commit_log_menu_choice(chosen)
+        if choice in {"message", "copy commit message"}:
+            self._copy_commit_message(item)
+        elif choice in {"hash", "copy commit hash"}:
+            self._copy_commit_hash(item)
+
+    def _copy_commit_message(self, item: QListWidgetItem):
+        message = str(item.data(_ROLE_SUBJECT) or "").strip()
+        if message:
+            QApplication.clipboard().setText(message)
+
+    def _copy_commit_hash(self, item: QListWidgetItem):
+        commit_hash = str(item.data(_ROLE_HASH) or "").strip()
+        if commit_hash:
+            QApplication.clipboard().setText(commit_hash)
 
 
 class _CommitDiffDialog(QDialog):
@@ -321,9 +362,9 @@ class GitPanel(QWidget):
         self.apply_appearance()
         self._refresh_log()
         self._update_git_action_state()
-        timer = QTimer(self)
-        timer.timeout.connect(self.refresh)
-        timer.start(5000)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self.refresh)
+        self._refresh_timer.start(5000)
 
     def apply_appearance(self):
         mono = mono_font_pt()
@@ -441,6 +482,10 @@ class GitPanel(QWidget):
         self._changes.set_repo_path(path)
         self.refresh()
 
+    def shutdown(self):
+        self._refresh_timer.stop()
+        self._changes.shutdown()
+
 
 def _parse_commit_log_line(line: str) -> tuple[str, str, list[str], str] | None:
     parts = str(line or "").split(_LOG_SEP, 3)
@@ -455,6 +500,15 @@ def _parse_commit_log_line(line: str) -> tuple[str, str, list[str], str] | None:
     if not full_hash:
         return None
     return full_hash, short_hash or full_hash[:7], refs, subject
+
+
+def _commit_log_menu_choice(action: QAction | None) -> str:
+    if action is None:
+        return ""
+    value = str(action.data() or "").strip().lower()
+    if value:
+        return value
+    return str(action.text() or "").replace("&", "").strip().lower()
 
 
 def _parse_commit_refs(refs_text: str) -> list[str]:

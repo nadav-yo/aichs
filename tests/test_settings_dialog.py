@@ -2,6 +2,7 @@ import services.model_registry as reg
 from services.commit_message import COMMIT_MESSAGE_PROMPT_ADDITION_KEY
 from storage.settings import (
     FILE_EDITOR_AUTO_SAVE_KEY,
+    FILE_EDITOR_TAB_SPACES_KEY,
     TRASH_RETENTION_DAYS_KEY,
     SettingsStore,
 )
@@ -266,6 +267,17 @@ def test_file_editor_auto_save_setting_is_saved(qapp):
     dialog._save()
 
     assert store.load()[FILE_EDITOR_AUTO_SAVE_KEY] is True
+
+
+def test_file_editor_tab_spaces_setting_is_saved(qapp):
+    store = SettingsStore()
+    dialog = SettingsDialog(store)
+
+    assert dialog.file_editor_tab_spaces_spin.value() == 4
+    dialog.file_editor_tab_spaces_spin.setValue(2)
+    dialog._save()
+
+    assert store.load()[FILE_EDITOR_TAB_SPACES_KEY] == 2
 
 
 def test_trash_retention_setting_is_saved(qapp):

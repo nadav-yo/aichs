@@ -4,9 +4,9 @@ from pathlib import Path
 from typing import Callable
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QTabWidget, QTreeWidget, QTreeWidgetItem,
+    QWidget, QVBoxLayout, QStackedWidget, QTreeWidget, QTreeWidgetItem,
     QPushButton, QHBoxLayout, QLabel, QMenu, QSizePolicy, QStyleFactory,
-    QAbstractItemView, QInputDialog, QMessageBox,
+    QAbstractItemView, QInputDialog, QMessageBox, QFrame,
 )
 from PyQt6.QtCore import pyqtSignal, Qt, QFileSystemWatcher, QTimer, QMimeData
 from PyQt6.QtGui import QColor, QAction
@@ -19,7 +19,7 @@ from storage.settings import SettingsStore
 from ui.theme import (
     palette, ACCENT, git_status_color, icon_button_style, files_header_style,
     file_tree_sidebar_style, mono_font_pt, mono_font,
-    apply_flat_tab_style, sidebar_settings_button_style,
+    meta_font_pt, chat_font_pt,
 )
 from ui.widgets.conversation_panel import ConversationPanel
 from ui.widgets.git_panel import GitPanel
@@ -444,6 +444,11 @@ class FileTree(QTreeWidget):
         self._fill(self.invisibleRootItem(), self.root_path)
         self._apply_decorations()
 
+    def shutdown(self):
+        self._git_timer.stop()
+        for directory in self._watcher.directories():
+            self._watcher.removePath(directory)
+
     def _update_git_labels(self):
         def walk(item: QTreeWidgetItem):
             path = item.data(0, Qt.ItemDataRole.UserRole)
@@ -533,6 +538,10 @@ class LeftPanel(QWidget):
     file_open        = pyqtSignal(str)
     git_file_open    = pyqtSignal(str)
     file_attach      = pyqtSignal(str)
+    file_search_requested = pyqtSignal()
+    text_search_requested = pyqtSignal()
+    extensions_requested  = pyqtSignal()
+    activity_panel_collapsed_changed = pyqtSignal(bool)
     settings_changed = pyqtSignal()
 
     def __init__(
@@ -546,13 +555,28 @@ class LeftPanel(QWidget):
     ):
         super().__init__(parent)
         self._settings = settings or SettingsStore()
+        self._activity_buttons: dict[str, QPushButton] = {}
+        self._activity_widgets: dict[str, QWidget] = {}
+        self._active_activity = "chats"
+        self._collapsed_width = 64
+        self._expanded_min_width = 240
+        self._expanded_max_width = 480
 
-        root = QVBoxLayout(self)
+        root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        tabs = QTabWidget()
-        self._tabs = tabs
+        self._rail = QFrame()
+        self._rail.setObjectName("activityRail")
+        self._rail.setFixedWidth(64)
+        rail_layout = QVBoxLayout(self._rail)
+        rail_layout.setContentsMargins(6, 8, 6, 8)
+        rail_layout.setSpacing(6)
+
+        self._stack = QStackedWidget()
+        self._stack.setObjectName("activityStack")
+        self._stack.setMinimumWidth(180)
+        self._stack.setMaximumWidth(420)
 
         self._conv = ConversationPanel(store, settings=self._settings)
         self._conv.selected.connect(self.selected)
@@ -592,38 +616,129 @@ class LeftPanel(QWidget):
         git_layout.addWidget(self._git_header)
         git_layout.addWidget(self._git, 1)
 
-        tabs.addTab(self._conv, "Chats")
-        tabs.addTab(files_wrap, "Files")
-        tabs.addTab(git_wrap, "Git")
+        self._search_page = _SearchActivityPage()
+        self._search_page.file_search_requested.connect(self.file_search_requested)
+        self._search_page.text_search_requested.connect(self.text_search_requested)
 
-        root.addWidget(tabs, 1)
+        self._add_activity("chats", "Chats", self._conv, rail_layout)
+        self._add_activity("files", "Files", files_wrap, rail_layout)
+        self._add_activity("search", "Search", self._search_page, rail_layout)
+        self._add_activity("git", "Git", git_wrap, rail_layout)
+        self._add_action_button("extensions", "Ext", "Extensions", self.extensions_requested, rail_layout)
 
-        footer = QWidget()
-        footer_layout = QHBoxLayout(footer)
-        footer_layout.setContentsMargins(0, 0, 0, 0)
-        footer_layout.setSpacing(0)
+        rail_layout.addStretch()
 
-        self._docs_btn = QPushButton("?")
+        self._docs_btn = QPushButton("Docs")
         self._docs_btn.setToolTip("Documentation")
-        self._docs_btn.setFixedHeight(34)
+        self._docs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._docs_btn.clicked.connect(self.open_docs)
-        footer_layout.addWidget(self._docs_btn)
+        rail_layout.addWidget(self._docs_btn)
 
-        self._settings_btn = QPushButton("⚙")
-        self._settings_btn.setToolTip("Settings (⌘,)")
-        self._settings_btn.setFixedHeight(34)
+        self._settings_btn = QPushButton("Settings")
+        self._settings_btn.setToolTip("Settings (Ctrl+,)")
+        self._settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._settings_btn.clicked.connect(self.open_settings)
-        footer_layout.addWidget(self._settings_btn)
-        root.addWidget(footer)
+        rail_layout.addWidget(self._settings_btn)
+
+        root.addWidget(self._rail)
+        root.addWidget(self._stack, 1)
+        self.set_active_activity("chats")
 
         self._apply_styles()
 
+    def _add_activity(self, key: str, label: str, widget: QWidget, rail_layout: QVBoxLayout):
+        button = QPushButton(label)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip(label)
+        button.clicked.connect(lambda _checked=False, k=key: self._on_activity_clicked(k))
+        self._activity_buttons[key] = button
+        self._activity_widgets[key] = widget
+        self._stack.addWidget(widget)
+        rail_layout.addWidget(button)
+
+    def _on_activity_clicked(self, key: str):
+        if key == self._active_activity and not self.is_activity_panel_collapsed():
+            self.collapse_activity_panel()
+            return
+        self.set_active_activity(key)
+
+    def _add_action_button(
+        self,
+        key: str,
+        label: str,
+        tooltip: str,
+        signal,
+        rail_layout: QVBoxLayout,
+    ):
+        button = QPushButton(label)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip(tooltip)
+        button.clicked.connect(signal.emit)
+        self._activity_buttons[key] = button
+        rail_layout.addWidget(button)
+
+    def set_active_activity(self, key: str, *, expand: bool = True):
+        widget = self._activity_widgets.get(key)
+        if widget is None:
+            return
+        self._active_activity = key
+        self._stack.setCurrentWidget(widget)
+        if expand:
+            self.expand_activity_panel()
+        self._sync_activity_buttons()
+
+    def active_activity(self) -> str:
+        return self._active_activity
+
+    def is_activity_panel_collapsed(self) -> bool:
+        return self._stack.isHidden()
+
+    def collapse_activity_panel(self):
+        if self._stack.isHidden():
+            return
+        self._stack.hide()
+        self.setMinimumWidth(self._collapsed_width)
+        self.setMaximumWidth(self._collapsed_width)
+        self._sync_activity_buttons()
+        self.activity_panel_collapsed_changed.emit(True)
+
+    def expand_activity_panel(self):
+        was_collapsed = self._stack.isHidden()
+        self.setMinimumWidth(self._expanded_min_width)
+        self.setMaximumWidth(self._expanded_max_width)
+        self._stack.show()
+        self._sync_activity_buttons()
+        if was_collapsed:
+            self.activity_panel_collapsed_changed.emit(False)
+
+    def _sync_activity_buttons(self):
+        p = palette()
+        fs = max(11, chat_font_pt() - 2)
+        for key, button in self._activity_buttons.items():
+            button.setStyleSheet(_rail_button_style(p, fs, key == self._active_activity))
+
     def _apply_styles(self):
-        apply_flat_tab_style(self._tabs, "sidebarTabs")
+        p = palette()
+        fs = max(11, chat_font_pt() - 2)
+        self._rail.setStyleSheet(
+            f"QFrame#activityRail {{ background:{p['BG']};"
+            f"border-right:1px solid {p['BORDER_SUBTLE']}; }}"
+        )
+        self._stack.setStyleSheet(
+            f"QStackedWidget#activityStack {{ background:{p['BG2']};"
+            f"border-right:1px solid {p['BORDER_SUBTLE']}; }}"
+        )
         self._files_header.apply_appearance()
         self._git_header.apply_appearance()
-        self._docs_btn.setStyleSheet(sidebar_settings_button_style())
-        self._settings_btn.setStyleSheet(sidebar_settings_button_style())
+        footer_style = (
+            f"QPushButton {{ background:transparent; color:{p['TEXT_DIM']}; border:none;"
+            f"border-radius:7px; padding:6px 2px; font-size:{meta_font_pt()}px; }}"
+            f"QPushButton:hover {{ background:{p['BG3']}; color:{p['TEXT']}; }}"
+        )
+        self._docs_btn.setStyleSheet(footer_style)
+        self._settings_btn.setStyleSheet(footer_style)
+        self._search_page.apply_appearance()
+        self._sync_activity_buttons()
 
     def apply_appearance(self):
         self._apply_styles()
@@ -663,5 +778,65 @@ class LeftPanel(QWidget):
 
     def reveal_file(self, path: str, *, activate: bool = True) -> bool:
         if activate:
-            self._tabs.setCurrentWidget(self._files_wrap)
+            self.set_active_activity("files")
         return self._file_tree.reveal_file(path)
+
+    def shutdown(self):
+        self._file_tree.shutdown()
+        self._git.shutdown()
+
+
+class _SearchActivityPage(QWidget):
+    file_search_requested = pyqtSignal()
+    text_search_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(8)
+
+        title = QLabel("Search")
+        title.setObjectName("searchActivityTitle")
+        layout.addWidget(title)
+
+        self._file_btn = QPushButton("Open File Search")
+        self._file_btn.setToolTip("Search workspace files")
+        self._file_btn.clicked.connect(self.file_search_requested.emit)
+        layout.addWidget(self._file_btn)
+
+        self._text_btn = QPushButton("Open Text Search")
+        self._text_btn.setToolTip("Search text inside workspace files")
+        self._text_btn.clicked.connect(self.text_search_requested.emit)
+        layout.addWidget(self._text_btn)
+        layout.addStretch()
+
+        self.apply_appearance()
+
+    def apply_appearance(self):
+        p = palette()
+        self.setStyleSheet(f"QWidget {{ background:{p['BG2']}; }}")
+        title = self.findChild(QLabel, "searchActivityTitle")
+        if title:
+            title.setStyleSheet(
+                f"color:{p['TEXT']}; font-size:{max(13, chat_font_pt())}px;"
+                "font-weight:700; padding:2px 0 8px 0;"
+            )
+        button_style = (
+            f"background-color:{p['BG3']}; color:{p['TEXT']};"
+            f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:7px;"
+            "padding:8px 10px;"
+        )
+        self._file_btn.setStyleSheet(button_style)
+        self._text_btn.setStyleSheet(button_style)
+
+
+def _rail_button_style(p: dict, font_size: int, active: bool) -> str:
+    bg = p["SELECTION"] if active else "transparent"
+    fg = p["SELECTION_TEXT"] if active else p["TEXT_DIM"]
+    return (
+        f"QPushButton {{ background-color:{bg}; color:{fg}; border:0px;"
+        "border-radius:7px; padding:7px 2px;"
+        f"font-size:{font_size}px; font-weight:600; }}"
+        f"QPushButton:hover {{ background-color:{p['BG3']}; color:{p['TEXT']}; }}"
+    )

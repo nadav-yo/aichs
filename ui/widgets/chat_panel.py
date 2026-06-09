@@ -403,6 +403,7 @@ class ChatPanel(QWidget):
     open_file    = pyqtSignal(str, object)
     file_written = pyqtSignal(str)
     file_write_completed = pyqtSignal(str)
+    tool_activity = pyqtSignal(str)
 
     def __init__(self, store: ConversationStore, cwd: str = "",
                  settings: SettingsStore | None = None, parent=None):
@@ -438,24 +439,57 @@ class ChatPanel(QWidget):
         self._scroll_layout_timer = QTimer(self)
         self._scroll_layout_timer.setSingleShot(True)
         self._scroll_layout_timer.setInterval(100)
-        self._scroll_layout_timer.timeout.connect(
-            lambda: self._scroll_to_bottom(force=True)
-        )
+        self._scroll_layout_timer.timeout.connect(self._force_scroll_to_bottom)
+        self._scroll_zero_timer = QTimer(self)
+        self._scroll_zero_timer.setSingleShot(True)
+        self._scroll_zero_timer.setInterval(0)
+        self._scroll_zero_timer.timeout.connect(self._force_scroll_to_bottom)
+        self._prepend_restore: tuple[int, int] | None = None
+        self._prepend_restore_timer = QTimer(self)
+        self._prepend_restore_timer.setSingleShot(True)
+        self._prepend_restore_timer.setInterval(0)
+        self._prepend_restore_timer.timeout.connect(self._restore_after_prepend)
+        self._scroll_after_load_timers: list[QTimer] = []
+        for interval in (0, 50, 150, 300):
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(interval)
+            timer.timeout.connect(self._scroll_after_load_step)
+            self._scroll_after_load_timers.append(timer)
+        self._scroll_after_load_finish_timer = QTimer(self)
+        self._scroll_after_load_finish_timer.setSingleShot(True)
+        self._scroll_after_load_finish_timer.setInterval(300)
+        self._scroll_after_load_finish_timer.timeout.connect(self._finish_scroll_after_load)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # top bar
-        bar = QHBoxLayout()
-        bar.setContentsMargins(16, 10, 16, 8)
-        bar.setSpacing(6)
+        # compact conversation header
+        self._header = QFrame()
+        self._header.setObjectName("chatHeader")
+        bar = QHBoxLayout(self._header)
+        bar.setContentsMargins(16, 8, 12, 8)
+        bar.setSpacing(8)
+
+        title_col = QVBoxLayout()
+        title_col.setContentsMargins(0, 0, 0, 0)
+        title_col.setSpacing(1)
+        self._title_label = QLabel("New chat")
+        self._title_label.setObjectName("chatHeaderTitle")
+        self._title_label.setWordWrap(False)
+        self._subtitle_label = QLabel("AICHS workspace")
+        self._subtitle_label.setObjectName("chatHeaderSubtitle")
+        self._subtitle_label.setWordWrap(False)
+        title_col.addWidget(self._title_label)
+        title_col.addWidget(self._subtitle_label)
+        bar.addLayout(title_col, 1)
 
         self.provider_combo = QComboBox()
         self.provider_combo.currentTextChanged.connect(self._on_provider_changed)
 
         self.model_combo = QComboBox()
-        self.model_combo.setMinimumWidth(220)
+        self.model_combo.setMinimumWidth(170)
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
 
         bar.addWidget(self.provider_combo)
@@ -468,9 +502,7 @@ class ChatPanel(QWidget):
         )
         bar.addWidget(self._extension_bar)
 
-        bar.addStretch()
-
-        self.extensions_btn = QPushButton("Extensions")
+        self.extensions_btn = QPushButton("Ext")
         self.extensions_btn.setToolTip("View loaded extensions")
         self.extensions_btn.clicked.connect(self.show_extensions)
         bar.addWidget(self.extensions_btn)
@@ -479,7 +511,7 @@ class ChatPanel(QWidget):
         self.context_ring.clicked.connect(self._show_context_breakdown)
         bar.addWidget(self.context_ring)
 
-        root.addLayout(bar)
+        root.addWidget(self._header)
 
         self.refresh_models()
 
@@ -672,6 +704,7 @@ class ChatPanel(QWidget):
         self.history       = []
         self.conv_id       = None
         self.conv_data     = None
+        self._sync_header_title()
         self.active_bubble = None
         self._stream_buffer.clear()
         self._stream_flush_timer.stop()
@@ -722,10 +755,12 @@ class ChatPanel(QWidget):
         self._refresh_runtime_controls()
         self._update_context_ui()
         self._scroll_to_bottom_after_load()
+        self._sync_header_title()
 
     def update_title(self, conv_id: str, title: str):
         if self.conv_id == conv_id and self.conv_data is not None:
             self.conv_data["title"] = title
+            self._sync_header_title()
 
     def is_streaming(self) -> bool:
         return self._visible_run() is not None
@@ -736,6 +771,16 @@ class ChatPanel(QWidget):
 
     def stop_managed_processes(self):
         get_process_manager().stop_workspace(self.cwd)
+
+    def shutdown(self):
+        self._stream_flush_timer.stop()
+        self._scroll_layout_timer.stop()
+        self._scroll_zero_timer.stop()
+        self._prepend_restore_timer.stop()
+        for timer in self._scroll_after_load_timers:
+            timer.stop()
+        self._scroll_after_load_finish_timer.stop()
+        self.stop_managed_processes()
 
     def attach_file(self, path: str):
         try:
@@ -1051,6 +1096,7 @@ class ChatPanel(QWidget):
         self.store.save(self.conv_id, self.conv_data)
         self.saved.emit()
         self.conversation_created.emit(self.conv_id)
+        self._sync_header_title()
 
     def _start_assistant(self, skill=None, crew: CrewMember | None = None):
         if not self.conv_id or self.conv_data is None:
@@ -1209,11 +1255,13 @@ class ChatPanel(QWidget):
         self.model_combo.addItems(MODELS.get(provider, []))
         self.model_combo.blockSignals(False)
         self._apply_default_model(provider)
+        self._sync_header_title()
 
     def _on_model_changed(self, model: str):
         if not model:
             return
         self._update_context_ui()
+        self._sync_header_title()
         provider = self.provider_combo.currentText()
         data = self._settings.load()
         defaults = data.get("default_models", {})
@@ -2010,6 +2058,7 @@ class ChatPanel(QWidget):
             self.conv_data["title_auto"] = False
             self.store.save(self.conv_id, self.conv_data)
             self.saved.emit()
+            self._sync_header_title()
         finally:
             self._keep_thread_until_finished(completed_thread)
 
@@ -2200,6 +2249,7 @@ class ChatPanel(QWidget):
         return wrapper
 
     def _add_tool_notice(self, text: str, debug_text: str = ""):
+        self.tool_activity.emit(text)
         wrapper = QWidget()
         row = QHBoxLayout(wrapper)
         row.setContentsMargins(60, 1, 24, 1)
@@ -2319,9 +2369,30 @@ class ChatPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
+    def _sync_header_title(self):
+        title = "New chat"
+        if self.conv_data:
+            title = " ".join(str(self.conv_data.get("title") or "Untitled").split()) or "Untitled"
+        self._title_label.setText(title)
+        self._title_label.setToolTip(title)
+        model = self.model_combo.currentText() if hasattr(self, "model_combo") else ""
+        provider = self.provider_combo.currentText() if hasattr(self, "provider_combo") else ""
+        detail = " · ".join(part for part in (provider, model) if part)
+        self._subtitle_label.setText(detail or "AICHS workspace")
+
     def _apply_chrome(self):
         self._update_context_ui()
         sep = separator_color()
+        p = palette()
+        self._header.setStyleSheet(
+            f"QFrame#chatHeader {{ background:{p['BG']};"
+            f"border-bottom:1px solid {sep}; }}"
+            f"QLabel#chatHeaderTitle {{ color:{p['TEXT']};"
+            f"font-size:{max(13, self.font().pointSize())}px; font-weight:700; }}"
+            f"QLabel#chatHeaderSubtitle {{ color:{p['TEXT_DIM']};"
+            f"font-size:{max(10, self.font().pointSize() - 3)}px; }}"
+        )
+        self.extensions_btn.setStyleSheet(icon_button_style(34))
         self._sep.setStyleSheet(
             f"background:{sep}; color:{sep}; border:none; max-height:1px;"
         )
@@ -2440,12 +2511,18 @@ class ChatPanel(QWidget):
         self._render_start_index = new_start
         self._sync_older_button()
 
-        def restore():
-            self._programmatic_scroll = True
-            bar.setValue(old_value + (bar.maximum() - old_max))
-            self._programmatic_scroll = False
+        self._prepend_restore = (old_value, old_max)
+        self._prepend_restore_timer.start()
 
-        QTimer.singleShot(0, restore)
+    def _restore_after_prepend(self):
+        if self._prepend_restore is None:
+            return
+        old_value, old_max = self._prepend_restore
+        self._prepend_restore = None
+        bar = self.scroll.verticalScrollBar()
+        self._programmatic_scroll = True
+        bar.setValue(old_value + (bar.maximum() - old_max))
+        self._programmatic_scroll = False
 
     def _insert_history_bubble(self, history_index: int, *, at_top: bool = False):
         msg = self.history[history_index]
@@ -2607,10 +2684,13 @@ class ChatPanel(QWidget):
             return
         self._pin_to_bottom()
 
+    def _force_scroll_to_bottom(self):
+        self._scroll_to_bottom(force=True)
+
     def _pin_to_bottom(self):
         """Keep the viewport pinned to the latest content (send, stream, layout growth)."""
         self._scroll_to_bottom(force=True)
-        QTimer.singleShot(0, lambda: self._scroll_to_bottom(force=True))
+        self._scroll_zero_timer.start()
         self._scroll_layout_timer.start()
 
     def _scroll_to_bottom_later(self):
@@ -2623,23 +2703,22 @@ class ChatPanel(QWidget):
         self._history_prepend_enabled = False
         self._programmatic_scroll = True
 
-        def scroll():
-            bar = self.scroll.verticalScrollBar()
-            self._programmatic_scroll = True
-            bar.setValue(bar.maximum())
-            self._last_scroll_value = bar.value()
-            self._programmatic_scroll = False
+        self._scroll_after_load_step()
+        for timer in self._scroll_after_load_timers:
+            timer.start()
+        self._scroll_after_load_finish_timer.start()
 
-        scroll()
-        for ms in (0, 50, 150, 300):
-            QTimer.singleShot(ms, scroll)
+    def _scroll_after_load_step(self):
+        bar = self.scroll.verticalScrollBar()
+        self._programmatic_scroll = True
+        bar.setValue(bar.maximum())
+        self._last_scroll_value = bar.value()
+        self._programmatic_scroll = False
 
-        def finish():
-            scroll()
-            self._programmatic_scroll = False
-            self._history_prepend_enabled = True
-
-        QTimer.singleShot(300, finish)
+    def _finish_scroll_after_load(self):
+        self._scroll_after_load_step()
+        self._programmatic_scroll = False
+        self._history_prepend_enabled = True
 
     def _start_next_queued(self):
         if self.conv_id:

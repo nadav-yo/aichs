@@ -2,9 +2,10 @@ from PyQt6.QtCore import QPoint, QPointF, Qt
 from PyQt6.QtGui import QColor, QGuiApplication, QTextCursor
 from PyQt6.QtTest import QTest
 
+from services.chat_drag import AICHS_FILE_DROP_MIME, parse_file_drop
 from services.file_editor_refs import AICHS_EDITOR_REF_MIME, parse_editor_refs
 from services.language_features import CodeActionResult
-from storage.settings import FILE_EDITOR_AUTO_SAVE_KEY
+from storage.settings import FILE_EDITOR_AUTO_SAVE_KEY, FILE_EDITOR_TAB_SPACES_KEY
 from tests.conftest import write_extension
 from ui.theme import palette
 from ui.widgets.file_viewer import (
@@ -161,6 +162,25 @@ def test_file_viewer_open_file_can_jump_to_line(qapp, workspace):
     panel.close()
 
 
+def test_file_viewer_file_tabs_drag_as_chat_file_refs(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace))
+
+    mime = panel._tabs.tabBar().mime_data_for_tab(0)
+
+    assert mime is not None
+    assert mime.hasFormat(AICHS_FILE_DROP_MIME)
+    assert parse_file_drop(mime.data(AICHS_FILE_DROP_MIME)) == ["src/main.py"]
+    assert mime.text() == "@src/main.py"
+
+    panel.open_content("scratch", "Scratch")
+
+    assert panel._tabs.tabBar().mime_data_for_tab(1) is None
+    panel.close()
+
+
 def test_file_viewer_runs_diagnostics_immediately_on_open(qapp, workspace, monkeypatch):
     calls = []
 
@@ -264,6 +284,66 @@ def test_file_text_edit_inserts_completion_over_prefix(qapp):
     editor.close()
     editor.deleteLater()
     qapp.processEvents()
+
+
+def test_file_text_edit_enter_preserves_current_line_indent(qapp):
+    editor = _FileTextEdit()
+    editor.setPlainText("\t  print('hi')")
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    editor.setTextCursor(cursor)
+    editor.show()
+    editor.setFocus()
+    qapp.processEvents()
+
+    QTest.keyClick(editor, Qt.Key.Key_Return)
+
+    assert editor.toPlainText() == "\t  print('hi')\n\t  "
+    editor.close()
+    editor.deleteLater()
+    qapp.processEvents()
+
+
+def test_file_text_edit_shift_tab_outdents_current_line(qapp):
+    editor = _FileTextEdit()
+    editor.setPlainText("    print('hi')")
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    editor.setTextCursor(cursor)
+    editor.show()
+    editor.setFocus()
+    qapp.processEvents()
+
+    QTest.keyClick(editor, Qt.Key.Key_Backtab)
+
+    assert editor.toPlainText() == "print('hi')"
+    editor.close()
+    editor.deleteLater()
+    qapp.processEvents()
+
+
+def test_file_text_edit_tab_stop_is_four_spaces(qapp):
+    editor = _FileTextEdit()
+    editor.apply_appearance()
+
+    assert editor.tabStopDistance() == editor.fontMetrics().horizontalAdvance(" ") * 4
+    editor.close()
+    editor.deleteLater()
+    qapp.processEvents()
+
+
+def test_file_viewer_uses_tab_spaces_setting(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    panel = FileViewerPanel(
+        str(workspace),
+        settings=_Settings({FILE_EDITOR_TAB_SPACES_KEY: 2}),
+    )
+
+    panel.open_file(str(path), repo_root=str(workspace))
+    tab = panel._tabs.widget(0)
+
+    assert tab._editor.tabStopDistance() == tab._editor.fontMetrics().horizontalAdvance(" ") * 2
+    panel.close()
 
 
 def test_file_text_edit_does_not_complete_read_only(qapp):

@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from storage.settings import SettingsStore
+from storage.settings import SettingsStore, file_editor_tab_spaces
 
 
 @pytest.fixture
@@ -43,3 +43,11 @@ def test_load_invalid_json_returns_empty(settings_store, isolate_aichs_home):
 
     SETTINGS_PATH.write_text("{not json", encoding="utf-8")
     assert settings_store.load() == {}
+
+
+def test_file_editor_tab_spaces_defaults_and_clamps():
+    assert file_editor_tab_spaces({}) == 4
+    assert file_editor_tab_spaces({"file_editor_tab_spaces": "2"}) == 2
+    assert file_editor_tab_spaces({"file_editor_tab_spaces": 0}) == 1
+    assert file_editor_tab_spaces({"file_editor_tab_spaces": 99}) == 12
+    assert file_editor_tab_spaces({"file_editor_tab_spaces": "bad"}) == 4

@@ -4,6 +4,7 @@ from PyQt6.QtCore import QMimeData, QPoint, QPointF, Qt
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import QAbstractItemView, QApplication, QMessageBox, QPushButton
 
+from services.chat_drag import AICHS_FILE_DROP_MIME, parse_file_drop
 from services.git_status import GitCommandResult, stage_files
 from storage.settings import SettingsStore
 from ui.theme import ACCENT, palette
@@ -195,6 +196,26 @@ def test_git_changes_lists_drag_normally_between_sections(qapp, git_repo):
         assert not changes_list.acceptDrops()
         assert changes_list.viewport().acceptDrops()
         assert changes_list.defaultDropAction() == Qt.DropAction.MoveAction
+
+
+def test_git_changes_lists_drag_file_refs_to_chat(qapp, git_repo):
+    main = git_repo / "src" / "main.py"
+    main.write_text("print('staged')\n", encoding="utf-8")
+    assert stage_files(str(git_repo), ["src/main.py"]).ok
+    (git_repo / "note.txt").write_text("new\n", encoding="utf-8")
+    widget = GitChangesList(str(git_repo))
+
+    staged_mime = widget.staged_list.mimeData([widget.staged_list.item(0)])
+    unstaged_mime = widget.unstaged_list.mimeData([widget.unstaged_list.item(0)])
+
+    assert staged_mime.hasFormat(_GIT_CHANGE_MIME)
+    assert staged_mime.hasFormat(AICHS_FILE_DROP_MIME)
+    assert parse_file_drop(staged_mime.data(AICHS_FILE_DROP_MIME)) == ["src/main.py"]
+    assert staged_mime.text() == "@src/main.py"
+    assert unstaged_mime.hasFormat(_GIT_CHANGE_MIME)
+    assert unstaged_mime.hasFormat(AICHS_FILE_DROP_MIME)
+    assert parse_file_drop(unstaged_mime.data(AICHS_FILE_DROP_MIME)) == ["note.txt"]
+    assert unstaged_mime.text() == "@note.txt"
 
 
 def test_git_changes_drop_releases_with_move_action(qapp, git_repo):
