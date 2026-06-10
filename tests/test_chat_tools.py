@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 from services.compaction import CompactionResult
 from services.chat import ChatThread
 from services.tool_registry import HookContext
+from storage.settings import COMPACT_RESUME_PROMPT_KEY, SettingsStore
 
 
 def _anthropic_stream_with_tool():
@@ -73,7 +74,6 @@ def _anthropic_stream_with_tool_empty_text():
 
 
 def test_execute_one_blocked_by_hook(workspace, qapp):
-    from services.tool_registry import HookContext, run_extension_hooks
     from tests.conftest import write_extension
 
     write_extension(
@@ -160,6 +160,37 @@ def test_compact_and_resume_directive_replaces_history(workspace, qapp):
     assert thread.history[:-1] == compacted
     assert thread.history[-1]["synthetic"] == "extension_resume"
     assert events[0]["type"] == "compaction"
+
+
+def test_compact_and_resume_directive_uses_configured_default_prompt(workspace, qapp):
+    SettingsStore().save({
+        COMPACT_RESUME_PROMPT_KEY: "Resume from configured context.",
+    })
+    thread = ChatThread(
+        "claude-sonnet-4-6",
+        [{"role": "user", "content": "old"}, {"role": "assistant", "content": "older"}],
+        "sys",
+        str(workspace),
+    )
+    ctx = HookContext(event="before_next_model_request", cwd=str(workspace))
+    ctx.compact_and_resume(force=True)
+    compacted = [{"role": "user", "content": "[Conversation summary]\nsummary"}]
+    result = CompactionResult(
+        messages=compacted,
+        summary="summary",
+        cut_index=2,
+        status="compacted",
+        proof={"version": "aicc-compaction/v1"},
+    )
+
+    with patch("services.chat.compact_with_result", return_value=result):
+        assert thread._apply_runtime_directives(ctx) is True
+
+    assert thread.history[-1] == {
+        "role": "user",
+        "content": "Resume from configured context.",
+        "synthetic": "extension_resume",
+    }
 
 
 def test_compact_and_resume_unchanged_appends_single_resume(workspace, qapp):

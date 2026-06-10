@@ -4,18 +4,17 @@ import re
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QTextEdit, QComboBox, QWidget, QFileDialog, QScrollArea, QSlider,
+    QTextEdit, QComboBox, QWidget, QFileDialog, QScrollArea,
     QListWidget, QListWidgetItem, QStackedWidget, QFrame, QTableWidget,
     QTableWidgetItem, QHeaderView, QMessageBox, QToolButton, QStyle, QCheckBox,
     QSpinBox, QDoubleSpinBox, QColorDialog, QTabWidget, QAbstractItemView,
-    QSizePolicy,
+    QSizePolicy, QDialogButtonBox, QTreeWidget, QTreeWidgetItem,
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QIntValidator, QPainter, QPen, QPixmap
 
 from config import MODELS, SYSTEM_PROMPT
 from services import model_registry
-from services.commit_message import COMMIT_MESSAGE_PROMPT_ADDITION_KEY
 from services.crew import all_crew, crew_settings
 from services.model_registry import (
     api_default_context_window,
@@ -27,29 +26,57 @@ from services.model_registry import (
     load_user_providers,
     save_user_providers,
 )
+from services.yuk import (
+    YukExportSelection,
+    apply_yuk,
+    discover_export_items,
+    export_yuk,
+    inspect_yuk,
+)
 from storage.settings import (
+    ARCHIVIST_PROMPT_KEY,
+    AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY,
+    COMPACT_RESUME_PROMPT_KEY,
+    COMPACTION_SUMMARY_GUIDANCE_KEY,
+    COMMIT_MESSAGE_PROMPT_ADDITION_KEY,
+    DEFAULT_ARCHIVIST_PROMPT,
+    DEFAULT_AUTO_TITLE_PROMPT_INSTRUCTIONS,
+    DEFAULT_COMPACT_RESUME_PROMPT,
+    DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE,
     DEFAULT_FILE_EDITOR_TAB_SPACES,
+    DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
     DEFAULT_TRASH_RETENTION_DAYS,
+    DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY,
     FILE_EDITOR_AUTO_SAVE_KEY,
     FILE_EDITOR_TAB_SPACES_KEY,
+    FILE_REVIEW_PROMPT_TEMPLATE_KEY,
     MAX_FILE_EDITOR_TAB_SPACES,
     MIN_FILE_EDITOR_TAB_SPACES,
     TRASH_RETENTION_DAYS_KEY,
     SettingsStore,
+    archivist_prompt,
+    auto_title_prompt_instructions,
+    compact_resume_prompt,
+    compaction_summary_guidance,
+    diagnostic_fix_prompt_template,
     file_editor_tab_spaces,
+    file_review_prompt_template,
     trash_retention_days,
 )
 from ui.avatars import avatar_pixmap, clear_cache, persist_portrait
 from ui.theme import (
     ACCENT, palette, DEFAULT_FONT_SIZE, DEFAULT_THEME,
-    apply_flat_tab_style, crew_tone, separator_color,
+    apply_flat_tab_style, crew_tone, separator_color, primary_button_style,
+    chat_font_pt, meta_font_pt,
 )
 
 _NAV = [
     ("general", "General"),
     ("editor", "Editor"),
+    ("prompts", "Prompts"),
     ("models", "Models"),
     ("crew", "Crew"),
+    ("user_kit", "User Kit"),
 ]
 
 _BUILTIN_IDS = {"claude", "openai"}
@@ -532,11 +559,7 @@ class _ProviderDialog(QDialog):
         cancel.setStyleSheet(styles["btn"])
         cancel.clicked.connect(self.reject)
         add = QPushButton("Save")
-        add.setStyleSheet(
-            f"QPushButton {{ background:{ACCENT}; color:white; border:none;"
-            "border-radius:6px; padding:6px 18px; font-weight:bold; }"
-            f"QPushButton:hover {{ background:#0066d6; }}"
-        )
+        add.setStyleSheet(primary_button_style())
         add.clicked.connect(self._accept_if_valid)
         buttons.addWidget(cancel)
         buttons.addWidget(add)
@@ -815,8 +838,285 @@ def _scroll_page(content: QWidget) -> QScrollArea:
     return scroll
 
 
+def _hint_label(text: str, style: str) -> QLabel:
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet(style)
+    return label
+
+
+class _YukExportDialog(QDialog):
+    def __init__(self, cwd: str, parent=None):
+        super().__init__(parent)
+        self._cwd = cwd
+        self._syncing = False
+        self.setWindowTitle("Export YUK")
+        self.resize(720, 560)
+
+        p = palette()
+        self.setStyleSheet(
+            f"QDialog {{ background:{p['BG2']}; color:{p['TEXT']}; }}"
+            f"QTreeWidget {{ background:{p['BG3']}; color:{p['TEXT']};"
+            f"border:1px solid {p['BORDER']}; border-radius:6px; }}"
+            f"QTreeWidget::item {{ padding:5px; }}"
+        )
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
+
+        title = QLabel("Export User Kit")
+        title.setStyleSheet(f"font-size:{chat_font_pt() + 2}px; font-weight:650; color:{p['TEXT']};")
+        root.addWidget(title)
+        root.addWidget(_hint_label(
+            "Choose the personalization pieces to package. Models, API keys, conversations, and runtime state are never exported.",
+            f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;",
+        ))
+
+        controls = QHBoxLayout()
+        select_all = QPushButton("Select all")
+        deselect_all = QPushButton("Deselect all")
+        select_all.clicked.connect(lambda: self._set_all(Qt.CheckState.Checked))
+        deselect_all.clicked.connect(lambda: self._set_all(Qt.CheckState.Unchecked))
+        controls.addWidget(select_all)
+        controls.addWidget(deselect_all)
+        controls.addStretch()
+        root.addLayout(controls)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Item", "Scope", "Details"])
+        self.tree.setColumnWidth(0, 300)
+        self.tree.setColumnWidth(1, 90)
+        self.tree.itemChanged.connect(self._on_item_changed)
+        root.addWidget(self.tree, 1)
+        self._populate()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        export_btn = buttons.addButton("Export", QDialogButtonBox.ButtonRole.AcceptRole)
+        export_btn.clicked.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def selected_item_ids(self) -> set[str]:
+        selected: set[str] = set()
+        for row in range(self.tree.topLevelItemCount()):
+            section = self.tree.topLevelItem(row)
+            for idx in range(section.childCount()):
+                child = section.child(idx)
+                if child.checkState(0) == Qt.CheckState.Checked:
+                    selected.add(str(child.data(0, Qt.ItemDataRole.UserRole) or ""))
+        return {item_id for item_id in selected if item_id}
+
+    def _populate(self) -> None:
+        by_section: dict[str, list] = {}
+        for item in discover_export_items(self._cwd):
+            by_section.setdefault(item.section, []).append(item)
+        for section_name, items in by_section.items():
+            section = QTreeWidgetItem([section_name, "", f"{len(items)} item(s)"])
+            section.setFlags(section.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
+            section.setCheckState(0, Qt.CheckState.Checked)
+            self.tree.addTopLevelItem(section)
+            section.setExpanded(True)
+            for item in items:
+                detail = item.note or item.kind.replace("_", " ")
+                child = QTreeWidgetItem([item.label, item.scope.title(), detail])
+                child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                child.setCheckState(0, Qt.CheckState.Checked if item.selected else Qt.CheckState.Unchecked)
+                child.setData(0, Qt.ItemDataRole.UserRole, item.id)
+                section.addChild(child)
+        self.tree.expandAll()
+
+    def _set_all(self, state: Qt.CheckState) -> None:
+        self._syncing = True
+        for row in range(self.tree.topLevelItemCount()):
+            section = self.tree.topLevelItem(row)
+            section.setCheckState(0, state)
+            for idx in range(section.childCount()):
+                section.child(idx).setCheckState(0, state)
+        self._syncing = False
+
+    def _on_item_changed(self, item: QTreeWidgetItem, _column: int) -> None:
+        if self._syncing:
+            return
+        self._syncing = True
+        if item.parent() is None:
+            state = item.checkState(0)
+            if state in (Qt.CheckState.Checked, Qt.CheckState.Unchecked):
+                for idx in range(item.childCount()):
+                    item.child(idx).setCheckState(0, state)
+        else:
+            parent = item.parent()
+            checked = sum(
+                1 for idx in range(parent.childCount())
+                if parent.child(idx).checkState(0) == Qt.CheckState.Checked
+            )
+            if checked == 0:
+                parent.setCheckState(0, Qt.CheckState.Unchecked)
+            elif checked == parent.childCount():
+                parent.setCheckState(0, Qt.CheckState.Checked)
+            else:
+                parent.setCheckState(0, Qt.CheckState.PartiallyChecked)
+        self._syncing = False
+
+
+class _YukImportDialog(QDialog):
+    def __init__(self, inspection, parent=None):
+        super().__init__(parent)
+        self._inspection = inspection
+        self._conflicts = {conflict.item_id: conflict for conflict in inspection.conflicts}
+        self._action_widgets: dict[str, QComboBox] = {}
+        self.setWindowTitle("Import YUK")
+        self.resize(760, 560)
+
+        p = palette()
+        self.setStyleSheet(
+            f"QDialog {{ background:{p['BG2']}; color:{p['TEXT']}; }}"
+            f"QTreeWidget {{ background:{p['BG3']}; color:{p['TEXT']};"
+            f"border:1px solid {p['BORDER']}; border-radius:6px; }}"
+            f"QComboBox {{ background:{p['BG2']}; color:{p['TEXT']};"
+            f"border:1px solid {p['BORDER']}; border-radius:5px; padding:3px 8px; }}"
+        )
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
+
+        title = QLabel("Import User Kit")
+        title.setStyleSheet(f"font-size:{chat_font_pt() + 2}px; font-weight:650; color:{p['TEXT']};")
+        root.addWidget(title)
+        package_name = str(inspection.manifest.get("name") or "YUK package")
+        root.addWidget(_hint_label(
+            f"{package_name}. Review the contents before applying. Extension Python is not executed during preview. Imported extensions are installed disabled until reviewed.",
+            f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;",
+        ))
+        if inspection.warnings:
+            warning = QLabel("Warnings:\n" + "\n".join(f"- {text}" for text in inspection.warnings))
+            warning.setWordWrap(True)
+            warning.setStyleSheet(
+                "color:#f59e0b; background:rgba(245, 158, 11, 0.10);"
+                "border:1px solid rgba(245, 158, 11, 0.35); border-radius:6px;"
+                f"padding:8px; font-size:{meta_font_pt()}px;"
+            )
+            root.addWidget(warning)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Item", "Scope", "Action"])
+        self.tree.setColumnWidth(0, 330)
+        self.tree.setColumnWidth(1, 90)
+        root.addWidget(self.tree, 1)
+        self._populate()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        import_btn = buttons.addButton("Import", QDialogButtonBox.ButtonRole.AcceptRole)
+        import_btn.clicked.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def choices(self) -> dict[str, str]:
+        choices: dict[str, str] = {}
+        for row in range(self.tree.topLevelItemCount()):
+            section = self.tree.topLevelItem(row)
+            for idx in range(section.childCount()):
+                child = section.child(idx)
+                item_id = str(child.data(0, Qt.ItemDataRole.UserRole) or "")
+                if not item_id:
+                    continue
+                if child.checkState(0) != Qt.CheckState.Checked:
+                    choices[item_id] = "skip"
+                    continue
+                combo = self._action_widgets.get(item_id)
+                if combo:
+                    choices[item_id] = str(combo.currentData())
+        return choices
+
+    def _populate(self) -> None:
+        by_section: dict[str, list] = {}
+        seen_ids: set[str] = set()
+        for item in self._inspection.items:
+            by_section.setdefault(item.section or "Items", []).append(item)
+            seen_ids.add(str(item.id))
+        for key in sorted((self._inspection.manifest.get("settings") or {}).keys()):
+            item_id = f"setting:{key}"
+            if item_id in seen_ids:
+                continue
+            by_section.setdefault(_setting_section(key), []).append(
+                type("SettingItem", (), {
+                    "id": item_id,
+                    "label": _setting_label_for_yuk(key),
+                    "scope": "",
+                    "note": "setting",
+                    "section": _setting_section(key),
+                })()
+            )
+        for section_name, items in by_section.items():
+            section = QTreeWidgetItem([section_name, "", f"{len(items)} item(s)"])
+            self.tree.addTopLevelItem(section)
+            section.setExpanded(True)
+            for item in items:
+                item_id = str(item.id)
+                conflict = self._conflicts.get(item_id)
+                action_text = conflict.reason if conflict else _yuk_import_detail(item, self._inspection.manifest)
+                child = QTreeWidgetItem([item.label, str(getattr(item, "scope", "")).title(), action_text])
+                child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                child.setCheckState(0, Qt.CheckState.Checked)
+                child.setData(0, Qt.ItemDataRole.UserRole, item_id)
+                section.addChild(child)
+                if conflict:
+                    combo = QComboBox()
+                    combo.addItem("Overwrite", "overwrite")
+                    combo.addItem("Skip", "skip")
+                    combo.addItem("Rename", "rename")
+                    if conflict.kind == "setting":
+                        combo.removeItem(2)
+                    self.tree.setItemWidget(child, 2, combo)
+                    self._action_widgets[item_id] = combo
+        self.tree.expandAll()
+
+
+def _setting_section(key: str) -> str:
+    return "Crew" if key in {"crew", "crew_models", "avatar_human", "avatar_agent"} else "Personality & Prompts"
+
+
+def _yuk_import_detail(item, manifest: dict) -> str:
+    kind = str(getattr(item, "kind", "") or "")
+    if kind not in {"extension_file", "extension_folder"}:
+        return "Import"
+    entry = _yuk_manifest_entry(manifest, str(getattr(item, "id", "") or ""))
+    declared = bool(entry.get("permissions_declared"))
+    permissions = entry.get("permissions") if isinstance(entry.get("permissions"), dict) else {}
+    if not declared:
+        return "Install disabled; permissions undisclosed"
+    enabled = [key for key, value in permissions.items() if bool(value)]
+    detail = ", ".join(enabled) if enabled else "none"
+    return f"Install disabled; permissions: {detail}"
+
+
+def _yuk_manifest_entry(manifest: dict, item_id: str) -> dict:
+    for entry in manifest.get("items", []):
+        if isinstance(entry, dict) and str(entry.get("id") or "") == item_id:
+            return entry
+    return {}
+
+
+def _setting_label_for_yuk(key: str) -> str:
+    return key.replace("_", " ").title()
+
+
+def _normalized_crew_settings(saved: dict) -> dict:
+    return {
+        member.id: {
+            "enabled": crew_settings(saved, member)["enabled"],
+            "model": crew_settings(saved, member)["model"],
+            "prompt": crew_settings(saved, member)["prompt"],
+            "color": crew_settings(saved, member)["color"],
+            "avatar": crew_settings(saved, member)["avatar"],
+        }
+        for member in all_crew()
+    }
+
+
 class SettingsDialog(QDialog):
-    def __init__(self, store: SettingsStore, parent=None):
+    def __init__(self, store: SettingsStore, parent=None, cwd: str = ""):
         super().__init__(parent)
         self.store = store
         self.setWindowTitle("Settings")
@@ -872,6 +1172,10 @@ class SettingsDialog(QDialog):
         self._crew_widgets: dict[str, dict] = {}
 
         saved = store.load()
+        self._saved = saved
+        self._cwd = cwd or str(saved.get("workspace_path") or os.getcwd())
+        self._page_ids = [page_id for page_id, _title in _NAV]
+        self._built_pages: set[str] = set()
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -905,10 +1209,8 @@ class SettingsDialog(QDialog):
         self._stack = QStackedWidget()
         self._stack.setStyleSheet(f"background:{p['BG2']};")
 
-        self._stack.addWidget(_scroll_page(self._page_general(saved)))
-        self._stack.addWidget(_scroll_page(self._page_editor(saved)))
-        self._stack.addWidget(_scroll_page(self._page_models()))
-        self._stack.addWidget(_scroll_page(self._page_crew(saved)))
+        for _page_id, title in _NAV:
+            self._stack.addWidget(self._placeholder_page(title))
 
         body.addWidget(self._nav)
         body.addWidget(self._stack, 1)
@@ -926,20 +1228,62 @@ class SettingsDialog(QDialog):
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
         save = QPushButton("Save")
-        save.setStyleSheet(
-            f"QPushButton {{ background:{ACCENT}; color:white; border:none;"
-            f"border-radius:6px; padding:6px 20px; font-weight:bold; }}"
-            f"QPushButton:hover {{ background:#0066d6; }}"
-        )
+        save.setStyleSheet(primary_button_style(padding="6px 20px"))
         save.clicked.connect(self._save)
         buttons.addWidget(cancel)
         buttons.addWidget(save)
         outer.addWidget(footer)
 
-        self._load_values(saved)
+        self._ensure_page(0)
         self._nav.setCurrentRow(0)
 
     # ── page builders ─────────────────────────────────────────────────────
+
+    def _placeholder_page(self, title: str) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 20, 24, 24)
+        label = QLabel(title)
+        label.setStyleSheet(self._hint_style)
+        layout.addWidget(label)
+        layout.addStretch()
+        return page
+
+    def _build_page(self, page_id: str) -> QWidget:
+        if page_id == "general":
+            return self._page_general(self._saved)
+        if page_id == "editor":
+            return self._page_editor(self._saved)
+        if page_id == "prompts":
+            return self._page_prompts(self._saved)
+        if page_id == "models":
+            return self._page_models()
+        if page_id == "crew":
+            return self._page_crew(self._saved)
+        if page_id == "user_kit":
+            return self._page_user_kit()
+        raise ValueError(f"Unknown settings page: {page_id}")
+
+    def _ensure_page(self, row: int) -> None:
+        if row < 0 or row >= len(self._page_ids):
+            return
+        page_id = self._page_ids[row]
+        if page_id in self._built_pages:
+            return
+        old = self._stack.widget(row)
+        page = _scroll_page(self._build_page(page_id))
+        self._stack.removeWidget(old)
+        old.deleteLater()
+        self._stack.insertWidget(row, page)
+        self._built_pages.add(page_id)
+        self._load_page_values(page_id, self._saved)
+
+    def _ensure_all_pages(self) -> None:
+        current = self._stack.currentIndex()
+        for row in range(len(self._page_ids)):
+            self._ensure_page(row)
+        if current >= 0:
+            self._stack.setCurrentIndex(current)
 
     def _page_shell(self, title: str, subtitle: str = "") -> tuple[QWidget, QVBoxLayout]:
         page = QWidget()
@@ -977,7 +1321,6 @@ class SettingsDialog(QDialog):
             "General",
             "Look, feel, and composer behavior.",
         )
-        p = palette()
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["dark", "modern", "light"])
         self.theme_combo.setStyleSheet(self._field_style)
@@ -1011,15 +1354,6 @@ class SettingsDialog(QDialog):
         trash_hint.setWordWrap(True)
         trash_hint.setStyleSheet(self._hint_style)
         layout.addWidget(trash_hint)
-
-        layout.addWidget(self._section_separator())
-        self.commit_message_guidance = QTextEdit()
-        self.commit_message_guidance.setPlaceholderText(
-            "Optional. Example: Keep messages short. Use Jira issue keys when obvious."
-        )
-        self.commit_message_guidance.setMaximumHeight(76)
-        self.commit_message_guidance.setStyleSheet(self._field_style)
-        self._field(layout, "Commit message guidance", self.commit_message_guidance)
 
         layout.addWidget(self._section_separator())
         self.human_portrait = _PortraitPicker(
@@ -1062,6 +1396,132 @@ class SettingsDialog(QDialog):
         tab_hint.setStyleSheet(self._hint_style)
         layout.addWidget(tab_hint)
 
+        layout.addStretch()
+        return page
+
+    def _page_prompts(self, saved: dict) -> QWidget:
+        page, layout = self._page_shell(
+            "Prompts",
+            "Workflow prompt defaults. Templates replace defaults; guidance fields are optional add-ons. Crew personalities stay separate.",
+        )
+        tabs = QTabWidget()
+        apply_flat_tab_style(tabs, "promptSettingsTabs")
+
+        drafts = QWidget()
+        drafts_layout = QVBoxLayout(drafts)
+        drafts_layout.setContentsMargins(14, 14, 14, 14)
+        drafts_layout.setSpacing(10)
+
+        self.file_review_prompt_template = QLineEdit()
+        self.file_review_prompt_template.setPlaceholderText(
+            DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE
+        )
+        self.file_review_prompt_template.setStyleSheet(self._field_style)
+        self._field(drafts_layout, "Ask File first line", self.file_review_prompt_template)
+        drafts_layout.addWidget(_hint_label(
+            "Replaces the first line of Ask File drafts. Use {mention} for a safe @ file reference or {path} for the raw relative path.",
+            self._hint_style,
+        ))
+
+        self.diagnostic_fix_prompt_template = QLineEdit()
+        self.diagnostic_fix_prompt_template.setPlaceholderText(
+            DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE
+        )
+        self.diagnostic_fix_prompt_template.setStyleSheet(self._field_style)
+        self._field(
+            drafts_layout,
+            "Diagnostic fix first line",
+            self.diagnostic_fix_prompt_template,
+        )
+        drafts_layout.addWidget(_hint_label(
+            "Replaces only the first line. Use {mention}, {path}, or {line}; diagnostic details are appended automatically.",
+            self._hint_style,
+        ))
+
+        self.compact_resume_prompt = QLineEdit()
+        self.compact_resume_prompt.setPlaceholderText(DEFAULT_COMPACT_RESUME_PROMPT)
+        self.compact_resume_prompt.setStyleSheet(self._field_style)
+        self._field(drafts_layout, "Compact resume prompt", self.compact_resume_prompt)
+        drafts_layout.addWidget(_hint_label(
+            "Default resume message used when compact-and-resume does not provide its own text.",
+            self._hint_style,
+        ))
+        drafts_layout.addStretch()
+        tabs.addTab(drafts, "Drafts")
+
+        automation = QWidget()
+        automation_layout = QVBoxLayout(automation)
+        automation_layout.setContentsMargins(14, 14, 14, 14)
+        automation_layout.setSpacing(10)
+
+        self.auto_title_prompt_instructions = QTextEdit()
+        self.auto_title_prompt_instructions.setPlaceholderText(
+            DEFAULT_AUTO_TITLE_PROMPT_INSTRUCTIONS
+        )
+        self.auto_title_prompt_instructions.setMinimumHeight(104)
+        self.auto_title_prompt_instructions.setStyleSheet(self._field_style)
+        self._field(
+            automation_layout,
+            "Auto-title instructions",
+            self.auto_title_prompt_instructions,
+        )
+        automation_layout.addWidget(_hint_label(
+            "Replaces the title-writing instructions. The first user message is attached automatically.",
+            self._hint_style,
+        ))
+        automation_layout.addStretch()
+        tabs.addTab(automation, "Titles")
+
+        memory = QWidget()
+        memory_layout = QVBoxLayout(memory)
+        memory_layout.setContentsMargins(14, 14, 14, 14)
+        memory_layout.setSpacing(10)
+
+        self.compaction_summary_guidance = QTextEdit()
+        self.compaction_summary_guidance.setPlaceholderText(
+            "Optional. Example: Prefer terse bullets and preserve test commands exactly."
+        )
+        self.compaction_summary_guidance.setMaximumHeight(96)
+        self.compaction_summary_guidance.setStyleSheet(self._field_style)
+        self._field(memory_layout, "Extra compaction guidance", self.compaction_summary_guidance)
+        memory_layout.addWidget(_hint_label(
+            "Optional additive guidance appended to the fixed summary prompt; leave blank for the built-in behavior.",
+            self._hint_style,
+        ))
+
+        self.archivist_prompt = QTextEdit()
+        self.archivist_prompt.setPlaceholderText(DEFAULT_ARCHIVIST_PROMPT)
+        self.archivist_prompt.setMinimumHeight(120)
+        self.archivist_prompt.setStyleSheet(self._field_style)
+        self._field(memory_layout, "Archivist slash-command prompt", self.archivist_prompt)
+        memory_layout.addWidget(_hint_label(
+            "Replaces /archivist instructions. Command name and allowed tools stay fixed.",
+            self._hint_style,
+        ))
+        memory_layout.addStretch()
+        tabs.addTab(memory, "Memory")
+
+        git = QWidget()
+        git_layout = QVBoxLayout(git)
+        git_layout.setContentsMargins(14, 14, 14, 14)
+        git_layout.setSpacing(10)
+
+        self.commit_message_guidance = QTextEdit()
+        self.commit_message_guidance.setPlaceholderText(
+            "Optional. Example: Keep messages short. Use Jira issue keys when obvious."
+        )
+        self.commit_message_guidance.setMaximumHeight(96)
+        self.commit_message_guidance.setStyleSheet(self._field_style)
+        self._field(git_layout, "Extra commit guidance", self.commit_message_guidance)
+        git_layout.addWidget(_hint_label(
+            "Optional additive guidance appended to generated commit-message requests; leave blank for the built-in behavior.",
+            self._hint_style,
+        ))
+        git_layout.addStretch()
+        tabs.addTab(git, "Git")
+
+        layout.addWidget(self._section_separator())
+        layout.addWidget(tabs, 1)
         layout.addStretch()
         return page
 
@@ -1494,19 +1954,63 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         return page
 
+    def _page_user_kit(self) -> QWidget:
+        page, layout = self._page_shell(
+            "User Kit",
+            "Export or import portable AICHS personalization packages.",
+        )
+        p = palette()
+        hint = QLabel(
+            "YUK packages can include prompts, personality, crew preferences, skills, "
+            "extensions, extension enabled state, and selected avatars. Models, API keys, "
+            "conversations, and runtime state are always left out."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(self._hint_style)
+        layout.addWidget(hint)
+
+        actions = QFrame()
+        actions.setStyleSheet(
+            f"QFrame {{ background:{p['BG3']}; border:1px solid {p['BORDER']}; border-radius:8px; }}"
+        )
+        action_layout = QVBoxLayout(actions)
+        action_layout.setContentsMargins(14, 14, 14, 14)
+        action_layout.setSpacing(10)
+
+        export_btn = QPushButton("Export YUK...")
+        export_btn.setStyleSheet(primary_button_style())
+        export_btn.clicked.connect(self._export_yuk)
+        action_layout.addWidget(export_btn)
+
+        import_btn = QPushButton("Import YUK...")
+        import_btn.setStyleSheet(self._btn_style)
+        import_btn.clicked.connect(self._import_yuk)
+        action_layout.addWidget(import_btn)
+
+        layout.addWidget(actions)
+        layout.addStretch()
+        return page
+
     # ── logic ─────────────────────────────────────────────────────────────
 
     def _on_nav(self, row: int):
         if row >= 0:
+            self._ensure_page(row)
             self._stack.setCurrentIndex(row)
 
-    def _load_values(self, saved: dict):
-        self.system_prompt.setPlainText(saved.get("system_prompt", SYSTEM_PROMPT))
+    def _load_page_values(self, page_id: str, saved: dict):
+        if page_id == "general":
+            self._load_general_values(saved)
+        elif page_id == "editor":
+            self._load_editor_values(saved)
+        elif page_id == "prompts":
+            self._load_prompts_values(saved)
+        elif page_id == "models":
+            self._load_models_values(saved)
+        elif page_id == "crew":
+            self._load_crew_values(saved)
 
-        defaults = saved.get("default_models", {})
-        self._providers = self._load_configured_providers(saved)
-        self._refresh_provider_table(defaults)
-
+    def _load_general_values(self, saved: dict):
         theme = saved.get("theme", DEFAULT_THEME)
         if theme in ("dark", "modern", "light"):
             self.theme_combo.setCurrentText(theme)
@@ -1516,14 +2020,33 @@ class SettingsDialog(QDialog):
             self.font_combo.setCurrentText(font)
 
         self.enter_to_send_check.setChecked(bool(saved.get("enter_to_send", False)))
+        self.trash_retention_spin.setValue(trash_retention_days(saved))
+
+    def _load_editor_values(self, saved: dict):
         self.file_editor_auto_save_check.setChecked(
             bool(saved.get(FILE_EDITOR_AUTO_SAVE_KEY, False))
         )
         self.file_editor_tab_spaces_spin.setValue(file_editor_tab_spaces(saved))
-        self.trash_retention_spin.setValue(trash_retention_days(saved))
+
+    def _load_prompts_values(self, saved: dict):
+        self.file_review_prompt_template.setText(file_review_prompt_template(saved))
+        self.diagnostic_fix_prompt_template.setText(
+            diagnostic_fix_prompt_template(saved)
+        )
+        self.compact_resume_prompt.setText(compact_resume_prompt(saved))
+        self.auto_title_prompt_instructions.setPlainText(
+            auto_title_prompt_instructions(saved)
+        )
+        self.compaction_summary_guidance.setPlainText(compaction_summary_guidance(saved))
+        self.archivist_prompt.setPlainText(archivist_prompt(saved))
         self.commit_message_guidance.setPlainText(
             str(saved.get(COMMIT_MESSAGE_PROMPT_ADDITION_KEY, ""))
         )
+
+    def _load_models_values(self, saved: dict):
+        defaults = saved.get("default_models", {})
+        self._providers = self._load_configured_providers(saved)
+        self._refresh_provider_table(defaults)
 
         compaction = saved.get("compaction") if isinstance(saved.get("compaction"), dict) else {}
         reserve = compaction.get("reserve_tokens", compaction.get("reserveTokens"))
@@ -1532,6 +2055,118 @@ class SettingsDialog(QDialog):
         self.compaction_keep_recent_edit.setText("" if keep is None else str(int(keep)))
 
         self._update_compaction_label()
+
+    def _load_crew_values(self, saved: dict):
+        self.system_prompt.setPlainText(saved.get("system_prompt", SYSTEM_PROMPT))
+
+    def _export_yuk(self):
+        self._ensure_yuk_pages()
+        if self._has_unsaved_yuk_changes():
+            QMessageBox.warning(
+                self,
+                "Save settings first",
+                "You have unsaved prompt, crew, or avatar changes. Save Settings before exporting a YUK package so those changes are included.",
+            )
+            return
+        dialog = _YukExportDialog(self._cwd, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected = dialog.selected_item_ids()
+        if not selected:
+            QMessageBox.warning(self, "Nothing selected", "Select at least one item to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export YUK",
+            str(Path.home() / "aichs-profile.yuk"),
+            "YUK packages (*.yuk)",
+        )
+        if not path:
+            return
+        try:
+            export_yuk(path, self._cwd, YukExportSelection(selected_item_ids=selected))
+        except Exception as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        QMessageBox.information(self, "Exported", "YUK package exported.")
+
+    def _import_yuk(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import YUK",
+            "",
+            "YUK packages (*.yuk)",
+        )
+        if not path:
+            return
+        try:
+            inspection = inspect_yuk(path, self._cwd)
+        except Exception as exc:
+            QMessageBox.warning(self, "Import failed", str(exc))
+            return
+        dialog = _YukImportDialog(inspection, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            apply_yuk(path, self._cwd, dialog.choices())
+        except Exception as exc:
+            QMessageBox.warning(self, "Import failed", str(exc))
+            return
+        clear_cache()
+        self._saved = self.store.load()
+        QMessageBox.information(self, "Imported", "YUK package imported.")
+        self.accept()
+
+    def _ensure_yuk_pages(self) -> None:
+        for page_id in ("general", "prompts", "crew"):
+            if page_id in self._page_ids:
+                self._ensure_page(self._page_ids.index(page_id))
+
+    def _has_unsaved_yuk_changes(self) -> bool:
+        return self._current_yuk_settings() != self._saved_yuk_settings(self.store.load())
+
+    def _saved_yuk_settings(self, saved: dict) -> dict:
+        return {
+            "system_prompt": str(saved.get("system_prompt") or SYSTEM_PROMPT).strip() or SYSTEM_PROMPT,
+            FILE_REVIEW_PROMPT_TEMPLATE_KEY: file_review_prompt_template(saved),
+            DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY: diagnostic_fix_prompt_template(saved),
+            COMPACT_RESUME_PROMPT_KEY: compact_resume_prompt(saved),
+            AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY: auto_title_prompt_instructions(saved),
+            COMPACTION_SUMMARY_GUIDANCE_KEY: compaction_summary_guidance(saved),
+            ARCHIVIST_PROMPT_KEY: archivist_prompt(saved),
+            COMMIT_MESSAGE_PROMPT_ADDITION_KEY: str(saved.get(COMMIT_MESSAGE_PROMPT_ADDITION_KEY, "")).strip(),
+            "crew": _normalized_crew_settings(saved),
+            "avatar_human": str(saved.get("avatar_human") or "human"),
+            "avatar_agent": str(saved.get("avatar_agent") or "agent"),
+        }
+
+    def _current_yuk_settings(self) -> dict:
+        crew = {}
+        for member in all_crew():
+            widgets = self._crew_widgets.get(member.id, {})
+            if not widgets:
+                continue
+            model = widgets["model"].currentData() or ""
+            crew[member.id] = {
+                "enabled": widgets["enabled"].isChecked(),
+                "model": model,
+                "prompt": widgets["prompt"].toPlainText().strip(),
+                "color": widgets["color"].value(),
+                "avatar": widgets["portrait"].value(),
+            }
+        return {
+            "system_prompt": self.system_prompt.toPlainText().strip() or SYSTEM_PROMPT,
+            FILE_REVIEW_PROMPT_TEMPLATE_KEY: self.file_review_prompt_template.text().strip() or file_review_prompt_template({}),
+            DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY: self.diagnostic_fix_prompt_template.text().strip() or diagnostic_fix_prompt_template({}),
+            COMPACT_RESUME_PROMPT_KEY: self.compact_resume_prompt.text().strip() or compact_resume_prompt({}),
+            AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY: self.auto_title_prompt_instructions.toPlainText().strip() or auto_title_prompt_instructions({}),
+            COMPACTION_SUMMARY_GUIDANCE_KEY: self.compaction_summary_guidance.toPlainText().strip(),
+            ARCHIVIST_PROMPT_KEY: self.archivist_prompt.toPlainText().strip() or archivist_prompt({}),
+            COMMIT_MESSAGE_PROMPT_ADDITION_KEY: self.commit_message_guidance.toPlainText().strip(),
+            "crew": crew,
+            "avatar_human": self.human_portrait.value(),
+            "avatar_agent": self.agent_portrait.value(),
+        }
 
     def _update_compaction_label(self):
         if self._providers:
@@ -1551,6 +2186,7 @@ class SettingsDialog(QDialog):
         )
 
     def _save(self):
+        self._ensure_all_pages()
         data = self.store.load()
         configured_ids = {provider["id"] for provider in self._providers}
         provider_keys = {
@@ -1659,6 +2295,12 @@ class SettingsDialog(QDialog):
             "enter_to_send": self.enter_to_send_check.isChecked(),
             FILE_EDITOR_AUTO_SAVE_KEY: self.file_editor_auto_save_check.isChecked(),
             FILE_EDITOR_TAB_SPACES_KEY: self.file_editor_tab_spaces_spin.value(),
+            FILE_REVIEW_PROMPT_TEMPLATE_KEY: self.file_review_prompt_template.text().strip(),
+            DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY: self.diagnostic_fix_prompt_template.text().strip(),
+            COMPACT_RESUME_PROMPT_KEY: self.compact_resume_prompt.text().strip(),
+            AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY: self.auto_title_prompt_instructions.toPlainText().strip(),
+            COMPACTION_SUMMARY_GUIDANCE_KEY: self.compaction_summary_guidance.toPlainText().strip(),
+            ARCHIVIST_PROMPT_KEY: self.archivist_prompt.toPlainText().strip(),
             TRASH_RETENTION_DAYS_KEY: self.trash_retention_spin.value(),
             COMMIT_MESSAGE_PROMPT_ADDITION_KEY: self.commit_message_guidance.toPlainText().strip(),
             "default_models": default_models,

@@ -153,6 +153,9 @@ def _change_from_status_line(repo_path: str, line: str) -> GitFileChange | None:
 
 def list_file_changes(repo_path: str) -> list[GitFileChange]:
     """Uncommitted file changes (same filters as the Git tab)."""
+    if not is_git_repo(repo_path):
+        return []
+
     status = run_git(["git", "status", "--short", "-uall"], repo_path)
     if not status:
         return []

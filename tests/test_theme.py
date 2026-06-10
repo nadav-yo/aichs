@@ -2,7 +2,9 @@ import json
 
 import pytest
 
+import ui.theme as theme_module
 from ui.theme import (
+    apply_app_theme,
     build_stylesheet,
     bubble_label_style,
     compaction_threshold_pct,
@@ -56,6 +58,30 @@ def test_markdown_css_and_stylesheet(qapp):
     assert "background" in bubble_label_style(is_user=True)
 
 
+def test_apply_app_theme_skips_reapplying_same_theme(monkeypatch):
+    from storage.settings import SettingsStore
+
+    SettingsStore().save({"font_size": "medium"})
+    builds = []
+    app = _FakeApp()
+    monkeypatch.setattr(
+        theme_module,
+        "build_stylesheet",
+        lambda name: builds.append(name) or f"QWidget {{ /* {name} */ }}",
+    )
+    monkeypatch.setattr("ui.win_caption.install_caption_sync", lambda _app: None)
+    monkeypatch.setattr("ui.win_caption.sync_all_windows_captions", lambda *_args: None)
+
+    apply_app_theme(app, "modern")
+    apply_app_theme(app, "modern")
+    app.setStyleSheet("")
+    apply_app_theme(app, "modern")
+    SettingsStore().update({"font_size": "large"})
+    apply_app_theme(app, "modern")
+
+    assert builds == ["modern", "modern", "modern"]
+
+
 def test_crew_styles_are_distinct():
     scout = bubble_label_style(False, crew_id="scout")
     archivist = bubble_label_style(False, crew_id="archivist")
@@ -63,3 +89,28 @@ def test_crew_styles_are_distinct():
     assert "#123456" in bubble_label_style(False, crew_id="scout", crew_color="#123456")
     assert "#123456" in crew_name_style("scout", "#123456")
     assert crew_tone("archivist")["accent"].startswith("#")
+
+
+class _FakeApp:
+    def __init__(self):
+        self._font = None
+        self._style = ""
+        self._properties = {}
+
+    def font(self):
+        return self._font or theme_module.app_font()
+
+    def setFont(self, font):
+        self._font = font
+
+    def styleSheet(self):
+        return self._style
+
+    def setStyleSheet(self, style):
+        self._style = style
+
+    def property(self, name):
+        return self._properties.get(name)
+
+    def setProperty(self, name, value):
+        self._properties[name] = value

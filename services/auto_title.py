@@ -1,12 +1,15 @@
 import re
 
-import anthropic
-from openai import OpenAI
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from services.content import content_preview
 from services.model_registry import get_model_config, resolve_api_key
 from services.model_requests import apply_generation_params
+from storage.settings import (
+    DEFAULT_AUTO_TITLE_PROMPT,
+    SettingsStore,
+    auto_title_prompt_instructions,
+)
 
 _TITLE_MODELS: dict[str, str] = {
     "anthropic": "claude-haiku-4-5-20251001",
@@ -26,12 +29,7 @@ _BAD_TITLE_PATTERNS = (
     "task instructions",
 )
 
-TITLE_PROMPT = """\
-Write a short conversation title (5-7 words). No quotes, no punctuation at the end.
-Capture the main topic from the first user message. Reply with the title only.
-
-FIRST USER MESSAGE:
-{user}"""
+TITLE_PROMPT = DEFAULT_AUTO_TITLE_PROMPT
 
 
 def generate_title(model: str, user_text: str) -> str:
@@ -44,9 +42,9 @@ def generate_title(model: str, user_text: str) -> str:
     if cfg.base_url:
         kwargs["base_url"] = cfg.base_url
 
-    prompt = TITLE_PROMPT.format(user=content_preview(user_text)[:100])
+    prompt = _build_title_prompt(user_text)
     if cfg.api == "anthropic":
-        client = anthropic.Anthropic(**kwargs)
+        client = _anthropic_client(**kwargs)
         request = {
             "model": title_model,
             "max_tokens": 32,
@@ -56,7 +54,7 @@ def generate_title(model: str, user_text: str) -> str:
         resp = client.messages.create(**request)
         raw = resp.content[0].text
     else:
-        client = OpenAI(**kwargs)
+        client = _openai_client(**kwargs)
         request = {
             "model": title_model,
             "max_tokens": 32,
@@ -79,6 +77,24 @@ def clean_title(raw: str) -> str:
     if len(t) > 60:
         t = t[:57].rstrip() + "…"
     return t or "Untitled"
+
+
+def _build_title_prompt(user_text: str) -> str:
+    instructions = auto_title_prompt_instructions(SettingsStore().load())
+    user_preview = content_preview(user_text)[:100]
+    return f"{instructions}\n\nFirst user message:\n{user_preview}".strip()
+
+
+def _anthropic_client(**kwargs):
+    import anthropic
+
+    return anthropic.Anthropic(**kwargs)
+
+
+def _openai_client(**kwargs):
+    from openai import OpenAI
+
+    return OpenAI(**kwargs)
 
 
 def fallback_title(user_text: str) -> str:

@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -22,6 +23,22 @@ def qapp():
     if app is None:
         app = QApplication([])
     yield app
+
+
+@pytest.fixture(autouse=True)
+def close_qt_windows():
+    yield
+    if "PyQt6.QtWidgets" not in sys.modules:
+        return
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in app.topLevelWidgets():
+        widget.close()
+        widget.deleteLater()
+    app.processEvents()
 
 
 @pytest.fixture
@@ -67,6 +84,36 @@ def workspace(tmp_path):
     root.mkdir()
     (root / "src").mkdir()
     (root / "src" / "main.py").write_text("print('hi')\n", encoding="utf-8")
+    return root
+
+
+@pytest.fixture(scope="session")
+def git_repo_template(tmp_path_factory):
+    if not shutil.which("git"):
+        pytest.skip("git not on PATH")
+
+    root = tmp_path_factory.mktemp("git_repo_template") / "repo"
+    root.mkdir()
+    (root / "src").mkdir()
+    (root / "src" / "main.py").write_text("print('hi')\n", encoding="utf-8")
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", *args],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+
+    git("init", "-q")
+    config = root / ".git" / "config"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + "\n[user]\n\temail = test@example.com\n\tname = Test User\n",
+        encoding="utf-8",
+    )
+    git("add", ".")
+    git("commit", "-q", "-m", "initial")
     return root
 
 
@@ -125,23 +172,8 @@ def workspace_with_missing_register(workspace):
 
 
 @pytest.fixture
-def git_repo(workspace):
-    if not shutil.which("git"):
-        pytest.skip("git not on PATH")
-
-    def git(*args: str) -> None:
-        subprocess.run(
-            ["git", *args],
-            cwd=workspace,
-            check=True,
-            capture_output=True,
-        )
-
-    git("init")
-    git("config", "user.email", "test@example.com")
-    git("config", "user.name", "Test User")
-    git("add", ".")
-    git("commit", "-m", "initial")
+def git_repo(workspace, git_repo_template):
+    shutil.copytree(git_repo_template, workspace, dirs_exist_ok=True)
     return workspace
 
 

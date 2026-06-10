@@ -1,5 +1,4 @@
 import json
-import os
 import re
 import threading
 import time
@@ -38,6 +37,7 @@ from services.tools import (
 )
 from services.tool_registry import HookContext, run_extension_hooks
 from services.usage import merge_usage, normalize_usage
+from storage.settings import SettingsStore, compact_resume_prompt
 
 _MAX_PARALLEL = 8
 _MAX_CREW_CALLS_PER_TURN = 2
@@ -451,7 +451,7 @@ class ChatThread(QThread):
         if action == "compact_and_resume":
             resume_prompt = str(params.get("resume_prompt") or "").strip()
             if not resume_prompt:
-                resume_prompt = "Continue the active task from the compacted context."
+                resume_prompt = compact_resume_prompt(SettingsStore().load())
             self.history.append({
                 "role": "user",
                 "content": resume_prompt,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import ast
+import hashlib
 import json
 import shutil
 import sys
@@ -10,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal
 
+import config
+
 
 ToolExecute = Callable[["ToolContext", dict], str]
 CommandExecute = Callable[["CommandContext", str], object]
@@ -17,6 +20,32 @@ ContextProvider = Callable[["ExtensionContext"], str]
 HookHandler = Callable[["HookContext"], None]
 UiProvider = Callable[["ExtensionContext"], object]
 LanguageProvider = Callable[[object], object]
+
+
+PERMISSION_KEYS = (
+    "tools",
+    "commands",
+    "context",
+    "hooks",
+    "ui",
+    "language",
+    "processes",
+    "network",
+    "workspace_read",
+    "workspace_write",
+    "extension_storage",
+)
+
+_ENFORCED_PERMISSIONS = {
+    "tools",
+    "commands",
+    "context",
+    "hooks",
+    "ui",
+    "language",
+    "processes",
+}
+_PROCESS_CAPABILITY_HINTS = ("process", "shell")
 
 
 @dataclass(frozen=True)
@@ -80,6 +109,29 @@ class ExtensionStorage:
     def save_state(self, data: dict, name: str = "state") -> None:
         _write_json_object(self._state_path(name), data)
 
+    def artifact_path(self, name: str) -> Path:
+        """Return a project-scoped path for extension-owned text artifacts."""
+        return self._artifact_path(name)
+
+    def save_artifact(self, name: str, content: str) -> str:
+        path = self._artifact_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(content), encoding="utf-8")
+        return str(path)
+
+    def load_artifact(self, name: str, max_chars: int | None = None) -> str:
+        path = self._artifact_path(name)
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if max_chars is None:
+            return text
+        try:
+            limit = int(max_chars)
+        except (TypeError, ValueError):
+            return text
+        if limit <= 0 or len(text) <= limit:
+            return text
+        return text[:limit]
+
     def _config_path(self, scope: str) -> Path:
         if scope == "global":
             return Path.home() / ".aichs" / "extensions" / f"{self.extension_id}.json"
@@ -92,6 +144,16 @@ class ExtensionStorage:
         if self.conversation_id:
             state_name = f"{_safe_extension_id(self.conversation_id)}-{state_name}"
         return Path(self.cwd) / ".aichs" / "state" / self.extension_id / f"{state_name}.json"
+
+    def _artifact_path(self, name: str) -> Path:
+        return (
+            Path(self.cwd)
+            / ".aichs"
+            / "state"
+            / self.extension_id
+            / "artifacts"
+            / _safe_artifact_name(name)
+        )
 
 
 @dataclass
@@ -198,6 +260,30 @@ class ExtensionRequirements:
 
 
 @dataclass(frozen=True)
+class ExtensionPermissions:
+    declared: bool = False
+    tools: bool = False
+    commands: bool = False
+    context: bool = False
+    hooks: bool = False
+    ui: bool = False
+    language: bool = False
+    processes: bool = False
+    network: bool = False
+    workspace_read: bool = False
+    workspace_write: bool = False
+    extension_storage: bool = False
+
+    def allows(self, name: str) -> bool:
+        if not self.declared:
+            return True
+        return bool(getattr(self, name, False))
+
+    def enabled_names(self) -> list[str]:
+        return [name for name in PERMISSION_KEYS if bool(getattr(self, name, False))]
+
+
+@dataclass(frozen=True)
 class ExtensionFileSummary:
     path: str
     status: str
@@ -213,6 +299,12 @@ class ExtensionFileSummary:
     languages: list[LanguageContribution] = field(default_factory=list)
     requirements: ExtensionRequirements = field(default_factory=ExtensionRequirements)
     missing_requirements: list[str] = field(default_factory=list)
+    permissions: ExtensionPermissions = field(default_factory=ExtensionPermissions)
+    permission_violations: list[str] = field(default_factory=list)
+    content_hash: str = ""
+    reviewed: bool = False
+    review_required: bool = False
+    risk_messages: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -251,6 +343,12 @@ class HookContext:
     error: str = ""
     process: dict = field(default_factory=dict)
     directives: list[RuntimeDirective] = field(default_factory=list)
+    extension_id: str = "extension"
+    conversation_id: str = ""
+
+    @property
+    def storage(self) -> ExtensionStorage:
+        return ExtensionStorage(self.cwd, self.extension_id, self.conversation_id)
 
     def directive(self, action: str, **params) -> RuntimeDirective:
         item = RuntimeDirective(action=action, params=dict(params))
@@ -288,13 +386,15 @@ class ToolRegistry:
         self._tools: dict[str, ToolDefinition] = {}
         self._commands: dict[str, ExtensionCommand] = {}
         self._context_providers: list[tuple[str, ContextProvider, str]] = []
-        self._hooks: dict[str, list[HookHandler]] = {}
+        self._hooks: dict[str, list[tuple[HookHandler, str]]] = {}
         self._badges: dict[str, StatusBadge] = {}
         self._panels: dict[str, ExtensionPanel] = {}
         self._languages: dict[str, LanguageContribution] = {}
         self._current_extension_id = "extension"
+        self._current_permissions = ExtensionPermissions()
         self._description = ""
         self.errors: list[str] = []
+        self.permission_violations: list[str] = []
 
     def metadata(self, *, description: str = "") -> None:
         self._description = _clean_description(description)
@@ -310,6 +410,8 @@ class ToolRegistry:
         approval: str | None = None,
         source: str = "extension",
     ) -> None:
+        if not self._allow_contribution(source, "tools", f"tool {name}"):
+            return
         if not name or not name.replace("_", "").isalnum():
             raise ValueError(f"invalid tool name: {name!r}")
         if name in self._tools:
@@ -336,6 +438,14 @@ class ToolRegistry:
         capabilities: list[str] | None = None,
         source: str = "extension",
     ) -> None:
+        if not self._allow_contribution(source, "commands", f"command {name}"):
+            return
+        if _command_uses_processes(capabilities or []) and not self._allow_contribution(
+            source,
+            "processes",
+            f"process command {name}",
+        ):
+            return
         if not name or not name.replace("_", "").isalnum():
             raise ValueError(f"invalid command name: {name!r}")
         if name in self._commands:
@@ -352,14 +462,18 @@ class ToolRegistry:
         )
 
     def context(self, name: str, provider: ContextProvider) -> None:
+        if not self._allow_contribution("extension", "context", f"context {name}"):
+            return
         if not name:
             raise ValueError("context name is required")
         self._context_providers.append((name, provider, self._current_extension_id))
 
     def hook(self, event: str, handler: HookHandler) -> None:
+        if not self._allow_contribution("extension", "hooks", f"hook {event}"):
+            return
         if not event:
             raise ValueError("hook event is required")
-        self._hooks.setdefault(event, []).append(handler)
+        self._hooks.setdefault(event, []).append((handler, self._current_extension_id))
 
     def status_badge(
         self,
@@ -368,6 +482,8 @@ class ToolRegistry:
         provider: UiProvider,
         source: str = "extension",
     ) -> None:
+        if not self._allow_contribution(source, "ui", f"status badge {name}"):
+            return
         if not name or not name.replace("_", "").isalnum():
             raise ValueError(f"invalid status badge name: {name!r}")
         if name in self._badges:
@@ -382,6 +498,8 @@ class ToolRegistry:
         provider: UiProvider,
         source: str = "extension",
     ) -> None:
+        if not self._allow_contribution(source, "ui", f"panel {name}"):
+            return
         if not name or not name.replace("_", "").isalnum():
             raise ValueError(f"invalid panel name: {name!r}")
         if name in self._panels:
@@ -406,6 +524,8 @@ class ToolRegistry:
         format_document: LanguageProvider | None = None,
         source: str = "extension",
     ) -> None:
+        if not self._allow_contribution(source, "language", f"language {name}"):
+            return
         if not name or not name.replace("_", "").isalnum():
             raise ValueError(f"invalid language name: {name!r}")
         if name in self._languages:
@@ -473,11 +593,15 @@ class ToolRegistry:
         return snippets
 
     def run_hooks(self, event: str, ctx: HookContext) -> None:
-        for handler in self._hooks.get(event, []):
+        previous_extension_id = ctx.extension_id
+        for handler, extension_id in self._hooks.get(event, []):
+            ctx.extension_id = extension_id
             try:
                 _collect_directives(ctx, handler(ctx))
             except Exception:
                 self.errors.append(f"hook {event}:\n{traceback.format_exc().rstrip()}")
+            finally:
+                ctx.extension_id = previous_extension_id
 
     def status_badges(self, ctx: ExtensionContext) -> list[tuple[StatusBadge, object]]:
         badges: list[tuple[StatusBadge, object]] = []
@@ -499,6 +623,19 @@ class ToolRegistry:
 
     def languages(self) -> list[LanguageContribution]:
         return list(self._languages.values())
+
+    def _allow_contribution(self, source: str, permission: str, label: str) -> bool:
+        if source == "builtin" or permission not in _ENFORCED_PERMISSIONS:
+            return True
+        if self._current_permissions.allows(permission):
+            return True
+        message = (
+            f"Blocked undeclared extension contribution: {label} "
+            f"requires permission '{permission}'."
+        )
+        self.permission_violations.append(message)
+        self.errors.append(message)
+        return False
 
 def load_extensions(registry: ToolRegistry, cwd: str | None = None) -> None:
     for path in _extension_files(cwd):
@@ -583,6 +720,10 @@ def extension_overview(cwd: str | None = None) -> ExtensionOverview:
     return ExtensionOverview(files=summaries)
 
 
+def extension_static_summary(path: str | Path, cwd: str | None = None) -> ExtensionFileSummary:
+    return _extension_file_summary(Path(path), cwd, load_code=False)
+
+
 def is_extension_disabled(path: str | Path, cwd: str | None = None) -> bool:
     return _normalized_extension_path(path) in _disabled_extension_paths(cwd)
 
@@ -592,9 +733,86 @@ def set_extension_enabled(path: str | Path, enabled: bool, cwd: str | None = Non
     normalized = _normalized_extension_path(path)
     if enabled:
         disabled.discard(normalized)
+        mark_extension_reviewed(path, cwd)
     else:
         disabled.add(normalized)
     _write_disabled_extension_paths(cwd, sorted(disabled))
+
+
+def extension_content_hash(path: str | Path) -> str:
+    entrypoint = _extension_entrypoint_path(Path(path))
+    root = entrypoint.parent if entrypoint.name == "extension.py" else entrypoint
+    hasher = hashlib.sha256()
+    if entrypoint.name == "extension.py" and (root / "aichs-extension.json").exists():
+        files = [
+            item for item in root.rglob("*")
+            if item.is_file() and not any(part in {".git", "__pycache__"} for part in item.parts)
+        ]
+        for item in sorted(files):
+            rel = item.relative_to(root).as_posix()
+            hasher.update(rel.encode("utf-8"))
+            hasher.update(b"\0")
+            hasher.update(item.read_bytes())
+            hasher.update(b"\0")
+    elif entrypoint.exists():
+        hasher.update(entrypoint.name.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(entrypoint.read_bytes())
+    return hasher.hexdigest()
+
+
+def is_extension_reviewed(path: str | Path, cwd: str | None = None) -> bool:
+    normalized = _normalized_extension_path(path)
+    expected = extension_content_hash(path)
+    reviewed = _reviewed_extensions(cwd).get(normalized)
+    return (
+        isinstance(reviewed, dict)
+        and reviewed.get("hash") == expected
+        and bool(reviewed.get("trusted"))
+    )
+
+
+def is_extension_seen(path: str | Path, cwd: str | None = None) -> bool:
+    normalized = _normalized_extension_path(path)
+    expected = extension_content_hash(path)
+    reviewed = _reviewed_extensions(cwd).get(normalized)
+    return isinstance(reviewed, dict) and reviewed.get("hash") == expected
+
+
+def mark_extension_reviewed(path: str | Path, cwd: str | None = None) -> None:
+    _write_extension_review_state(path, cwd, trusted=True)
+
+
+def mark_extension_seen(path: str | Path, cwd: str | None = None) -> None:
+    _write_extension_review_state(path, cwd, trusted=False)
+
+
+def _write_extension_review_state(path: str | Path, cwd: str | None, *, trusted: bool) -> None:
+    data = _read_json_object(_reviewed_extensions_path(cwd))
+    reviewed = data.get("reviewed")
+    if not isinstance(reviewed, dict):
+        reviewed = {}
+    reviewed[_normalized_extension_path(path)] = {
+        "hash": extension_content_hash(path),
+        "trusted": bool(trusted),
+    }
+    _write_json_object(_reviewed_extensions_path(cwd), {"reviewed": reviewed})
+
+
+def unreviewed_extension_summaries(cwd: str | None = None) -> list[ExtensionFileSummary]:
+    return [
+        extension_static_summary(path, cwd)
+        for path in _extension_files(cwd)
+        if not is_extension_seen(path, cwd)
+    ]
+
+
+def disable_unreviewed_extensions(cwd: str | None = None) -> list[ExtensionFileSummary]:
+    summaries = unreviewed_extension_summaries(cwd)
+    for summary in summaries:
+        set_extension_enabled(summary.path, False, cwd)
+        mark_extension_seen(summary.path, cwd)
+    return summaries
 
 
 def extension_status_badges(
@@ -664,6 +882,7 @@ def _extension_files(cwd: str | None) -> list[Path]:
 def _load_extension_file(registry: ToolRegistry, path: Path) -> None:
     module_name = f"_aichs_ext_{abs(hash(str(path.resolve())))}"
     previous_extension_id = registry._current_extension_id
+    previous_permissions = registry._current_permissions
     try:
         spec = importlib.util.spec_from_file_location(module_name, path)
         if spec is None or spec.loader is None:
@@ -676,41 +895,64 @@ def _load_extension_file(registry: ToolRegistry, path: Path) -> None:
             registry.errors.append(f"{path}: missing register(registry)")
             return
         registry._current_extension_id = _extension_id_for_path(path)
+        registry._current_permissions = _extension_manifest_permissions(
+            _extension_manifest_metadata(path)
+        )
         register(registry)
     except Exception:
         registry.errors.append(f"{path}:\n{traceback.format_exc().rstrip()}")
     finally:
         registry._current_extension_id = previous_extension_id
+        registry._current_permissions = previous_permissions
         sys.modules.pop(module_name, None)
 
 
-def _extension_file_summary(path: Path, cwd: str | None = None) -> ExtensionFileSummary:
+def _extension_file_summary(
+    path: Path,
+    cwd: str | None = None,
+    *,
+    load_code: bool = True,
+) -> ExtensionFileSummary:
+    path = _extension_entrypoint_path(path)
     manifest = _extension_manifest_metadata(path)
     static_description = _static_extension_description(path)
     display_name = _clean_description(str(manifest.get("name") or ""))
     requirements = _extension_manifest_requirements(manifest)
     missing_requirements = _missing_extension_requirements(requirements)
-    if is_extension_disabled(path, cwd):
+    permissions = _extension_manifest_permissions(manifest)
+    content_hash = extension_content_hash(path)
+    reviewed = is_extension_reviewed(path, cwd)
+    review_required = not reviewed
+    risk_messages = _extension_risk_messages(permissions)
+    if is_extension_disabled(path, cwd) or not load_code:
+        static = _static_extension_contributions(path)
         return ExtensionFileSummary(
             path=str(path),
             status="Disabled",
-            tools=[],
-            commands=[],
-            contexts=[],
-            hooks=[],
-            badges=[],
-            panels=[],
+            tools=static["tools"],
+            commands=static["commands"],
+            contexts=static["contexts"],
+            hooks=static["hooks"],
+            badges=static["badges"],
+            panels=static["panels"],
             errors=[],
             description=static_description,
             display_name=display_name,
-            languages=[],
+            languages=static["languages"],
             requirements=requirements,
             missing_requirements=missing_requirements,
+            permissions=permissions,
+            content_hash=content_hash,
+            reviewed=reviewed,
+            review_required=review_required,
+            risk_messages=risk_messages,
         )
     registry = ToolRegistry()
     before = registry.errors[:]
+    before_violations = registry.permission_violations[:]
     _load_extension_file(registry, path)
     errors = registry.errors[len(before):]
+    violations = registry.permission_violations[len(before_violations):]
     return ExtensionFileSummary(
         path=str(path),
         status="Failed" if errors else "Loaded",
@@ -726,6 +968,12 @@ def _extension_file_summary(path: Path, cwd: str | None = None) -> ExtensionFile
         languages=registry.languages(),
         requirements=requirements,
         missing_requirements=missing_requirements,
+        permissions=permissions,
+        permission_violations=violations,
+        content_hash=content_hash,
+        reviewed=reviewed,
+        review_required=review_required,
+        risk_messages=risk_messages,
     )
 
 
@@ -742,15 +990,31 @@ def _write_disabled_extension_paths(cwd: str | None, paths: list[str]) -> None:
 
 
 def _disabled_extensions_path(cwd: str | None) -> Path:
-    base = Path(cwd) if cwd else Path.home()
-    return base / ".aichs" / "extensions.disabled.json"
+    return config.AICHS_HOME / "project" / "extensions.disabled.json"
+
+
+def _reviewed_extensions(cwd: str | None) -> dict:
+    data = _read_json_object(_reviewed_extensions_path(cwd))
+    reviewed = data.get("reviewed")
+    return reviewed if isinstance(reviewed, dict) else {}
+
+
+def _reviewed_extensions_path(cwd: str | None) -> Path:
+    return config.AICHS_HOME / "project" / "extensions.reviewed.json"
 
 
 def _normalized_extension_path(path: str | Path) -> str:
+    path = _extension_entrypoint_path(Path(path))
     try:
         return str(Path(path).resolve())
     except OSError:
         return str(Path(path))
+
+
+def _extension_entrypoint_path(path: Path) -> Path:
+    if path.is_dir() and (path / "extension.py").exists():
+        return path / "extension.py"
+    return path
 
 
 def _static_extension_description(path: Path) -> str:
@@ -772,6 +1036,130 @@ def _static_extension_description(path: Path) -> str:
     return _clean_description(ast.get_docstring(module) or "")
 
 
+def _static_extension_contributions(path: Path) -> dict:
+    empty = {
+        "tools": [],
+        "commands": [],
+        "contexts": [],
+        "hooks": [],
+        "badges": [],
+        "panels": [],
+        "languages": [],
+    }
+    try:
+        module = ast.parse(path.read_text(encoding="utf-8-sig"))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return empty
+
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _registry_call_name(node)
+        if not name:
+            continue
+        if name == "tool":
+            tool_name = _call_string_arg(node, "name")
+            if tool_name:
+                empty["tools"].append(
+                    ToolDefinition(
+                        name=tool_name,
+                        description=_call_string_arg(node, "description"),
+                        input_schema={},
+                        execute=lambda _ctx, _inputs: "",
+                    )
+                )
+        elif name == "command":
+            command_name = _call_string_arg(node, "name")
+            if command_name:
+                capabilities = _call_string_list_arg(node, "capabilities")
+                empty["commands"].append(
+                    ExtensionCommand(
+                        name=command_name,
+                        description=_call_string_arg(node, "description"),
+                        prompt=_call_string_arg(node, "prompt"),
+                        execute=(lambda _ctx, _args: "") if _call_has_keyword(node, "execute") else None,
+                        capabilities=capabilities,
+                    )
+                )
+        elif name == "context":
+            context_name = _call_pos_string_arg(node, 0) or _call_string_arg(node, "name")
+            if context_name:
+                empty["contexts"].append(context_name)
+        elif name == "hook":
+            hook_name = _call_pos_string_arg(node, 0) or _call_string_arg(node, "event")
+            if hook_name:
+                empty["hooks"].append(hook_name)
+        elif name == "status_badge":
+            badge_name = _call_string_arg(node, "name")
+            if badge_name:
+                empty["badges"].append(StatusBadge(name=badge_name, provider=lambda _ctx: {}))
+        elif name == "panel":
+            panel_name = _call_string_arg(node, "name")
+            if panel_name:
+                empty["panels"].append(
+                    ExtensionPanel(
+                        name=panel_name,
+                        title=_call_string_arg(node, "title") or panel_name,
+                        provider=lambda _ctx: {},
+                    )
+                )
+        elif name == "language":
+            language_name = _call_string_arg(node, "name")
+            if language_name:
+                patterns = _call_string_list_arg(node, "file_patterns")
+                empty["languages"].append(
+                    LanguageContribution(
+                        name=language_name,
+                        file_patterns=patterns,
+                        diagnostics=(lambda _ctx: []) if _call_has_keyword(node, "diagnostics") else None,
+                        symbols=(lambda _ctx: []) if _call_has_keyword(node, "symbols") else None,
+                        completion=(lambda _ctx: []) if _call_has_keyword(node, "completion") else None,
+                        code_actions=(lambda _ctx: []) if _call_has_keyword(node, "code_actions") else None,
+                        apply_code_action=(lambda _ctx: {}) if _call_has_keyword(node, "apply_code_action") else None,
+                        format_document=(lambda _ctx: {}) if _call_has_keyword(node, "format_document") else None,
+                    )
+                )
+    empty["hooks"] = sorted(dict.fromkeys(empty["hooks"]))
+    empty["contexts"] = list(dict.fromkeys(empty["contexts"]))
+    return empty
+
+
+def _registry_call_name(node: ast.Call) -> str:
+    func = node.func
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "registry":
+        return func.attr
+    return ""
+
+
+def _call_has_keyword(node: ast.Call, name: str) -> bool:
+    return any(keyword.arg == name for keyword in node.keywords)
+
+
+def _call_string_arg(node: ast.Call, name: str) -> str:
+    for keyword in node.keywords:
+        if keyword.arg == name:
+            return _literal_string(keyword.value)
+    return ""
+
+
+def _call_pos_string_arg(node: ast.Call, index: int) -> str:
+    if index < len(node.args):
+        return _literal_string(node.args[index])
+    return ""
+
+
+def _call_string_list_arg(node: ast.Call, name: str) -> list[str]:
+    for keyword in node.keywords:
+        if keyword.arg != name:
+            continue
+        value = keyword.value
+        if not isinstance(value, (ast.List, ast.Tuple)):
+            return []
+        items = [_literal_string(item) for item in value.elts]
+        return [item for item in items if item]
+    return []
+
+
 def _extension_manifest_metadata(path: Path) -> dict:
     manifest_path = _extension_manifest_path(path)
     if manifest_path is None:
@@ -791,6 +1179,31 @@ def _extension_manifest_requirements(manifest: dict) -> ExtensionRequirements:
         executables=_manifest_string_list(requires.get("executables")),
         python=_manifest_string_list(requires.get("python")),
     )
+
+
+def _extension_manifest_permissions(manifest: dict) -> ExtensionPermissions:
+    raw = manifest.get("permissions")
+    if not isinstance(raw, dict):
+        return ExtensionPermissions(declared=False)
+    values = {
+        key: bool(raw.get(key, False))
+        for key in PERMISSION_KEYS
+    }
+    return ExtensionPermissions(declared=True, **values)
+
+
+def _extension_risk_messages(permissions: ExtensionPermissions) -> list[str]:
+    messages = [
+        "Enabled extensions run local Python code in the AICHS process.",
+        "Manifest permissions enforce AICHS contribution surfaces, not an OS sandbox.",
+    ]
+    if not permissions.declared:
+        messages.append("This extension does not disclose manifest permissions.")
+    if permissions.workspace_read or permissions.workspace_write:
+        messages.append("Workspace access is disclosed but not sandbox-enforced in v1.")
+    if permissions.network:
+        messages.append("Network access is disclosed but not sandbox-enforced in v1.")
+    return messages
 
 
 def _manifest_string_list(value) -> list[str]:
@@ -836,6 +1249,11 @@ def _extension_manifest_path(path: Path) -> Path | None:
         candidate = path.parent / "aichs-extension.json"
         return candidate if candidate.exists() else None
     return None
+
+
+def _command_uses_processes(capabilities: list[str]) -> bool:
+    text = " ".join(str(capability).lower() for capability in capabilities)
+    return any(hint in text for hint in _PROCESS_CAPABILITY_HINTS)
 
 
 def _extension_id_for_path(path: Path) -> str:
@@ -918,6 +1336,12 @@ def _process_api(cwd: str) -> object:
 def _safe_extension_id(value: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in str(value or "extension"))
     return safe.strip("._-") or "extension"
+
+
+def _safe_artifact_name(value: str) -> str:
+    basename = str(value or "artifact").replace("\\", "/").split("/")[-1]
+    safe = "".join(ch if ch.isalnum() or ch in ("_", "-", ".") else "_" for ch in basename)
+    return safe.strip(" ._-") or "artifact"
 
 
 def _read_json_object(path: Path) -> dict:

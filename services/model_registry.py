@@ -146,6 +146,41 @@ def api_key_env_var(spec: str) -> str | None:
     return None
 
 
+def configured_provider_ids(saved: dict, environ=None) -> list[str]:
+    environ = os.environ if environ is None else environ
+    user_providers = set(load_user_providers().keys())
+    provider_keys = saved.get("provider_api_keys", {})
+    configured = []
+    for provider in MODELS:
+        cfg = get_provider_config(provider)
+        if not cfg:
+            continue
+        if provider in user_providers:
+            configured.append(provider)
+            continue
+        key = str(provider_keys.get(provider, "")).strip()
+        if not key and provider == "claude":
+            key = str(saved.get("anthropic_api_key", "")).strip()
+        if not key and provider == "openai":
+            key = str(saved.get("openai_api_key", "")).strip()
+        env_var = api_key_env_var(cfg.api_key_spec)
+        if key or (env_var and environ.get(env_var)) or (cfg.api_key_spec and not env_var):
+            configured.append(provider)
+
+    order = saved.get("provider_order", [])
+    if not isinstance(order, list):
+        return configured
+    ordered = []
+    seen = set()
+    for provider in order:
+        provider = str(provider)
+        if provider in configured and provider not in seen:
+            ordered.append(provider)
+            seen.add(provider)
+    ordered.extend(provider for provider in configured if provider not in seen)
+    return ordered
+
+
 def resolve_api_key(spec: str) -> str:
     """Turn an api_key_spec into the actual key string.
 

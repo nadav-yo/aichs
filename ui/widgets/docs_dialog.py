@@ -19,6 +19,7 @@ _DOC_ORDER = [
     "custom-models.md",
     "extensions.md",
     "skills.md",
+    "yuk.md",
     "compact.md",
 ]
 _HEADING_RE = re.compile(r"^\s*#\s+(.+?)\s*$", re.MULTILINE)

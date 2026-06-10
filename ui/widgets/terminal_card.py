@@ -13,6 +13,9 @@ class _TerminalOutput(QTextEdit):
         self._ref_getter = ref_getter
 
     def copy(self):
+        QGuiApplication.clipboard().setMimeData(self.copy_mime())
+
+    def copy_mime(self) -> QMimeData:
         cursor = self.textCursor()
         text = self._copied_plain_text(cursor)
         ref = self._copied_ref(cursor)
@@ -20,7 +23,7 @@ class _TerminalOutput(QTextEdit):
         mime.setText(text)
         if ref:
             mime.setData(TERMINAL_REF_MIME, ref.encode("utf-8"))
-        QGuiApplication.clipboard().setMimeData(mime)
+        return mime
 
     def copy_text(self) -> str:
         return self._copied_plain_text(self.textCursor())

@@ -10,7 +10,7 @@ def test_call_model_anthropic():
     mock_client.messages.create.return_value = mock_resp
     with patch("services.compaction.get_model_config") as cfg, patch(
         "services.compaction.resolve_api_key", return_value="k"
-    ), patch("services.compaction.anthropic.Anthropic", return_value=mock_client):
+    ), patch("services.compaction._anthropic_client", return_value=mock_client):
         cfg.return_value = MagicMock(api="anthropic", api_key_spec="ANTHROPIC_API_KEY", base_url=None)
         assert _call_model("claude-sonnet-4-6", "prompt", 4096) == "summary"
 
@@ -22,7 +22,7 @@ def test_call_model_openai():
     mock_client.chat.completions.create.return_value = mock_resp
     with patch("services.compaction.get_model_config") as cfg, patch(
         "services.compaction.resolve_api_key", return_value="k"
-    ), patch("services.compaction.OpenAI", return_value=mock_client) as openai_cls:
+    ), patch("services.compaction._openai_client", return_value=mock_client) as openai_cls:
         cfg.return_value = MagicMock(
             api="openai-compatible",
             api_key_spec="OPENAI_API_KEY",

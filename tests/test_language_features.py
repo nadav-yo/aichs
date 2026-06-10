@@ -1,9 +1,22 @@
 from services.code_completion import CompletionItem
 from services.language_features import (
+    CodeAction,
     CodeActionResult,
     Diagnostic,
     LanguageCompletionProvider,
     LanguageService,
+    Symbol,
+    _iter_raw_items,
+    _nonnegative_int,
+    _normalize_code_action_result,
+    _normalize_code_actions,
+    _normalize_completions,
+    _normalize_diagnostics,
+    _normalize_symbols,
+    _optional_nonnegative_int,
+    _optional_positive_int,
+    _positive_int,
+    _relative_path,
     apply_code_action,
     code_actions,
     completions,
@@ -14,6 +27,88 @@ from services.language_features import (
     symbols,
 )
 from tests.conftest import write_extension
+
+
+def test_language_normalizers_accept_objects_and_skip_bad_items(tmp_path):
+    path = str(tmp_path / "src" / "main.py")
+    diagnostic = Diagnostic(path=path, line=2, column=1, message="existing")
+    symbol = Symbol(path=path, name="Existing", kind="class", line=1)
+    action = CodeAction(id="existing", title="Existing")
+
+    assert _normalize_diagnostics(diagnostic, path)[0] == diagnostic
+    assert _normalize_symbols(symbol, path)[0] == symbol
+    assert _normalize_completions(CompletionItem(label="existing", insert_text="existing"))[0] == (
+        CompletionItem(label="existing", insert_text="existing")
+    )
+    assert _normalize_code_actions(action)[0] == action
+
+    diagnostics_out = _normalize_diagnostics([
+        object(),
+        {"message": ""},
+        {"message": "bad severity", "severity": "wild", "line": "x", "column": -5},
+    ], path)
+    assert diagnostics_out[0].severity == "info"
+    assert diagnostics_out[0].line == 1
+    assert diagnostics_out[0].column == 0
+
+    symbols_out = _normalize_symbols([
+        object(),
+        {"name": ""},
+        {"name": "App", "line": "x", "column": -1},
+    ], path)
+    assert symbols_out[0].name == "App"
+    assert symbols_out[0].line == 1
+    assert symbols_out[0].column == 0
+
+    completions_out = _normalize_completions([
+        object(),
+        "",
+        {"label": ""},
+        {"label": "run"},
+    ])
+    assert completions_out == [
+        CompletionItem(label="run", insert_text="run"),
+    ]
+
+    actions_out = _normalize_code_actions([
+        object(),
+        {"id": "", "title": "Missing id"},
+        {"name": "demo.fix", "label": "Fix", "safe": False, "metadata": {"why": "demo"}},
+    ])
+    assert actions_out[0].id == "demo.fix"
+    assert actions_out[0].safe is False
+    assert actions_out[0].safety == "unsafe"
+    assert actions_out[0].data == {"why": "demo"}
+
+
+def test_language_result_and_integer_helpers(tmp_path):
+    existing = CodeActionResult(content="x", message="done")
+
+    assert _normalize_code_action_result(None) is None
+    assert _normalize_code_action_result(existing) is existing
+    assert _normalize_code_action_result("new") == CodeActionResult(content="new")
+    assert _normalize_code_action_result(123) is None
+    assert _normalize_code_action_result({"applied": False, "content": "ignored"}) is None
+    assert _normalize_code_action_result({"other": "ignored"}) is None
+    assert _normalize_code_action_result({"content": 7, "message": 3}) == CodeActionResult(
+        content="7",
+        message="3",
+    )
+
+    assert list(_iter_raw_items(None)) == []
+    assert list(_iter_raw_items({"items": [CompletionItem(label="x", insert_text="x")]})) == [
+        {"label": "x", "insert_text": "x", "detail": ""}
+    ]
+    assert _relative_path(str(tmp_path), str(tmp_path / "pkg" / "main.py")) == "pkg/main.py"
+    assert _relative_path(str(tmp_path), str(tmp_path.parent / "outside.py")) == "outside.py"
+    assert _positive_int("bad", 7) == 7
+    assert _positive_int(0, 7) == 1
+    assert _nonnegative_int("bad", 7) == 7
+    assert _nonnegative_int(-4, 7) == 0
+    assert _optional_positive_int(None) is None
+    assert _optional_positive_int(0) == 1
+    assert _optional_nonnegative_int(None) is None
+    assert _optional_nonnegative_int(-2) == 0
 
 
 def test_language_diagnostics_match_file_patterns_and_context(workspace):

@@ -2,7 +2,14 @@ from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QPlainText
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QGuiApplication
 
-from ui.theme import palette, ACCENT, card_frame_style, meta_font_pt, chat_font_pt, MONO_FONT_CSS
+from ui.theme import (
+    palette,
+    card_frame_style,
+    meta_font_pt,
+    chat_font_pt,
+    MONO_FONT_CSS,
+    primary_button_style,
+)
 
 
 class ArtifactCard(QFrame):
@@ -121,12 +128,11 @@ class ArtifactCard(QFrame):
             f"border-radius:4px; padding:0 8px; font-size:{meta}px; }}"
             f"QPushButton:hover {{ background:{p['BORDER']}; }}"
         )
-        primary = (
-            f"QPushButton {{ background:{ACCENT}; color:white; border:none;"
-            f"border-radius:4px; padding:0 8px; font-size:{meta}px; }}"
-            f"QPushButton:hover {{ background:#0066dd; }}"
-            f"QPushButton:disabled {{ background:{p['BG3']}; color:{p['TEXT_DIM']};"
-            f"border:1px solid {p['BORDER']}; }}"
+        primary = primary_button_style(
+            border_radius=4,
+            padding="0 8px",
+            font_size=meta,
+            font_weight="600",
         )
         self._toggle_btn.setStyleSheet(primary)
         self._copy_btn.setStyleSheet(secondary)

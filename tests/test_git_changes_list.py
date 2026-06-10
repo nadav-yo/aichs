@@ -1,16 +1,16 @@
 import json
 
-from PyQt6.QtCore import QMimeData, QPoint, QPointF, Qt
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent
-from PyQt6.QtWidgets import QAbstractItemView, QApplication, QMessageBox, QPushButton
+from PyQt6.QtCore import QMimeData, Qt
+from PyQt6.QtWidgets import QAbstractItemView, QMessageBox, QPushButton
 
 from services.chat_drag import AICHS_FILE_DROP_MIME, parse_file_drop
-from services.git_status import GitCommandResult, stage_files
+from services.git_status import GitCommandResult, GitFileChange, stage_files
 from storage.settings import SettingsStore
 from ui.theme import ACCENT, palette
 from ui.widgets.git_changes_list import (
     GitChangesList,
     _GIT_CHANGE_MIME,
+    _GitChangeList,
     _default_stash_message,
     _commit_message_busy_icon,
     _git_change_button_style,
@@ -48,15 +48,8 @@ def test_git_changes_list_populates_staged_and_unstaged(qapp, git_repo):
     assert widget._unstaged_label.text() == "Unstaged (2)"
 
 
-def test_git_changes_list_commit_controls_are_first_and_only_button(qapp, git_repo):
-    main = git_repo / "src" / "main.py"
-    main.write_text("print('changed')\n", encoding="utf-8")
-    from services.git_status import stage_files
-
-    assert stage_files(str(git_repo), ["src/main.py"]).ok
-    (git_repo / "note.txt").write_text("new\n", encoding="utf-8")
-
-    widget = GitChangesList(str(git_repo))
+def test_git_changes_list_commit_controls_are_first_and_only_button(qapp, workspace):
+    widget = GitChangesList(str(workspace))
 
     assert widget.layout().itemAt(0).widget() is widget.summary
     assert widget.summary.placeholderText() == "Commit Message"
@@ -64,44 +57,50 @@ def test_git_changes_list_commit_controls_are_first_and_only_button(qapp, git_re
     assert [button.text() for button in widget.findChildren(QPushButton)] == ["Commit"]
 
 
-def test_git_changes_list_commit_requires_staged_files_and_summary(qapp, git_repo):
-    main = git_repo / "src" / "main.py"
-    main.write_text("print('changed')\n", encoding="utf-8")
-
-    assert stage_files(str(git_repo), ["src/main.py"]).ok
-
-    widget = GitChangesList(str(git_repo))
+def test_git_changes_list_commit_requires_staged_files_and_summary(qapp, workspace):
+    widget = GitChangesList(str(workspace))
+    widget._staged_count = 1
+    widget._update_action_state()
 
     assert not widget._commit_btn.isEnabled()
     widget.summary.setText("commit from ui")
     assert widget._commit_btn.isEnabled()
 
 
-def test_git_changes_list_generate_action_tracks_staged_files(qapp, git_repo):
-    widget = GitChangesList(str(git_repo), current_model_getter=lambda: "model-a")
+def test_git_changes_list_generate_action_tracks_staged_files(qapp, workspace, monkeypatch):
+    changes = []
+    monkeypatch.setattr("ui.widgets.git_changes_list.is_git_repo", lambda repo_path: True)
+    monkeypatch.setattr("ui.widgets.git_changes_list.list_file_changes", lambda repo_path: list(changes))
+    widget = GitChangesList(str(workspace), current_model_getter=lambda: "model-a")
 
     assert widget._generate_action in widget.summary.actions()
     assert widget._generate_action.toolTip() == "Generate commit message from staged files"
     assert not widget._generate_action.isEnabled()
 
-    main = git_repo / "src" / "main.py"
-    main.write_text("print('changed')\n", encoding="utf-8")
-    assert stage_files(str(git_repo), ["src/main.py"]).ok
+    changes.append(
+        GitFileChange(
+            code="M ",
+            label="M",
+            rel_path="src/main.py",
+            abs_path=str(workspace / "src" / "main.py"),
+            staged=True,
+            unstaged=False,
+            staged_label="M",
+        )
+    )
     widget.refresh()
 
     assert widget._generate_action.isEnabled()
 
 
-def test_git_changes_list_generate_action_disables_while_running(qapp, git_repo):
-    main = git_repo / "src" / "main.py"
-    main.write_text("print('changed')\n", encoding="utf-8")
-    assert stage_files(str(git_repo), ["src/main.py"]).ok
-    widget = GitChangesList(str(git_repo), current_model_getter=lambda: "model-a")
+def test_git_changes_list_generate_action_disables_while_running(qapp, workspace):
+    widget = GitChangesList(str(workspace), current_model_getter=lambda: "model-a")
 
     class Running:
         def isRunning(self):
             return True
 
+    widget._staged_count = 1
     widget._message_thread = Running()
     widget._update_action_state()
 
@@ -109,8 +108,8 @@ def test_git_changes_list_generate_action_disables_while_running(qapp, git_repo)
     widget._on_commit_message_finished()
 
 
-def test_git_changes_list_generated_message_replaces_summary_and_body(qapp, git_repo):
-    widget = GitChangesList(str(git_repo))
+def test_git_changes_list_generated_message_replaces_summary_and_body(qapp, workspace):
+    widget = GitChangesList(str(workspace))
     widget.summary.setText("old summary")
     widget.body.setPlainText("old body")
 
@@ -120,8 +119,8 @@ def test_git_changes_list_generated_message_replaces_summary_and_body(qapp, git_
     assert widget.body.toPlainText() == "new body"
 
 
-def test_git_changes_list_generate_error_uses_dialog(qapp, git_repo, monkeypatch):
-    widget = GitChangesList(str(git_repo))
+def test_git_changes_list_generate_error_uses_dialog(qapp, workspace, monkeypatch):
+    widget = GitChangesList(str(workspace))
     warnings = []
     monkeypatch.setattr(
         "ui.widgets.git_changes_list.QMessageBox.warning",
@@ -133,10 +132,7 @@ def test_git_changes_list_generate_error_uses_dialog(qapp, git_repo, monkeypatch
     assert warnings == [(widget, "Generate commit message failed", "model unavailable")]
 
 
-def test_git_changes_list_generate_uses_current_model_and_guidance(qapp, git_repo, monkeypatch):
-    main = git_repo / "src" / "main.py"
-    main.write_text("print('changed')\n", encoding="utf-8")
-    assert stage_files(str(git_repo), ["src/main.py"]).ok
+def test_git_changes_list_generate_uses_current_model_and_guidance(qapp, workspace, monkeypatch):
     store = SettingsStore()
     store.save({"commit_message_prompt_addition": "Use Jira keys"})
     created = []
@@ -161,14 +157,15 @@ def test_git_changes_list_generate_uses_current_model_and_guidance(qapp, git_rep
 
     monkeypatch.setattr("ui.widgets.git_changes_list.CommitMessageThread", FakeThread)
     widget = GitChangesList(
-        str(git_repo),
+        str(workspace),
         settings=store,
         current_model_getter=lambda: "model-a",
     )
+    widget._staged_count = 1
 
     widget._generate_commit_message()
 
-    assert created == [("model-a", str(git_repo), "Use Jira keys")]
+    assert created == [("model-a", str(workspace), "Use Jira keys")]
     assert not widget._generate_action.icon().isNull()
     assert widget._generate_action.toolTip() == "Generating commit message..."
     widget._on_commit_message_finished()
@@ -176,8 +173,8 @@ def test_git_changes_list_generate_uses_current_model_and_guidance(qapp, git_rep
     assert widget._generate_action.toolTip() == "Generate commit message from staged files"
 
 
-def test_git_changes_list_generate_animation_advances_frames(qapp, git_repo):
-    widget = GitChangesList(str(git_repo))
+def test_git_changes_list_generate_animation_advances_frames(qapp, workspace):
+    widget = GitChangesList(str(workspace))
 
     widget._start_generate_animation()
     first = widget._generate_frame
@@ -196,8 +193,8 @@ def test_git_changes_list_busy_icon_is_visible(qapp):
     assert not icon.isNull()
 
 
-def test_git_changes_lists_drag_normally_between_sections(qapp, git_repo):
-    widget = GitChangesList(str(git_repo))
+def test_git_changes_lists_drag_normally_between_sections(qapp, workspace):
+    widget = GitChangesList(str(workspace))
 
     for changes_list in (widget.staged_list, widget.unstaged_list):
         assert changes_list.dragDropMode() == QAbstractItemView.DragDropMode.DragOnly
@@ -227,73 +224,67 @@ def test_git_changes_lists_drag_file_refs_to_chat(qapp, git_repo):
     assert unstaged_mime.text() == "@note.txt"
 
 
-def test_git_changes_drop_releases_with_move_action(qapp, git_repo):
-    widget = GitChangesList(str(git_repo))
+def test_git_changes_drop_releases_with_move_action(qapp):
+    changes = _GitChangeList(staged=True)
     calls = []
-    widget.staged_list.files_dropped.connect(lambda *args: calls.append(args))
+    changes.files_dropped.connect(lambda *args: calls.append(args))
 
     mime = QMimeData()
     mime.setData(
         _GIT_CHANGE_MIME,
         json.dumps({"staged": False, "paths": ["src/main.py"]}).encode("utf-8"),
     )
-    enter = QDragEnterEvent(
-        QPoint(2, 2),
-        Qt.DropAction.MoveAction,
-        mime,
-        Qt.MouseButton.LeftButton,
-        Qt.KeyboardModifier.NoModifier,
-    )
-    QApplication.sendEvent(widget.staged_list.viewport(), enter)
-    drop = QDropEvent(
-        QPointF(2, 2),
-        Qt.DropAction.MoveAction,
-        mime,
-        Qt.MouseButton.LeftButton,
-        Qt.KeyboardModifier.NoModifier,
-    )
-    QApplication.sendEvent(widget.staged_list.viewport(), drop)
+    enter = _FakeDropEvent(mime)
+    drop = _FakeDropEvent(mime)
+    changes.dragEnterEvent(enter)
+    changes.dropEvent(drop)
 
-    assert enter.isAccepted()
-    assert drop.isAccepted()
-    assert drop.dropAction() == Qt.DropAction.MoveAction
+    assert enter.accepted is True
+    assert drop.accepted is True
+    assert drop.drop_action == Qt.DropAction.MoveAction
     assert calls == [(False, True, ["src/main.py"])]
+    changes.close()
 
 
-def test_git_changes_list_drag_move_stages_selected_file(qapp, git_repo):
-    main = git_repo / "src" / "main.py"
-    main.write_text("print('changed')\n", encoding="utf-8")
+def test_git_changes_list_drag_move_stages_selected_file(qapp, workspace, monkeypatch):
+    calls = []
+    refreshes = []
+    monkeypatch.setattr(
+        "ui.widgets.git_changes_list.stage_files",
+        lambda repo_path, paths: calls.append(("stage", repo_path, paths))
+        or GitCommandResult(0, "staged", ""),
+    )
 
-    widget = GitChangesList(str(git_repo))
+    widget = GitChangesList(str(workspace))
+    monkeypatch.setattr(widget, "refresh", lambda: refreshes.append(True))
     history_refreshes = []
     widget.git_changed.connect(lambda: history_refreshes.append(True))
     widget._move_paths(False, True, ["src/main.py"])
 
-    assert widget.staged_list.count() == 1
-    assert widget.unstaged_list.count() == 0
-    assert widget.staged_list.item(0).text() == "src/main.py"
-    assert not widget.staged_list.item(0).icon().isNull()
+    assert calls == [("stage", str(workspace), ["src/main.py"])]
+    assert refreshes == [True]
     assert history_refreshes == []
 
 
-def test_git_changes_list_drag_move_unstages_selected_file(qapp, git_repo):
-    main = git_repo / "src" / "main.py"
-    main.write_text("print('changed')\n", encoding="utf-8")
-    from services.git_status import stage_files
+def test_git_changes_list_drag_move_unstages_selected_file(qapp, workspace, monkeypatch):
+    calls = []
+    refreshes = []
+    monkeypatch.setattr(
+        "ui.widgets.git_changes_list.unstage_files",
+        lambda repo_path, paths: calls.append(("unstage", repo_path, paths))
+        or GitCommandResult(0, "unstaged", ""),
+    )
 
-    assert stage_files(str(git_repo), ["src/main.py"]).ok
-
-    widget = GitChangesList(str(git_repo))
+    widget = GitChangesList(str(workspace))
+    monkeypatch.setattr(widget, "refresh", lambda: refreshes.append(True))
     widget._move_paths(True, False, ["src/main.py"])
 
-    assert widget.staged_list.count() == 0
-    assert widget.unstaged_list.count() == 1
-    assert widget.unstaged_list.item(0).text() == "src/main.py"
-    assert not widget.unstaged_list.item(0).icon().isNull()
+    assert calls == [("unstage", str(workspace), ["src/main.py"])]
+    assert refreshes == [True]
 
 
-def test_git_changes_list_failure_uses_dialog_without_status_row(qapp, git_repo, monkeypatch):
-    widget = GitChangesList(str(git_repo))
+def test_git_changes_list_failure_uses_dialog_without_status_row(qapp, workspace, monkeypatch):
+    widget = GitChangesList(str(workspace))
     warnings = []
     monkeypatch.setattr(
         "ui.widgets.git_changes_list.QMessageBox.warning",
@@ -306,11 +297,23 @@ def test_git_changes_list_failure_uses_dialog_without_status_row(qapp, git_repo,
     assert warnings == [(widget, "Back failed", "cannot unstage")]
 
 
-def test_git_changes_list_discard_selected_confirms_and_discards(qapp, git_repo, monkeypatch):
-    main = git_repo / "src" / "main.py"
-    main.write_text("print('discard from ui')\n", encoding="utf-8")
-    widget = GitChangesList(str(git_repo))
+def test_git_changes_list_discard_selected_confirms_and_discards(qapp, workspace, monkeypatch):
+    calls = []
+    refreshes = []
+    widget = GitChangesList(str(workspace))
+    widget.unstaged_list.clear()
+    widget._add_change(
+        widget.unstaged_list,
+        GitFileChange(" M", "M", "src/main.py", str(workspace / "src" / "main.py")),
+        "M",
+    )
     widget.unstaged_list.item(0).setSelected(True)
+    monkeypatch.setattr(
+        "ui.widgets.git_changes_list.discard_files",
+        lambda repo_path, paths, staged=False: calls.append((repo_path, paths, staged))
+        or GitCommandResult(0, "discarded", ""),
+    )
+    monkeypatch.setattr(widget, "refresh", lambda: refreshes.append(True))
     questions = []
     monkeypatch.setattr(
         "ui.widgets.git_changes_list.QMessageBox.question",
@@ -322,8 +325,8 @@ def test_git_changes_list_discard_selected_confirms_and_discards(qapp, git_repo,
 
     widget._discard_selected(widget.unstaged_list)
 
-    assert main.read_text(encoding="utf-8") == "print('hi')\n"
-    assert widget.unstaged_list.count() == 0
+    assert calls == [(str(workspace), ["src/main.py"], False)]
+    assert refreshes == [True]
     assert questions
     assert questions[0][0] is widget
     assert questions[0][1] == "Discard changes?"
@@ -363,3 +366,19 @@ def test_git_changes_list_styles_use_each_theme_palette(qapp):
         for color in (p["BG2"], p["BG3"], p["TEXT"], p["TEXT_DIM"], p["BORDER_SUBTLE"]):
             assert color in button_style + field_style
         assert ACCENT in field_style
+
+
+class _FakeDropEvent:
+    def __init__(self, mime):
+        self._mime = mime
+        self.accepted = False
+        self.drop_action = None
+
+    def mimeData(self):
+        return self._mime
+
+    def setDropAction(self, action):
+        self.drop_action = action
+
+    def accept(self):
+        self.accepted = True

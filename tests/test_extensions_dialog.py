@@ -1,7 +1,12 @@
 from PyQt6.QtWidgets import QLabel, QPushButton
 
 from services.extension_installer import ExtensionInstallCandidate
-from services.tool_registry import ExtensionFileSummary, ExtensionOverview, LanguageContribution
+from services.tool_registry import (
+    ExtensionFileSummary,
+    ExtensionOverview,
+    ExtensionPermissions,
+    LanguageContribution,
+)
 from ui.widgets.extensions_dialog import (
     ExtensionInstallDialog,
     ExtensionsDialog,
@@ -19,6 +24,10 @@ def _summary(
     description="",
     display_name="",
     languages=None,
+    permissions=None,
+    permission_violations=None,
+    reviewed=True,
+    review_required=False,
 ):
     return ExtensionFileSummary(
         path=path,
@@ -33,6 +42,11 @@ def _summary(
         description=description,
         display_name=display_name,
         languages=list(languages or []),
+        permissions=permissions or ExtensionPermissions(declared=True),
+        permission_violations=list(permission_violations or []),
+        reviewed=reviewed,
+        review_required=review_required,
+        risk_messages=["Enabled extensions run local Python code in the AICHS process."],
     )
 
 
@@ -93,6 +107,26 @@ def test_extensions_dialog_list_subtitle_summarizes_contributions():
     assert _list_subtitle(language_file) == "1 language"
 
 
+def test_extensions_dialog_shows_permissions_and_risk(qapp):
+    overview = ExtensionOverview(files=[
+        _summary(
+            "risky.py",
+            permissions=ExtensionPermissions(declared=True, tools=True, network=True),
+            permission_violations=["Blocked undeclared extension contribution: hook turn_start"],
+            reviewed=False,
+            review_required=True,
+        ),
+    ])
+
+    dialog = ExtensionsDialog(overview)
+    labels = [label.text() for label in dialog.findChildren(QLabel)]
+
+    assert any("Enabled extensions run local Python code" in text for text in labels)
+    assert any("tools, network" in text for text in labels)
+    assert any("Blocked undeclared extension contribution" in text for text in labels)
+    assert "Loaded · blocked" in labels
+
+
 def test_extension_install_dialog_selects_candidates(qapp, tmp_path):
     dialog = ExtensionInstallDialog(str(tmp_path))
     candidate = ExtensionInstallCandidate(
@@ -107,6 +141,8 @@ def test_extension_install_dialog_selects_candidates(qapp, tmp_path):
 
     assert dialog.scope_combo.currentData() == "local"
     assert [item.name for item in dialog.selected_candidates()] == ["python-lang"]
+    labels = [label.text() for label in dialog.findChildren(QLabel)]
+    assert any("Installs disabled until reviewed" in text for text in labels)
     checkbox, _candidate = dialog._candidate_checks[0]
     checkbox.setChecked(False)
     assert dialog.selected_candidates() == []

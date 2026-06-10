@@ -1,11 +1,12 @@
 import os
 from pathlib import Path
+import re
 
 import markdown as _md
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPlainTextEdit, QFrame, QTabWidget,
-    QScrollArea, QLabel, QSizePolicy, QCheckBox, QPushButton, QTextBrowser, QLineEdit,
-    QCompleter, QApplication, QToolTip, QMenu, QTabBar,
+    QScrollArea, QLabel, QSizePolicy, QCheckBox, QPushButton, QLineEdit,
+    QCompleter, QApplication, QToolTip, QMenu, QTabBar, QMessageBox,
 )
 from PyQt6.QtCore import (
     QObject, QRunnable, QThreadPool, QTimer, pyqtSignal, pyqtSlot,
@@ -31,20 +32,28 @@ from services.language_features import (
     apply_code_action as language_apply_code_action,
     code_actions as language_code_actions,
     diagnostics as language_diagnostics,
+    format_document as language_format_document,
 )
 from services.code_completion import (
     CompletionItem, CompletionProvider, LocalCompletionProvider, prefix_at,
 )
 from storage.settings import (
+    DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE,
+    DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY,
     FILE_EDITOR_AUTO_SAVE_KEY,
     FILE_EDITOR_TAB_SPACES_KEY,
+    DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
     DEFAULT_FILE_EDITOR_TAB_SPACES,
+    FILE_REVIEW_PROMPT_TEMPLATE_KEY,
+    diagnostic_fix_prompt_template,
     file_editor_tab_spaces,
+    file_review_prompt_template,
 )
 from ui.theme import (
     ACCENT, current_theme, palette, mono_font, meta_font_pt,
-    markdown_css, apply_flat_tab_style,
+    markdown_css, apply_flat_tab_style, primary_button_style,
 )
+from ui.widgets.markdown_browser import RemoteImageTextBrowser
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"}
 _MARKDOWN_EXTS = {".md", ".markdown", ".mdown", ".mkdn"}
@@ -133,6 +142,36 @@ class _CodeActionWorker(QRunnable):
         except Exception as e:
             result, errors = CodeActionResult(message=f"Code action failed: {e}"), [
                 f"language code action failed: {e}",
+            ]
+        self.signals.done.emit(self._generation, result, errors)
+
+
+class _FormatDocumentWorker(QRunnable):
+    def __init__(
+        self,
+        generation: int,
+        repo_root: str,
+        path: str,
+        content: str,
+    ):
+        super().__init__()
+        self.signals = _CodeActionSignals()
+        self._generation = generation
+        self._repo_root = repo_root
+        self._path = path
+        self._content = content
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            result, errors = language_format_document(
+                self._repo_root,
+                self._path,
+                self._content,
+            )
+        except Exception as e:
+            result, errors = CodeActionResult(message=f"Format failed: {e}"), [
+                f"language format failed: {e}",
             ]
         self.signals.done.emit(self._generation, result, errors)
 
@@ -1073,7 +1112,7 @@ class _FileTextEdit(QPlainTextEdit):
         return None
 
 
-class _MarkdownPreview(QTextBrowser):
+class _MarkdownPreview(RemoteImageTextBrowser):
     edit_requested = pyqtSignal()
     cancel_requested = pyqtSignal()
 
@@ -1129,6 +1168,7 @@ class _TextFileTab(QWidget):
 
     dirty_changed = pyqtSignal(bool)
     diagnostic_fix_requested = pyqtSignal(str, object)
+    language_context_changed = pyqtSignal()
 
     def __init__(
         self,
@@ -1140,6 +1180,8 @@ class _TextFileTab(QWidget):
         read_only_reason: str = "",
         auto_save: bool = False,
         tab_spaces: int = DEFAULT_FILE_EDITOR_TAB_SPACES,
+        file_review_prompt: str = DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
+        diagnostic_fix_prompt: str = DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE,
         parent=None,
     ):
         super().__init__(parent)
@@ -1158,6 +1200,12 @@ class _TextFileTab(QWidget):
         self._auto_save = auto_save
         self._tab_spaces = file_editor_tab_spaces({
             FILE_EDITOR_TAB_SPACES_KEY: tab_spaces,
+        })
+        self._file_review_prompt = file_review_prompt_template({
+            FILE_REVIEW_PROMPT_TEMPLATE_KEY: file_review_prompt,
+        })
+        self._diagnostic_fix_prompt = diagnostic_fix_prompt_template({
+            DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY: diagnostic_fix_prompt,
         })
         self._dirty = False
         self._rendering = False
@@ -1284,6 +1332,14 @@ class _TextFileTab(QWidget):
         })
         self._editor.set_tab_spaces(self._tab_spaces)
 
+    def set_prompt_templates(self, file_review_prompt: str, diagnostic_fix_prompt: str):
+        self._file_review_prompt = file_review_prompt_template({
+            FILE_REVIEW_PROMPT_TEMPLATE_KEY: file_review_prompt,
+        })
+        self._diagnostic_fix_prompt = diagnostic_fix_prompt_template({
+            DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY: diagnostic_fix_prompt,
+        })
+
     def apply_appearance(self):
         p = palette()
         meta = meta_font_pt()
@@ -1318,12 +1374,11 @@ class _TextFileTab(QWidget):
             f"QPushButton:hover {{ background:{p['BORDER']}; }}"
             f"QPushButton:disabled {{ color:{p['TEXT_DIM']}; background:{p['BG2']}; }}"
         )
-        primary = (
-            f"QPushButton {{ background:{ACCENT}; color:white; border:none;"
-            f"border-radius:4px; padding:2px 10px; font-size:{meta}px; }}"
-            f"QPushButton:hover {{ background:#0066dd; }}"
-            f"QPushButton:disabled {{ background:{p['BG3']}; color:{p['TEXT_DIM']};"
-            f"border:1px solid {p['BORDER']}; }}"
+        primary = primary_button_style(
+            border_radius=4,
+            padding="2px 10px",
+            font_size=meta,
+            font_weight="600",
         )
         self._revert_btn.setStyleSheet(secondary)
         self._save_btn.setStyleSheet(primary)
@@ -1684,6 +1739,10 @@ class _TextFileTab(QWidget):
     def _schedule_diff_refresh(self, delay_ms: int | None = None):
         if not self._file_backed:
             return
+        if not is_git_repo(self._repo_root):
+            self._diff_generation += 1
+            self._on_diff_ready(self._diff_generation, None)
+            return
         self._diff_timer.start(
             self._DIFF_DELAY_MS if delay_ms is None else max(0, delay_ms)
         )
@@ -1713,6 +1772,7 @@ class _TextFileTab(QWidget):
     def _set_diagnostics(self, diagnostics: list[Diagnostic]):
         self._diagnostics = list(diagnostics)
         self._editor.set_diagnostics(self._diagnostics)
+        self.language_context_changed.emit()
 
     def _current_editor_content(self) -> str:
         return self._editor.toPlainText() if self._edit_mode else self._content
@@ -1747,6 +1807,38 @@ class _TextFileTab(QWidget):
         elif selected in action_items:
             self._run_code_action(action_items[selected], diagnostics)
 
+    def _show_safe_code_actions(self):
+        diagnostics = list(self._diagnostics)
+        if not diagnostics:
+            self._set_status("No problems to fix")
+            return
+        actions, errors = language_code_actions(
+            self._repo_root,
+            self._path,
+            self._current_editor_content(),
+            diagnostics,
+        )
+        self._language_errors = list(errors or [])
+        safe_actions = [action for action in actions if action.safe]
+        if not safe_actions:
+            self._set_status("No safe fixes available")
+            return
+        if len(safe_actions) == 1:
+            self._run_code_action(safe_actions[0], diagnostics)
+            return
+
+        menu = QMenu(self)
+        action_items = {}
+        for action in safe_actions:
+            label = action.title
+            if action.source:
+                label = f"{label} - {action.source}"
+            item = menu.addAction(label)
+            action_items[item] = action
+        selected = menu.exec(QCursor.pos())
+        if selected in action_items:
+            self._run_code_action(action_items[selected], diagnostics)
+
     def _run_code_action(self, action: CodeAction, diagnostics: list[Diagnostic]):
         if not self._editable or self._is_showing_diff():
             self._set_status("Code action unavailable")
@@ -1768,6 +1860,22 @@ class _TextFileTab(QWidget):
         worker.signals.done.connect(self._on_code_action_ready)
         self._worker_pool.start(worker)
 
+    def _format_document(self):
+        if not self._editable or self._is_showing_diff():
+            self._set_status("Format unavailable")
+            return
+        self._code_action_generation += 1
+        generation = self._code_action_generation
+        self._set_status("Formatting...")
+        worker = _FormatDocumentWorker(
+            generation,
+            self._repo_root,
+            self._path,
+            self._current_editor_content(),
+        )
+        worker.signals.done.connect(self._on_code_action_ready)
+        self._worker_pool.start(worker)
+
     def _on_code_action_ready(self, generation: int, result, errors):
         if generation != self._code_action_generation:
             return
@@ -1784,6 +1892,7 @@ class _TextFileTab(QWidget):
         if content is None:
             self._set_status(message or "Code action made no changes")
             return
+        content = _normalize_editor_newlines(content)
         if content == self._current_editor_content():
             self._set_status(message or "Code action made no changes")
             self._refresh_diagnostics(delay_ms=0)
@@ -1820,10 +1929,37 @@ class _TextFileTab(QWidget):
         }])
         tool = _diagnostic_tool_label(diagnostics)
         details = _diagnostic_details(diagnostics)
+        first_line = _format_prompt_template(
+            self._diagnostic_fix_prompt,
+            {
+                "mention": mention,
+                "path": rel_path,
+                "line": str(line),
+            },
+            DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE,
+        )
         prompt = (
-            f"Please fix this diagnostic in {mention}.\n\n"
+            f"{first_line}\n\n"
             f"Diagnostic tool: {tool}\n"
             f"Diagnostic output:\n{details}"
+        )
+        self.diagnostic_fix_requested.emit(prompt, [rel_path])
+
+    def _draft_file_question(self):
+        rel_path = _relative_file_reference(self._path, self._repo_root)
+        mention = _file_mention_text(rel_path)
+        first_line = _format_prompt_template(
+            self._file_review_prompt,
+            {
+                "mention": mention,
+                "path": rel_path,
+            },
+            DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
+        )
+        prompt = (
+            f"{first_line}\n\n"
+            "Summarize what this file does, point out any risks you notice, "
+            "and suggest the most useful next actions."
         )
         self.diagnostic_fix_requested.emit(prompt, [rel_path])
 
@@ -1916,13 +2052,17 @@ class FileViewerPanel(QWidget):
     diagnostic_fix_requested = pyqtSignal(str, object)
     active_file_changed = pyqtSignal(str)
     dirty_file_changed = pyqtSignal(str, bool)
+    language_context_changed = pyqtSignal(object)
 
     def __init__(self, repo_root: str = "", settings=None, parent=None):
         super().__init__(parent)
         self._repo_root = repo_root or os.getcwd()
         self._settings = settings
+        self._recently_closed_files: list[tuple[str, int | None]] = []
         self._auto_save = self._load_auto_save()
         self._tab_spaces = self._load_tab_spaces()
+        self._file_review_prompt = self._load_file_review_prompt_template()
+        self._diagnostic_fix_prompt = self._load_diagnostic_fix_prompt_template()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1943,7 +2083,11 @@ class FileViewerPanel(QWidget):
         self._apply_tab_style()
 
     def set_repo_root(self, path: str):
-        self._repo_root = path
+        new_root = path or os.getcwd()
+        if os.path.abspath(new_root) != os.path.abspath(self._repo_root):
+            self._recently_closed_files.clear()
+        self._repo_root = new_root
+        self._emit_language_context_changed()
 
     def open_paths(self) -> list[str]:
         paths: list[str] = []
@@ -1961,12 +2105,68 @@ class FileViewerPanel(QWidget):
         key = str(self._tabs.tabBar().tabData(index) or "")
         return "" if key.startswith("\0") else key
 
+    def active_language_context(self) -> dict:
+        widget = self._active_text_tab()
+        if widget is None:
+            return {
+                "repo_root": self._repo_root,
+                "path": self.active_path(),
+                "is_text": False,
+                "diagnostics": [],
+                "errors": [],
+            }
+        return {
+            "repo_root": self._repo_root,
+            "path": widget._path,
+            "is_text": True,
+            "diagnostics": list(widget._diagnostics),
+            "errors": list(widget._language_errors),
+            "editable": bool(widget._editable and not widget._is_showing_diff()),
+        }
+
     def has_open_tabs(self) -> bool:
         return self._tabs.count() > 0
+
+    def refresh_active_language(self):
+        widget = self._active_text_tab()
+        if widget is None:
+            self._emit_language_context_changed()
+            return
+        widget._refresh_diagnostics(delay_ms=0)
+        self._emit_language_context_changed()
+
+    def show_active_language_actions(self, diagnostics: list[Diagnostic]):
+        widget = self._active_text_tab()
+        if widget is not None:
+            widget._show_diagnostic_actions(list(diagnostics or []))
+
+    def format_active_language(self):
+        widget = self._active_text_tab()
+        if widget is not None:
+            widget._format_document()
+
+    def fix_safe_active_language(self):
+        widget = self._active_text_tab()
+        if widget is not None:
+            widget._show_safe_code_actions()
+
+    def draft_active_language_file_question(self):
+        widget = self._active_text_tab()
+        if widget is not None:
+            widget._draft_file_question()
+
+    def draft_active_language_fix(self, diagnostics: list[Diagnostic]):
+        widget = self._active_text_tab()
+        if widget is not None:
+            widget._draft_diagnostic_fix(list(diagnostics or []))
 
     def reload_settings(self):
         self.set_auto_save(self._load_auto_save())
         self.set_tab_spaces(self._load_tab_spaces())
+        self.set_prompt_templates(
+            self._load_file_review_prompt_template(),
+            self._load_diagnostic_fix_prompt_template(),
+        )
 
     def set_auto_save(self, enabled: bool):
         self._auto_save = enabled
@@ -1984,6 +2184,21 @@ class FileViewerPanel(QWidget):
             widget = self._tabs.widget(i)
             if isinstance(widget, _TextFileTab):
                 widget.set_tab_spaces(self._tab_spaces)
+
+    def set_prompt_templates(self, file_review_prompt: str, diagnostic_fix_prompt: str):
+        self._file_review_prompt = file_review_prompt_template({
+            FILE_REVIEW_PROMPT_TEMPLATE_KEY: file_review_prompt,
+        })
+        self._diagnostic_fix_prompt = diagnostic_fix_prompt_template({
+            DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY: diagnostic_fix_prompt,
+        })
+        for i in range(self._tabs.count()):
+            widget = self._tabs.widget(i)
+            if isinstance(widget, _TextFileTab):
+                widget.set_prompt_templates(
+                    self._file_review_prompt,
+                    self._diagnostic_fix_prompt,
+                )
 
     def apply_appearance(self):
         self._apply_tab_style()
@@ -2004,6 +2219,20 @@ class FileViewerPanel(QWidget):
                 return i
         return -1
 
+    def _active_text_tab(self) -> _TextFileTab | None:
+        widget = self._tabs.currentWidget()
+        path = self.active_path()
+        if isinstance(widget, _TextFileTab) and path:
+            return widget
+        return None
+
+    def _emit_language_context_changed(self):
+        self.language_context_changed.emit(self.active_language_context())
+
+    def _emit_language_context_for(self, widget: QWidget):
+        if widget is self._tabs.currentWidget():
+            self._emit_language_context_changed()
+
     def _add_tab_widget(self, key: str, title: str, widget: QWidget):
         idx = self._tabs.addTab(widget, title)
         self._tabs.tabBar().setTabData(idx, key)
@@ -2013,8 +2242,12 @@ class FileViewerPanel(QWidget):
                 lambda dirty, w=widget: self._on_tab_dirty_changed(w, dirty)
             )
             widget.diagnostic_fix_requested.connect(self.diagnostic_fix_requested.emit)
+            widget.language_context_changed.connect(
+                lambda w=widget: self._emit_language_context_for(w)
+            )
             self._sync_tab_title(widget)
         self._tabs.setCurrentIndex(idx)
+        self._emit_language_context_changed()
 
     def _add_text_tab(self, key: str, title: str, content: str):
         tab = _TextFileTab(
@@ -2025,6 +2258,8 @@ class FileViewerPanel(QWidget):
             editable=False,
             auto_save=self._auto_save,
             tab_spaces=self._tab_spaces,
+            file_review_prompt=self._file_review_prompt,
+            diagnostic_fix_prompt=self._diagnostic_fix_prompt,
         )
         self._add_tab_widget(key, title, tab)
 
@@ -2044,6 +2279,7 @@ class FileViewerPanel(QWidget):
             idx = self._find_tab(path)
             if idx >= 0:
                 self._tabs.setCurrentIndex(idx)
+                self._emit_language_context_changed()
                 return
             self._add_tab_widget(path, os.path.basename(path), _ImageViewer(path))
             return
@@ -2061,6 +2297,7 @@ class FileViewerPanel(QWidget):
                 if line_no is not None:
                     widget.goto_line(line_no)
             self._tabs.setCurrentIndex(idx)
+            self._emit_language_context_changed()
             return
 
         tab = _TextFileTab(
@@ -2072,6 +2309,8 @@ class FileViewerPanel(QWidget):
             read_only_reason=read_only_reason,
             auto_save=self._auto_save,
             tab_spaces=self._tab_spaces,
+            file_review_prompt=self._file_review_prompt,
+            diagnostic_fix_prompt=self._diagnostic_fix_prompt,
         )
         self._add_tab_widget(path, os.path.basename(path), tab)
         if line_no is not None:
@@ -2093,6 +2332,7 @@ class FileViewerPanel(QWidget):
         content, diff_text, editable, read_only_reason = self._read_text_file_state(path)
         widget.update_content(content, diff_text, editable, read_only_reason)
         self._sync_tab_title(widget)
+        self._emit_language_context_for(widget)
         return True
 
     def _read_text_file_state(
@@ -2117,27 +2357,88 @@ class FileViewerPanel(QWidget):
         idx = self._find_tab(key)
         if idx >= 0:
             self._tabs.setCurrentIndex(idx)
+            self._emit_language_context_changed()
             return
         self._add_text_tab(key, title, content)
 
     def _on_tab_close_requested(self, index: int):
-        widget = self._tabs.widget(index)
-        self._tabs.removeTab(index)
-        self._delete_tab_widget(widget)
-        if self._tabs.count() == 0:
-            self.all_closed.emit()
+        self._close_tab(index)
 
     def close_current_tab(self) -> bool:
         if self._tabs.count() == 0:
             return False
-        widget = self._tabs.currentWidget()
-        self._tabs.removeTab(self._tabs.currentIndex())
+        return self._close_tab(self._tabs.currentIndex())
+
+    def reopen_recent_closed_file(self, repo_root: str | None = None) -> str:
+        if repo_root:
+            self.set_repo_root(repo_root)
+        while self._recently_closed_files:
+            path, line_no = self._recently_closed_files.pop()
+            if self._find_tab(path) >= 0:
+                self.open_file(path, repo_root=self._repo_root, line_no=line_no)
+                return path
+            if os.path.exists(path):
+                self.open_file(path, repo_root=self._repo_root, line_no=line_no)
+                return path
+        return ""
+
+    def close_all_tabs(self):
+        had_tabs = self._tabs.count() > 0
+        while self._tabs.count():
+            widget = self._tabs.widget(0)
+            self._tabs.removeTab(0)
+            self._delete_tab_widget(widget)
+        self._recently_closed_files.clear()
+        if had_tabs:
+            self.all_closed.emit()
+        self._emit_language_context_changed()
+
+    def _close_tab(self, index: int) -> bool:
+        if index < 0 or index >= self._tabs.count():
+            return False
+        widget = self._tabs.widget(index)
+        if not self._confirm_close_tab(widget):
+            return False
+        self._remember_closed_tab(index, widget)
+        self._tabs.removeTab(index)
         self._delete_tab_widget(widget)
         if self._tabs.count() == 0:
             self.all_closed.emit()
+        self._emit_language_context_changed()
         return True
 
+    def _confirm_close_tab(self, widget: QWidget | None) -> bool:
+        if not isinstance(widget, _TextFileTab) or not widget._dirty:
+            return True
+        name = os.path.basename(self._tab_file_path(widget)) or "this file"
+        choice = QMessageBox.question(
+            self,
+            "Revert unsaved changes?",
+            f"Revert unsaved changes to {name} and close the file?",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if choice != QMessageBox.StandardButton.Ok:
+            return False
+        widget._revert()
+        return True
+
+    def _remember_closed_tab(self, index: int, widget: QWidget | None):
+        key = str(self._tabs.tabBar().tabData(index) or "")
+        if not key or key.startswith("\0"):
+            return
+        path = os.path.abspath(key)
+        line_no = None
+        if isinstance(widget, _TextFileTab):
+            line_no = widget._editor.textCursor().blockNumber() + 1
+        self._recently_closed_files = [
+            item for item in self._recently_closed_files if item[0] != path
+        ]
+        self._recently_closed_files.append((path, line_no))
+        del self._recently_closed_files[:-20]
+
     def _on_current_tab_changed(self, index: int):
+        self._emit_language_context_changed()
         if index < 0:
             return
         key = str(self._tabs.tabBar().tabData(index) or "")
@@ -2169,6 +2470,24 @@ class FileViewerPanel(QWidget):
         except Exception:
             return DEFAULT_FILE_EDITOR_TAB_SPACES
         return file_editor_tab_spaces(data)
+
+    def _load_file_review_prompt_template(self) -> str:
+        if self._settings is None:
+            return DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE
+        try:
+            data = self._settings.load()
+        except Exception:
+            return DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE
+        return file_review_prompt_template(data)
+
+    def _load_diagnostic_fix_prompt_template(self) -> str:
+        if self._settings is None:
+            return DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE
+        try:
+            data = self._settings.load()
+        except Exception:
+            return DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE
+        return diagnostic_fix_prompt_template(data)
 
     def _sync_tab_title(self, widget: QWidget):
         idx = self._tabs.indexOf(widget)
@@ -2294,6 +2613,26 @@ def _diagnostic_tool_label(diagnostics: list[Diagnostic]) -> str:
         if label:
             return label
     return "diagnostic tool"
+
+
+def _format_prompt_template(template: str, values: dict[str, str], default: str) -> str:
+    def render(raw: str) -> str:
+        return raw.format(**values).strip()
+
+    raw = str(template or "").strip() or default
+    try:
+        text = render(raw)
+    except (IndexError, KeyError, ValueError):
+        text = render(default)
+    return text or render(default)
+
+
+def _normalize_editor_newlines(text: str) -> str:
+    return re.sub(r"\r+\n", "\n", str(text)).replace("\r", "\n")
+
+
+def _file_mention_text(path: str) -> str:
+    return f'@"{path}"' if any(ch.isspace() for ch in path) else f"@{path}"
 
 
 def _relative_file_reference(path: str, repo_root: str) -> str:

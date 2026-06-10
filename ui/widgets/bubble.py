@@ -546,11 +546,14 @@ class MessageBubble(QFrame):
             menu.exec(self.label.mapToGlobal(pos))
 
     def _copy_to_clipboard(self):
+        QGuiApplication.clipboard().setMimeData(self._copy_mime())
+
+    def _copy_mime(self) -> QMimeData:
         text = self._selected_or_copy_text()
         mime = QMimeData()
         mime.setText(text)
         mime.setData(AICHS_MESSAGE_COPY_MIME, file_refs_payload(text))
-        QGuiApplication.clipboard().setMimeData(mime)
+        return mime
 
     def eventFilter(self, obj, event):
         if obj is self.label and event.type() == QEvent.Type.KeyPress:

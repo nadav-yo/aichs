@@ -59,6 +59,7 @@ class ExtensionContributionsBar(QWidget):
             button = QPushButton(data.label)
             button.setToolTip(data.tooltip)
             button.setFixedHeight(28)
+            button.setProperty("aichs-tone", data.tone)
             button.setStyleSheet(_badge_style(data.tone))
             button.clicked.connect(lambda _, panel=data.panel: self._open_panel(panel))
             self._badges_layout.addWidget(button)
@@ -67,6 +68,12 @@ class ExtensionContributionsBar(QWidget):
         self._badges.setVisible(has_badges)
         self.setVisible(has_badges)
         return errors
+
+    def apply_appearance(self) -> None:
+        for i in range(self._badges_layout.count()):
+            widget = self._badges_layout.itemAt(i).widget()
+            if isinstance(widget, QPushButton):
+                widget.setStyleSheet(_badge_style(str(widget.property("aichs-tone") or "")))
 
     def _clear_badges(self) -> None:
         while self._badges_layout.count():

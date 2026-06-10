@@ -1,9 +1,40 @@
 import sys
 import time
+from itertools import count
 
 import pytest
 
 from services.processes import ManagedProcessError, ProcessInfo, ProcessManager, RuntimeProcessApi
+
+
+class _FakeProc:
+    _pids = count(1000)
+
+    def __init__(self, *args, **kwargs):
+        self.pid = next(self._pids)
+        self.returncode = None
+        self.stdin = None
+        self.stdout = []
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+
+    def terminate(self):
+        self.returncode = 0
+
+
+def _use_fake_processes(monkeypatch):
+    monkeypatch.setattr("services.processes.popen_no_window", _FakeProc)
+    monkeypatch.setattr("services.processes._terminate_process", lambda proc, force: proc.terminate())
+    monkeypatch.setattr(ProcessManager, "_pump_output", lambda self, key: None)
 
 
 def test_runtime_process_api_start_tail_write_and_stop(workspace):
@@ -75,7 +106,8 @@ def test_process_info_as_dict():
     assert data["line_count"] == 7
 
 
-def test_process_manager_duplicate_restart_and_stop_all(workspace):
+def test_process_manager_duplicate_restart_and_stop_all(workspace, monkeypatch):
+    _use_fake_processes(monkeypatch)
     manager = ProcessManager()
     api = RuntimeProcessApi(manager, workspace=str(workspace))
     command = [sys.executable, "-u", "-c", "import time; print('up', flush=True); time.sleep(30)"]
@@ -93,7 +125,8 @@ def test_process_manager_duplicate_restart_and_stop_all(workspace):
     assert api.status() == []
 
 
-def test_process_manager_stop_workspace_only_stops_matching_workspace(workspace, tmp_path):
+def test_process_manager_stop_workspace_only_stops_matching_workspace(workspace, tmp_path, monkeypatch):
+    _use_fake_processes(monkeypatch)
     other = tmp_path / "other"
     other.mkdir()
     manager = ProcessManager()
@@ -120,7 +153,8 @@ def test_process_manager_natural_exit_and_stop_missing(workspace):
         api.stop("missing")
 
 
-def test_process_write_requires_stdin(workspace):
+def test_process_write_requires_stdin(workspace, monkeypatch):
+    _use_fake_processes(monkeypatch)
     manager = ProcessManager()
     api = RuntimeProcessApi(manager, workspace=str(workspace))
     api.start("no_stdin", [sys.executable, "-u", "-c", "import time; time.sleep(30)"])
@@ -148,5 +182,5 @@ def _wait_for(predicate, timeout=5.0):
     while time.time() < deadline:
         if predicate():
             return
-        time.sleep(0.05)
+        time.sleep(0.005)
     assert predicate()

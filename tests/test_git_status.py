@@ -3,8 +3,10 @@ import subprocess
 
 import pytest
 
+import services.git_status as gs
 from services.git_status import (
     GitFileChange,
+    GitCommandResult,
     commit_staged,
     count_commits_to_pull,
     count_commits_to_push,
@@ -62,6 +64,16 @@ class TestGitRepo:
     def test_is_git_repo_true_after_init(self, git_repo):
         assert is_git_repo(str(git_repo))
 
+    def test_list_file_changes_skips_non_git_workspace(self, workspace, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "services.git_status.run_git",
+            lambda *args, **kwargs: calls.append((args, kwargs)) or "",
+        )
+
+        assert list_file_changes(str(workspace)) == []
+        assert calls == []
+
     def test_list_file_changes_after_edit(self, git_repo):
         main = git_repo / "src" / "main.py"
         main.write_text("print('changed')\n", encoding="utf-8")
@@ -101,71 +113,59 @@ class TestGitRepo:
         assert count_commits_to_push(str(git_repo)) == 0
         assert count_commits_to_pull(str(git_repo)) == 0
 
-    def test_count_commits_to_push_with_ahead_commit(self, git_repo, tmp_path):
-        remote = tmp_path / "remote.git"
-        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    def test_count_commits_to_push_with_ahead_commit(self, workspace, monkeypatch):
+        state = {"ahead": 0}
+        calls = []
 
-        def git(*args: str) -> None:
-            subprocess.run(
-                ["git", *args],
-                cwd=git_repo,
-                check=True,
-                capture_output=True,
-            )
+        def fake_run_git(cmd, repo_path):
+            calls.append(cmd)
+            assert repo_path == str(workspace)
+            if cmd == ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]:
+                return "origin/main"
+            if cmd == ["git", "rev-list", "--count", "@{u}..HEAD"]:
+                return str(state["ahead"])
+            raise AssertionError(f"unexpected git command: {cmd!r}")
 
-        branch = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=git_repo,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        monkeypatch.setattr("services.git_status.is_git_repo", lambda repo_path: True)
+        monkeypatch.setattr("services.git_status.run_git", fake_run_git)
 
-        git("remote", "add", "origin", str(remote))
-        git("push", "-u", "origin", branch)
-        assert count_commits_to_push(str(git_repo)) == 0
+        assert count_commits_to_push(str(workspace)) == 0
+        state["ahead"] = 1
+        assert count_commits_to_push(str(workspace)) == 1
+        assert ["git", "rev-list", "--count", "@{u}..HEAD"] in calls
 
-        main = git_repo / "src" / "main.py"
-        main.write_text("print('ahead')\n", encoding="utf-8")
-        git("add", "src/main.py")
-        git("commit", "-m", "ahead")
+    def test_count_commits_to_pull_uses_fetched_tracking_info(self, workspace, monkeypatch):
+        state = {"behind": 0}
+        calls = []
 
-        assert count_commits_to_push(str(git_repo)) == 1
+        def fake_run_git(cmd, repo_path):
+            calls.append(cmd)
+            assert repo_path == str(workspace)
+            if cmd == ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]:
+                return "origin/main"
+            if cmd == ["git", "rev-list", "--count", "HEAD..@{u}"]:
+                return str(state["behind"])
+            raise AssertionError(f"unexpected git command: {cmd!r}")
 
-    def test_count_commits_to_pull_uses_fetched_tracking_info(self, git_repo, tmp_path):
-        remote = tmp_path / "remote.git"
-        clone = tmp_path / "clone"
-        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+        monkeypatch.setattr("services.git_status.is_git_repo", lambda repo_path: True)
+        monkeypatch.setattr("services.git_status.run_git", fake_run_git)
 
-        def git(cwd, *args: str) -> None:
-            subprocess.run(
-                ["git", *args],
-                cwd=cwd,
-                check=True,
-                capture_output=True,
-            )
+        assert count_commits_to_pull(str(workspace)) == 0
+        state["behind"] = 1
+        assert count_commits_to_pull(str(workspace)) == 1
+        assert ["git", "rev-list", "--count", "HEAD..@{u}"] in calls
 
-        branch = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=git_repo,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+    def test_count_commits_returns_zero_for_bad_counts(self, workspace, monkeypatch):
+        def fake_run_git(cmd, repo_path):
+            if cmd == ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]:
+                return "origin/main"
+            return "not-a-number"
 
-        git(git_repo, "remote", "add", "origin", str(remote))
-        git(git_repo, "push", "-u", "origin", branch)
-        subprocess.run(["git", "clone", str(remote), str(clone)], check=True, capture_output=True)
-        git(clone, "config", "user.email", "test@example.com")
-        git(clone, "config", "user.name", "Test User")
-        (clone / "src" / "main.py").write_text("print('remote')\n", encoding="utf-8")
-        git(clone, "add", "src/main.py")
-        git(clone, "commit", "-m", "remote")
-        git(clone, "push")
+        monkeypatch.setattr("services.git_status.is_git_repo", lambda repo_path: True)
+        monkeypatch.setattr("services.git_status.run_git", fake_run_git)
 
-        assert count_commits_to_pull(str(git_repo)) == 0
-        git(git_repo, "fetch", "origin")
-        assert count_commits_to_pull(str(git_repo)) == 1
+        assert count_commits_to_push(str(workspace)) == 0
+        assert count_commits_to_pull(str(workspace)) == 0
 
     def test_repo_relative_paths_filters_outside_workspace(self, git_repo, tmp_path):
         outside = tmp_path / "outside.txt"
@@ -174,85 +174,171 @@ class TestGitRepo:
             "src/main.py"
         ]
 
-    def test_stage_and_unstage_files(self, git_repo):
-        main = git_repo / "src" / "main.py"
-        main.write_text("print('stage')\n", encoding="utf-8")
+    def test_stage_and_unstage_files(self, workspace, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "services.git_status.run_git_command",
+            lambda cmd, repo_path, **kwargs: calls.append((cmd, repo_path, kwargs))
+            or GitCommandResult(0, "ok", ""),
+        )
 
-        result = stage_files(str(git_repo), ["src/main.py"])
+        result = stage_files(str(workspace), ["src/main.py"])
         assert result.ok
-        ch = next(c for c in list_file_changes(str(git_repo)) if c.rel_path.replace("\\", "/") == "src/main.py")
-        assert ch.staged
-        assert not ch.unstaged
 
-        result = unstage_files(str(git_repo), ["src/main.py"])
+        result = unstage_files(str(workspace), ["src/main.py"])
         assert result.ok
-        ch = next(c for c in list_file_changes(str(git_repo)) if c.rel_path.replace("\\", "/") == "src/main.py")
-        assert not ch.staged
-        assert ch.unstaged
+        assert calls == [
+            (["git", "add", "--", "src/main.py"], str(workspace), {}),
+            (["git", "restore", "--staged", "--", "src/main.py"], str(workspace), {}),
+        ]
 
-    def test_discard_unstaged_files_restores_tracked_and_removes_untracked(self, git_repo):
-        main = git_repo / "src" / "main.py"
-        note = git_repo / "note.txt"
-        main.write_text("print('discard')\n", encoding="utf-8")
-        note.write_text("new\n", encoding="utf-8")
+    def test_file_commands_reject_empty_or_escaped_selection(self, workspace):
+        for result in (
+            stage_files(str(workspace), []),
+            unstage_files(str(workspace), ["../escape.py"]),
+            discard_files(str(workspace), [""]),
+            stash_files(str(workspace), ["../escape.py"], ""),
+        ):
+            assert not result.ok
+            assert "No files selected" in result.stderr
 
-        result = discard_files(str(git_repo), ["src/main.py", "note.txt"])
+    def test_discard_unstaged_files_restores_tracked_and_removes_untracked(self, workspace, monkeypatch):
+        calls = []
+        monkeypatch.setattr("services.git_status._tracked_paths", lambda repo_path, paths: {"src/main.py"})
+        monkeypatch.setattr(
+            "services.git_status.run_git_command",
+            lambda cmd, repo_path, **kwargs: calls.append((cmd, repo_path, kwargs))
+            or GitCommandResult(0, "ok", ""),
+        )
 
-        assert result.ok
-        assert main.read_text(encoding="utf-8") == "print('hi')\n"
-        assert not note.exists()
-        assert list_file_changes(str(git_repo)) == []
-
-    def test_discard_staged_files_restores_tracked_file(self, git_repo):
-        main = git_repo / "src" / "main.py"
-        main.write_text("print('discard staged')\n", encoding="utf-8")
-        assert stage_files(str(git_repo), ["src/main.py"]).ok
-
-        result = discard_files(str(git_repo), ["src/main.py"], staged=True)
-
-        assert result.ok
-        assert main.read_text(encoding="utf-8") == "print('hi')\n"
-        assert list_file_changes(str(git_repo)) == []
-
-    def test_discard_staged_added_file_removes_it(self, git_repo):
-        note = git_repo / "note.txt"
-        note.write_text("new\n", encoding="utf-8")
-        assert stage_files(str(git_repo), ["note.txt"]).ok
-
-        result = discard_files(str(git_repo), ["note.txt"], staged=True)
+        result = discard_files(str(workspace), ["src/main.py", "note.txt"])
 
         assert result.ok
-        assert not note.exists()
-        assert list_file_changes(str(git_repo)) == []
+        assert calls == [
+            (["git", "restore", "--worktree", "--", "src/main.py"], str(workspace), {}),
+            (["git", "clean", "-f", "--", "src/main.py", "note.txt"], str(workspace), {}),
+        ]
 
-    def test_stash_files_includes_untracked_selected_files(self, git_repo):
-        main = git_repo / "src" / "main.py"
-        note = git_repo / "note.txt"
-        main.write_text("print('stash')\n", encoding="utf-8")
-        note.write_text("new\n", encoding="utf-8")
+    def test_discard_staged_files_restores_tracked_file(self, workspace, monkeypatch):
+        calls = []
+        monkeypatch.setattr("services.git_status._paths_in_head", lambda repo_path, paths: {"src/main.py"})
+        monkeypatch.setattr(
+            "services.git_status.run_git_command",
+            lambda cmd, repo_path, **kwargs: calls.append((cmd, repo_path, kwargs))
+            or GitCommandResult(0, "ok", ""),
+        )
 
-        result = stash_files(str(git_repo), ["src/main.py", "note.txt"], "test stash")
-
-        assert result.ok
-        assert not note.exists()
-        assert list_file_changes(str(git_repo)) == []
-        assert "test stash" in run_git(["git", "stash", "list"], str(git_repo))
-
-    def test_commit_staged_commits_only_staged_files(self, git_repo):
-        main = git_repo / "src" / "main.py"
-        other = git_repo / "other.txt"
-        main.write_text("print('commit')\n", encoding="utf-8")
-        other.write_text("unstaged\n", encoding="utf-8")
-        assert stage_files(str(git_repo), ["src/main.py"]).ok
-
-        result = commit_staged(str(git_repo), "commit staged", "body text")
+        result = discard_files(str(workspace), ["src/main.py"], staged=True)
 
         assert result.ok
-        assert "commit staged" in run_git(["git", "log", "-1", "--format=%s"], str(git_repo))
-        changes = list_file_changes(str(git_repo))
-        assert [ch.rel_path.replace("\\", "/") for ch in changes] == ["other.txt"]
+        assert calls == [
+            (
+                ["git", "restore", "--staged", "--worktree", "--", "src/main.py"],
+                str(workspace),
+                {},
+            )
+        ]
+
+    def test_discard_staged_added_file_removes_it(self, workspace, monkeypatch):
+        calls = []
+        monkeypatch.setattr("services.git_status._paths_in_head", lambda repo_path, paths: set())
+        monkeypatch.setattr(
+            "services.git_status.run_git_command",
+            lambda cmd, repo_path, **kwargs: calls.append((cmd, repo_path, kwargs))
+            or GitCommandResult(0, "ok", ""),
+        )
+
+        result = discard_files(str(workspace), ["note.txt"], staged=True)
+
+        assert result.ok
+        assert calls == [
+            (["git", "rm", "-f", "--cached", "--", "note.txt"], str(workspace), {}),
+            (["git", "clean", "-f", "--", "note.txt"], str(workspace), {}),
+        ]
+
+    def test_discard_staged_added_file_skips_clean_when_cached_rm_fails(self, workspace, monkeypatch):
+        calls = []
+        monkeypatch.setattr("services.git_status._paths_in_head", lambda repo_path, paths: set())
+        monkeypatch.setattr(
+            "services.git_status.run_git_command",
+            lambda cmd, repo_path, **kwargs: calls.append(cmd)
+            or GitCommandResult(1, "", "rm failed"),
+        )
+
+        result = discard_files(str(workspace), ["note.txt"], staged=True)
+
+        assert not result.ok
+        assert calls == [["git", "rm", "-f", "--cached", "--", "note.txt"]]
+
+    def test_stash_files_includes_untracked_selected_files(self, workspace, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "services.git_status.run_git_command",
+            lambda cmd, repo_path, **kwargs: calls.append((cmd, repo_path, kwargs))
+            or GitCommandResult(0, "saved", ""),
+        )
+
+        result = stash_files(str(workspace), ["src/main.py", "note.txt"], "test stash")
+
+        assert result.ok
+        assert calls == [
+            (
+                [
+                    "git",
+                    "stash",
+                    "push",
+                    "-u",
+                    "-m",
+                    "test stash",
+                    "--",
+                    "src/main.py",
+                    "note.txt",
+                ],
+                str(workspace),
+                {},
+            )
+        ]
+
+    def test_commit_staged_commits_only_staged_files(self, workspace, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "services.git_status.run_git_command",
+            lambda cmd, repo_path, **kwargs: calls.append((cmd, repo_path, kwargs))
+            or GitCommandResult(0, "committed", ""),
+        )
+
+        result = commit_staged(str(workspace), "commit staged", "body text")
+
+        assert result.ok
+        assert calls == [
+            (
+                ["git", "commit", "-m", "commit staged", "-m", "body text"],
+                str(workspace),
+                {"timeout": 120},
+            )
+        ]
 
     def test_commit_staged_requires_summary(self, git_repo):
         result = commit_staged(str(git_repo), "  ")
         assert not result.ok
         assert "summary" in result.stderr
+
+    def test_private_git_helpers_handle_empty_and_merge_failures(self, workspace):
+        assert gs._tracked_paths(str(workspace), []) == set()
+        assert gs._paths_in_head(str(workspace), []) == set()
+
+        result = gs._combined_git_result([
+            GitCommandResult(0, "first", ""),
+            GitCommandResult(2, "second", "failed"),
+        ])
+
+        assert result.returncode == 2
+        assert result.stdout == "first\nsecond"
+        assert result.stderr == "failed"
+
+    def test_change_from_status_line_skips_directories(self, workspace):
+        folder = workspace / "generated"
+        folder.mkdir()
+
+        assert gs._change_from_status_line(str(workspace), "?? generated/") is None
+        assert gs._change_from_status_line(str(workspace), "?? generated") is None

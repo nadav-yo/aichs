@@ -13,9 +13,12 @@ from services.tool_registry import (
     ToolContext,
     ToolRegistry,
     extension_context_snippets,
+    disable_unreviewed_extensions,
     extension_errors,
     extension_languages,
     extension_overview,
+    extension_static_summary,
+    is_extension_seen,
     is_extension_disabled,
     load_extensions,
     run_extension_command,
@@ -234,6 +237,125 @@ def test_folder_extension_manifest_requirements_are_summarized(workspace):
     ]
 
 
+def test_folder_extension_manifest_permissions_are_summarized(workspace):
+    ext_dir = workspace / ".aichs" / "extensions" / "permissions-demo"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "aichs-extension.json").write_text(
+        json.dumps({
+            "name": "Permissions Demo",
+            "permissions": {
+                "tools": True,
+                "context": True,
+                "network": True,
+            },
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+    (ext_dir / "extension.py").write_text("def register(registry):\n    pass\n", encoding="utf-8")
+
+    summary = extension_static_summary(ext_dir / "extension.py", str(workspace))
+
+    assert summary.permissions.declared is True
+    assert summary.permissions.tools is True
+    assert summary.permissions.context is True
+    assert summary.permissions.network is True
+    assert summary.permissions.hooks is False
+    assert "Enabled extensions run local Python code" in summary.risk_messages[0]
+
+
+def test_manifest_permissions_block_undeclared_contributions(workspace):
+    ext_dir = workspace / ".aichs" / "extensions" / "blocked"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "aichs-extension.json").write_text(
+        json.dumps({"permissions": {"context": True}})
+        + "\n",
+        encoding="utf-8",
+    )
+    (ext_dir / "extension.py").write_text(
+        """
+def register(registry):
+    registry.tool(
+        name="blocked_tool",
+        description="Should not register",
+        input_schema={"type": "object", "properties": {}},
+        execute=lambda ctx, inputs: "no",
+    )
+    registry.context("Allowed note", lambda ctx: "ok")
+    registry.hook("turn_start", lambda ctx: None)
+    registry.status_badge(name="blocked_badge", provider=lambda ctx: {})
+    registry.language(name="blocked_lang", file_patterns=["*.x"], diagnostics=lambda ctx: [])
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    registry = ToolRegistry()
+    load_extensions(registry, str(workspace))
+    overview = extension_overview(str(workspace)).files[0]
+
+    assert registry.get("blocked_tool") is None
+    assert overview.contexts == ["Allowed note"]
+    assert overview.hooks == []
+    assert overview.badges == []
+    assert overview.languages == []
+    assert len(overview.permission_violations) == 4
+    assert any("tool blocked_tool" in item for item in overview.permission_violations)
+
+
+def test_manifest_permissions_block_process_commands(workspace):
+    ext_dir = workspace / ".aichs" / "extensions" / "process-block"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "aichs-extension.json").write_text(
+        json.dumps({"permissions": {"commands": True}})
+        + "\n",
+        encoding="utf-8",
+    )
+    (ext_dir / "extension.py").write_text(
+        """
+def register(registry):
+    registry.command(
+        name="process",
+        description="Should not register",
+        execute=lambda ctx, args: "no",
+        capabilities=["process_control"],
+    )
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result, errors = run_extension_command(str(workspace), "process")
+    overview = extension_overview(str(workspace)).files[0]
+
+    assert result is None
+    assert errors == ["command not found: process"]
+    assert overview.commands == []
+    assert any("process command process" in item for item in overview.permission_violations)
+
+
+def test_unreviewed_extension_scan_disables_new_and_changed_once(workspace):
+    ext = write_extension(workspace, "new.py", "def register(registry): pass")
+    cwd = str(workspace)
+
+    first = disable_unreviewed_extensions(cwd)
+    second = disable_unreviewed_extensions(cwd)
+
+    assert [Path(item.path).name for item in first] == ["new.py"]
+    assert second == []
+    assert is_extension_disabled(ext, cwd)
+    assert is_extension_seen(ext, cwd)
+    assert not (workspace / ".aichs" / "extensions.disabled.json").exists()
+    assert not (workspace / ".aichs" / "extensions.reviewed.json").exists()
+    assert (Path.home() / ".aichs" / "project" / "extensions.disabled.json").exists()
+    assert (Path.home() / ".aichs" / "project" / "extensions.reviewed.json").exists()
+
+    ext.write_text("def register(registry):\n    registry.command(name='x', description='x')\n", encoding="utf-8")
+    changed = disable_unreviewed_extensions(cwd)
+
+    assert [Path(item.path).name for item in changed] == ["new.py"]
+
+
 def test_folder_extension_manifest_requirements_accept_strings_and_dedupe(workspace):
     ext_dir = workspace / ".aichs" / "extensions" / "string-requirements"
     ext_dir.mkdir(parents=True)
@@ -344,6 +466,24 @@ def test_extension_storage_config_and_state(workspace):
         storage.load_config(scope="bad")
     with pytest.raises(ValueError, match="JSON object"):
         storage.save_state([])
+
+
+def test_extension_storage_artifacts_are_project_scoped(workspace):
+    storage = ExtensionStorage(str(workspace), "../unsafe id")
+
+    path = Path(storage.save_artifact("../pytest-output.txt", "full output"))
+
+    assert path == (
+        workspace
+        / ".aichs"
+        / "state"
+        / "unsafe_id"
+        / "artifacts"
+        / "pytest-output.txt"
+    )
+    assert storage.load_artifact("../pytest-output.txt") == "full output"
+    assert storage.load_artifact("../pytest-output.txt", max_chars=4) == "full"
+    assert storage.artifact_path("notes.md").parent == path.parent
 
 
 def test_command_context_storage_uses_extension_id(workspace):
@@ -482,15 +622,59 @@ def test_disabled_extension_is_visible_but_not_loaded(workspace):
     overview = extension_overview(cwd)
     summary = overview.files[0]
     assert summary.status == "Disabled"
-    assert summary.tools == []
-    assert summary.commands == []
-    assert summary.hooks == []
+    assert [tool.name for tool in summary.tools] == ["disabled_ping"]
+    assert [command.name for command in summary.commands] == ["disabled_cmd"]
+    assert summary.contexts == ["Disabled note"]
+    assert summary.hooks == ["turn_start"]
 
     set_extension_enabled(ext, True, cwd)
     assert not is_extension_disabled(ext, cwd)
     registry = ToolRegistry()
     load_extensions(registry, cwd)
     assert registry.get("disabled_ping") is not None
+
+
+def test_disabled_extension_static_contributions_are_visible(workspace):
+    ext_dir = workspace / ".aichs" / "extensions" / "static-preview"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "extension.py").write_text(
+        """
+def register(registry):
+    registry.tool(
+        name="preview_tool",
+        description="Static tool",
+        input_schema={"type": "object", "properties": {}},
+        execute=lambda ctx, inputs: "ok",
+    )
+    registry.command(
+        name="preview_cmd",
+        description="Static command",
+        execute=lambda ctx, args: "ok",
+        capabilities=["runtime_control"],
+    )
+    registry.context("Preview context", lambda ctx: "ok")
+    registry.hook("turn_start", lambda ctx: None)
+    registry.status_badge(name="preview_badge", provider=lambda ctx: {})
+    registry.panel(name="preview_panel", title="Preview Panel", provider=lambda ctx: {})
+    registry.language(name="preview_lang", file_patterns=["*.preview"], diagnostics=lambda ctx: [])
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    set_extension_enabled(ext_dir, False, str(workspace))
+
+    summary = extension_overview(str(workspace)).files[0]
+
+    assert summary.status == "Disabled"
+    assert [tool.name for tool in summary.tools] == ["preview_tool"]
+    assert [command.name for command in summary.commands] == ["preview_cmd"]
+    assert summary.commands[0].executable is True
+    assert summary.commands[0].capabilities == ["runtime_control"]
+    assert summary.contexts == ["Preview context"]
+    assert summary.hooks == ["turn_start"]
+    assert [badge.name for badge in summary.badges] == ["preview_badge"]
+    assert [(panel.name, panel.title) for panel in summary.panels] == [("preview_panel", "Preview Panel")]
+    assert summary.languages[0].name == "preview_lang"
 
 
 def test_run_hooks_on_event(workspace):
@@ -518,6 +702,32 @@ def test_run_hooks_on_event(workspace):
     assert errors == []
     assert ctx.status == "error"
     assert ctx.error == "blocked by extension"
+
+
+def test_hook_context_exposes_scoped_storage(workspace):
+    write_extension(
+        workspace,
+        "hook_store.py",
+        """
+        def register(registry):
+            registry.hook("turn_start", remember)
+
+        def remember(ctx):
+            ctx.storage.save_state({"extension_id": ctx.extension_id})
+            ctx.storage.save_artifact("handoff.txt", "resume here")
+        """,
+    )
+    cwd = str(workspace)
+    ctx = HookContext(event="turn_start", cwd=cwd)
+
+    errors = run_extension_hooks(cwd, "turn_start", ctx)
+
+    assert errors == []
+    assert ctx.extension_id == "extension"
+    state_path = workspace / ".aichs" / "state" / "hook_store" / "state.json"
+    artifact_path = workspace / ".aichs" / "state" / "hook_store" / "artifacts" / "handoff.txt"
+    assert json.loads(state_path.read_text(encoding="utf-8")) == {"extension_id": "hook_store"}
+    assert artifact_path.read_text(encoding="utf-8") == "resume here"
 
 
 def test_hook_can_return_runtime_directive(workspace):

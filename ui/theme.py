@@ -296,6 +296,26 @@ def _pill_button_style(
     )
 
 
+def primary_button_style(
+    *,
+    selector: str = "QPushButton",
+    border_radius: int = 6,
+    padding: str = "6px 18px",
+    font_size: int | None = None,
+    font_weight: str = "700",
+) -> str:
+    fs = f"font-size:{font_size}px;" if font_size is not None else ""
+    return (
+        f"{selector} {{ background:{ACCENT}; color:white; border:none;"
+        f"border-radius:{border_radius}px; padding:{padding}; {fs}"
+        f"font-weight:{font_weight}; }}"
+        f"{selector}:hover {{ background:{ACCENT_HOVER}; }}"
+        f"{selector}:pressed {{ background:{ACCENT_DIM}; }}"
+        f"{selector}:disabled {{ background:{palette()['BG3']}; color:{palette()['TEXT_DIM']};"
+        f"border:1px solid {palette()['BORDER']}; }}"
+    )
+
+
 def send_button_style() -> str:
     return _composer_action_button_style(ACCENT_DIM, ACCENT, "#2f5fb8", ACCENT_SOFT_DARK, "#8daee8")
 
@@ -682,8 +702,25 @@ def apply_app_theme(app, theme: str | None = None) -> None:
     from ui.win_caption import install_caption_sync, sync_all_windows_captions
 
     theme_name = theme or current_theme()
-    app.setFont(app_font())
-    app.setStyleSheet(build_stylesheet(theme_name))
+    font = app_font()
+    theme_key = f"{theme_name}:{font.family()}:{font.pointSize()}"
+    cached_sheet = app.property("aichsThemeStyleSheet")
+    current_font = app.font()
+    font_matches = (
+        current_font.family() == font.family()
+        and current_font.pointSize() == font.pointSize()
+    )
+    if (
+        app.property("aichsThemeKey") != theme_key
+        or not font_matches
+        or not cached_sheet
+        or app.styleSheet() != cached_sheet
+    ):
+        sheet = build_stylesheet(theme_name)
+        app.setFont(font)
+        app.setStyleSheet(sheet)
+        app.setProperty("aichsThemeKey", theme_key)
+        app.setProperty("aichsThemeStyleSheet", sheet)
     install_caption_sync(app)
     sync_all_windows_captions(app, theme_name)
 

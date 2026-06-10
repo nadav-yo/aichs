@@ -19,11 +19,11 @@ from services.chat_drag import (
 from PyQt6.QtWidgets import QLabel, QListWidget, QLineEdit, QTextBrowser
 from PyQt6.QtWidgets import QMessageBox
 
-from services.git_status import stage_files
+from services.git_status import GitCommandResult
 from storage.settings import SettingsStore
 from ui.theme import palette
 from ui.widgets.git_panel import GitPanel, _CommitDiffDialog
-from ui.widgets.left_panel import FileTree, _FilesHeader
+from ui.widgets.left_panel import FileTree, _FilesHeader, _path_key
 from ui.widgets.conversation_panel import ConversationPanel
 
 
@@ -142,6 +142,26 @@ def test_files_tree_filters_by_relative_path(qapp, workspace):
     tree.set_filter_text("")
 
     assert tree.topLevelItem(0).text(0) == "src"
+
+
+def test_files_tree_shows_project_dot_folders(qapp, workspace):
+    skills = workspace / ".aichs" / "skills"
+    skills.mkdir(parents=True)
+    (skills / "demo.md").write_text("Use this skill.\n", encoding="utf-8")
+    (workspace / ".git").mkdir()
+    (workspace / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+    tree = FileTree(str(workspace))
+
+    names = [tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())]
+
+    assert ".aichs" in names
+    assert ".git" not in names
+    assert ".env" not in names
+
+    tree.set_filter_text("demo")
+
+    assert tree.topLevelItemCount() == 1
+    assert tree.topLevelItem(0).text(0) == ".aichs/skills/demo.md"
 
 
 def test_files_tree_marks_dirty_files_and_parent_folders(qapp, workspace):
@@ -298,22 +318,35 @@ def test_files_tree_delete_dialog_removes_confirmed_path(qapp, workspace, monkey
     assert not path.exists()
 
 
-def test_files_tree_discard_option_only_for_modified_files(qapp, git_repo):
-    modified = git_repo / "src" / "main.py"
-    added = git_repo / "note.txt"
+def test_files_tree_discard_option_only_for_modified_files(qapp, workspace):
+    modified = workspace / "src" / "main.py"
+    added = workspace / "note.txt"
     modified.write_text("print('modified')\n", encoding="utf-8")
     added.write_text("new\n", encoding="utf-8")
 
-    tree = FileTree(str(git_repo))
+    tree = FileTree(str(workspace))
+    tree._git_by_path = {
+        _path_key(str(modified)): (" M", "M"),
+        _path_key(str(added)): ("??", "?"),
+    }
 
     assert tree._is_discardable_modified_file(str(modified))
     assert not tree._is_discardable_modified_file(str(added))
 
 
-def test_files_tree_discard_dialog_restores_modified_file(qapp, git_repo, monkeypatch):
-    path = git_repo / "src" / "main.py"
+def test_files_tree_discard_dialog_restores_modified_file(qapp, workspace, monkeypatch):
+    path = workspace / "src" / "main.py"
     path.write_text("print('discard from files tab')\n", encoding="utf-8")
-    tree = FileTree(str(git_repo))
+    tree = FileTree(str(workspace))
+    tree._git_by_path = {_path_key(str(path)): (" M", "M")}
+    calls = []
+    refreshes = []
+    monkeypatch.setattr(
+        "ui.widgets.left_panel.discard_files",
+        lambda repo_path, paths, staged=False: calls.append((repo_path, paths, staged))
+        or GitCommandResult(0, "discarded", ""),
+    )
+    monkeypatch.setattr(tree, "refresh", lambda: refreshes.append(True))
     questions = []
     monkeypatch.setattr(
         "ui.widgets.left_panel.QMessageBox.question",
@@ -325,18 +358,26 @@ def test_files_tree_discard_dialog_restores_modified_file(qapp, git_repo, monkey
 
     tree._discard_file_dialog(str(path))
 
-    assert path.read_text(encoding="utf-8") == "print('hi')\n"
+    assert calls == [(str(workspace), ["src/main.py"], False)]
+    assert refreshes == [True]
     assert questions
     assert questions[0][0] is tree
     assert questions[0][1] == "Discard changes?"
     assert "src/main.py" in questions[0][2]
 
 
-def test_files_tree_discard_dialog_restores_staged_modified_file(qapp, git_repo, monkeypatch):
-    path = git_repo / "src" / "main.py"
+def test_files_tree_discard_dialog_restores_staged_modified_file(qapp, workspace, monkeypatch):
+    path = workspace / "src" / "main.py"
     path.write_text("print('discard staged from files tab')\n", encoding="utf-8")
-    assert stage_files(str(git_repo), ["src/main.py"]).ok
-    tree = FileTree(str(git_repo))
+    tree = FileTree(str(workspace))
+    tree._git_by_path = {_path_key(str(path)): ("M ", "M")}
+    calls = []
+    monkeypatch.setattr(
+        "ui.widgets.left_panel.discard_files",
+        lambda repo_path, paths, staged=False: calls.append((repo_path, paths, staged))
+        or GitCommandResult(0, "discarded", ""),
+    )
+    monkeypatch.setattr(tree, "refresh", lambda: None)
     monkeypatch.setattr(
         "ui.widgets.left_panel.QMessageBox.question",
         lambda *args, **kwargs: QMessageBox.StandardButton.Discard,
@@ -344,13 +385,20 @@ def test_files_tree_discard_dialog_restores_staged_modified_file(qapp, git_repo,
 
     tree._discard_file_dialog(str(path))
 
-    assert path.read_text(encoding="utf-8") == "print('hi')\n"
+    assert calls == [(str(workspace), ["src/main.py"], True)]
 
 
-def test_files_tree_discard_cancel_keeps_modified_file(qapp, git_repo, monkeypatch):
-    path = git_repo / "src" / "main.py"
+def test_files_tree_discard_cancel_keeps_modified_file(qapp, workspace, monkeypatch):
+    path = workspace / "src" / "main.py"
     path.write_text("print('keep files tab change')\n", encoding="utf-8")
-    tree = FileTree(str(git_repo))
+    tree = FileTree(str(workspace))
+    tree._git_by_path = {_path_key(str(path)): (" M", "M")}
+    calls = []
+    monkeypatch.setattr(
+        "ui.widgets.left_panel.discard_files",
+        lambda repo_path, paths, staged=False: calls.append((repo_path, paths, staged))
+        or GitCommandResult(0, "discarded", ""),
+    )
     monkeypatch.setattr(
         "ui.widgets.left_panel.QMessageBox.question",
         lambda *args, **kwargs: QMessageBox.StandardButton.Cancel,
@@ -358,13 +406,15 @@ def test_files_tree_discard_cancel_keeps_modified_file(qapp, git_repo, monkeypat
 
     tree._discard_file_dialog(str(path))
 
+    assert calls == []
     assert path.read_text(encoding="utf-8") == "print('keep files tab change')\n"
 
 
-def test_files_tree_combines_git_and_dirty_markers(qapp, git_repo):
-    path = git_repo / "src" / "main.py"
+def test_files_tree_combines_git_and_dirty_markers(qapp, workspace):
+    path = workspace / "src" / "main.py"
     path.write_text("print('modified')\n", encoding="utf-8")
-    tree = FileTree(str(git_repo))
+    tree = FileTree(str(workspace))
+    tree._git_by_path = {_path_key(str(path)): (" M", "M")}
     src = tree.topLevelItem(0)
     tree._on_item_expanded(src)
 
@@ -376,8 +426,18 @@ def test_files_tree_combines_git_and_dirty_markers(qapp, git_repo):
     assert "Git: Modified" in item.toolTip(0)
 
 
-def test_git_log_drags_commit_reference(qapp, git_repo):
-    panel = GitPanel(str(git_repo))
+def test_git_log_drags_commit_reference(qapp, workspace, monkeypatch):
+    import ui.widgets.git_panel as git_panel
+
+    monkeypatch.setattr(git_panel, "is_git_repo", lambda _path: True)
+    monkeypatch.setattr(git_panel, "count_commits_to_pull", lambda _path: 0)
+    monkeypatch.setattr(git_panel, "count_commits_to_push", lambda _path: 0)
+    monkeypatch.setattr(
+        git_panel,
+        "run_git",
+        lambda _cmd, _path: "abcdef123456\x1fabcdef1\x1finitial",
+    )
+    panel = GitPanel(str(workspace))
     item = panel.log.item(0)
 
     mime = panel.log.mimeData([item])
@@ -390,8 +450,18 @@ def test_git_log_drags_commit_reference(qapp, git_repo):
     assert "initial" in mime.text()
 
 
-def test_git_log_double_click_opens_commit_diff(qapp, git_repo, monkeypatch):
-    panel = GitPanel(str(git_repo))
+def test_git_log_double_click_opens_commit_diff(qapp, workspace, monkeypatch):
+    import ui.widgets.git_panel as git_panel
+
+    monkeypatch.setattr(git_panel, "is_git_repo", lambda _path: True)
+    monkeypatch.setattr(git_panel, "count_commits_to_pull", lambda _path: 0)
+    monkeypatch.setattr(git_panel, "count_commits_to_push", lambda _path: 0)
+    monkeypatch.setattr(
+        git_panel,
+        "run_git",
+        lambda _cmd, _path: "abcdef123456\x1fabcdef1\x1finitial",
+    )
+    panel = GitPanel(str(workspace))
     item = panel.log.item(0)
     calls = []
 
@@ -408,7 +478,7 @@ def test_git_log_double_click_opens_commit_diff(qapp, git_repo, monkeypatch):
     panel.log.itemDoubleClicked.emit(item)
 
     assert calls[0][0] == "diff"
-    assert calls[0][1] == str(git_repo)
+    assert calls[0][1] == str(workspace)
     assert len(calls[0][2]) >= 7
     assert calls[1] == ("show", item.text().split(" ", 1)[0], "initial", "@@ diff\n-old\n+new\n")
 

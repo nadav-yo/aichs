@@ -3,6 +3,7 @@ import os
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
+    QMessageBox,
     QSplitter,
     QApplication,
     QPushButton,
@@ -10,21 +11,42 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PyQt6.QtCore import Qt, QByteArray
+from PyQt6.QtCore import Qt, QByteArray, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QShortcut, QKeySequence
 
 from storage.repository import ConversationStore
 from storage.settings import SettingsStore
+from services.git_status import list_file_changes
 from services.key_bindings import shortcut_sequences
 from services.palette import PaletteContext, build_palette_items
+from services.processes import get_process_manager
+from services.tool_registry import disable_unreviewed_extensions
 from ui.theme import apply_app_theme, current_theme
 from ui.widgets.left_panel import LeftPanel
 from ui.widgets.chat_panel import ChatPanel
 from ui.widgets.file_viewer import FileViewerPanel
 from ui.widgets.workbench_context import WorkbenchContextPanel
+from ui.widgets.workspace_dashboard import WorkspaceDashboard
 from ui.widgets.command_palette import CommandPalette
 from ui.widgets.file_search_dialog import FileSearchDialog
 from ui.widgets.text_search_dialog import TextSearchDialog
+
+
+DEFAULT_ACTIVITY_WIDTH = 400
+MIN_ACTIVITY_WIDTH = 280
+MAX_ACTIVITY_WIDTH = 640
+COLLAPSED_ACTIVITY_WIDTH = 64
+
+
+class _InitialGitStatusThread(QThread):
+    loaded = pyqtSignal(str, list)
+
+    def __init__(self, repo: str, parent=None):
+        super().__init__(parent)
+        self._repo = repo
+
+    def run(self):
+        self.loaded.emit(self._repo, list_file_changes(self._repo))
 
 
 def _startup_workspace(
@@ -56,6 +78,11 @@ class MainWindow(QMainWindow):
 
         self._settings = SettingsStore()
         saved = self._settings.load()
+        self._pending_default_activity_width = False
+        self._extension_review_prompt_shown = False
+        self._first_paint_tasks_started = False
+        self._initial_git_status_thread: _InitialGitStatusThread | None = None
+        self._initial_git_changes = None
 
         os.chdir(
             _startup_workspace(
@@ -73,9 +100,10 @@ class MainWindow(QMainWindow):
             repo,
             settings=self._settings,
             current_model_getter=lambda: self._chat.current_model(),
+            defer_refresh=True,
         )
-        self._left.setMinimumWidth(240)
-        self._left.setMaximumWidth(480)
+        self._left.setMinimumWidth(MIN_ACTIVITY_WIDTH)
+        self._left.setMaximumWidth(MAX_ACTIVITY_WIDTH)
 
         self._viewer = FileViewerPanel(repo, settings=self._settings)
         self._viewer.hide()
@@ -90,21 +118,43 @@ class MainWindow(QMainWindow):
         self._context.setMinimumWidth(220)
         self._context.setMaximumWidth(380)
         self._context.collapse_requested.connect(self._collapse_context)
+        self._context.language_refresh_requested.connect(self._viewer.refresh_active_language)
+        self._context.language_format_requested.connect(self._viewer.format_active_language)
+        self._context.language_fix_safe_requested.connect(self._viewer.fix_safe_active_language)
+        self._context.language_chat_file_requested.connect(
+            self._viewer.draft_active_language_file_question
+        )
+        self._context.language_quick_fix_requested.connect(self._viewer.show_active_language_actions)
+        self._context.language_chat_fix_requested.connect(self._viewer.draft_active_language_fix)
+        self._viewer.language_context_changed.connect(self._context.set_language_context)
 
         self._context_tab = QPushButton("R\nu\nn\n\nL\no\ng")
         self._context_tab.setToolTip("Show run log")
         self._context_tab.setFixedWidth(30)
         self._context_tab.setMinimumHeight(112)
-        self._context_tab.clicked.connect(self._expand_context)
+        self._context_tab.clicked.connect(lambda _checked=False: self._show_context_panel("run_log"))
+
+        self._language_context_tab = QPushButton("L\na\nn\ng\nu\na\ng\ne")
+        self._language_context_tab.setToolTip("Show language")
+        self._language_context_tab.setFixedWidth(30)
+        self._language_context_tab.setMinimumHeight(136)
+        self._language_context_tab.clicked.connect(
+            lambda _checked=False: self._show_context_panel("language")
+        )
 
         context_handle = QWidget()
         context_handle.setObjectName("contextHandle")
         context_handle_layout = QVBoxLayout(context_handle)
         context_handle_layout.setContentsMargins(0, 0, 0, 0)
-        context_handle_layout.setSpacing(0)
+        context_handle_layout.setSpacing(6)
         context_handle_layout.addStretch()
         context_handle_layout.addWidget(
             self._context_tab,
+            0,
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+        )
+        context_handle_layout.addWidget(
+            self._language_context_tab,
             0,
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
         )
@@ -128,15 +178,27 @@ class MainWindow(QMainWindow):
         self._workbench.setStretchFactor(0, 3)
         self._workbench.setStretchFactor(1, 2)
 
+        self._workspace_dashboard = WorkspaceDashboard(repo, defer_refresh=True)
+        self._workspace_dashboard.switch_requested.connect(self._switch_workspace)
+        self._workspace_dashboard.conversation_requested.connect(self._load_conversation)
+        self._workspace_dashboard.open_file_requested.connect(self._open_file)
+        self._workspace_dashboard.new_chat_requested.connect(self._new_conversation)
+        self._workspace_dashboard.file_search_requested.connect(self._open_file_search)
+        self._workspace_dashboard.text_search_requested.connect(self._open_text_search)
+
+        self._center_stack = QStackedWidget()
+        self._center_stack.addWidget(self._workbench)
+        self._center_stack.addWidget(self._workspace_dashboard)
+
         self._root_splitter = QSplitter(Qt.Orientation.Horizontal)
         self._root_splitter.addWidget(self._left)
-        self._root_splitter.addWidget(self._workbench)
+        self._root_splitter.addWidget(self._center_stack)
         self._root_splitter.addWidget(self._context_shell)
         self._root_splitter.setStretchFactor(0, 0)
         self._root_splitter.setStretchFactor(1, 1)
         self._root_splitter.setStretchFactor(2, 0)
 
-        self._left.selected.connect(self._chat.load_conversation)
+        self._left.selected.connect(self._load_conversation)
         self._left.new_chat.connect(self._new_conversation)
         self._left.renamed.connect(self._chat.update_title)
         self._left.deleted.connect(self._chat.on_conversation_deleted)
@@ -146,6 +208,8 @@ class MainWindow(QMainWindow):
         self._left.file_search_requested.connect(self._open_file_search)
         self._left.text_search_requested.connect(self._open_text_search)
         self._left.extensions_requested.connect(self._chat.show_extensions)
+        self._left.workspace_requested.connect(self._show_workspace_dashboard)
+        self._left.activity_selected.connect(self._on_activity_selected)
         self._left.activity_panel_collapsed_changed.connect(self._on_activity_panel_collapsed)
         self._chat.saved.connect(self._left.refresh)
         self._chat.conversation_created.connect(self._left.select_conversation)
@@ -153,7 +217,8 @@ class MainWindow(QMainWindow):
         self._chat.open_file.connect(self._open_file)
         self._chat.file_written.connect(self._left.mark_file_touched)
         self._chat.file_write_completed.connect(self._refresh_open_file)
-        self._chat.tool_activity.connect(self._context.add_tool_activity)
+        self._chat.run_log_activity.connect(self._context.add_tool_activity)
+        self._chat.conversation_changed.connect(self._context.set_current_conversation)
         self._left.settings_changed.connect(self._apply_appearance)
 
         self._setup_shortcuts()
@@ -161,6 +226,46 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._root_splitter)
         self._restore_layout(saved)
         self._apply_appearance()
+        self._context.set_language_context(self._viewer.active_language_context())
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._pending_default_activity_width:
+            self._apply_default_activity_width()
+        if self._first_paint_tasks_started:
+            return
+        self._first_paint_tasks_started = True
+        QTimer.singleShot(0, self._run_after_first_paint)
+
+    def _run_after_first_paint(self):
+        self._review_new_extensions()
+        if not self._pending_default_activity_width:
+            self._start_initial_git_status_refresh()
+            return
+        self._pending_default_activity_width = False
+        self._apply_default_activity_width()
+        self._start_initial_git_status_refresh()
+
+    def _start_initial_git_status_refresh(self):
+        if self._initial_git_status_thread is not None:
+            return
+        self._initial_git_status_thread = _InitialGitStatusThread(os.getcwd(), self)
+        self._initial_git_status_thread.loaded.connect(self._apply_initial_git_status)
+        self._initial_git_status_thread.finished.connect(self._clear_initial_git_status_thread)
+        self._initial_git_status_thread.start()
+
+    def _apply_initial_git_status(self, repo: str, changes: list):
+        if os.path.normcase(os.path.abspath(repo)) != os.path.normcase(os.getcwd()):
+            return
+        self._initial_git_changes = changes
+        self._left.apply_initial_git_changes(changes)
+
+    def _clear_initial_git_status_thread(self):
+        self._initial_git_status_thread = None
+
+    def _apply_default_activity_width(self):
+        if not self._left.is_activity_panel_collapsed():
+            self._set_activity_panel_width(DEFAULT_ACTIVITY_WIDTH)
 
     def _setup_shortcuts(self):
         ctx = Qt.ShortcutContext.WindowShortcut
@@ -188,8 +293,9 @@ class MainWindow(QMainWindow):
         self._shortcut_handles.append(stop)
 
         self._bind_shortcut_action("command_palette", self._open_command_palette, saved)
-        self._bind_shortcut_action("file_browser", self._left.focus_file_browser, saved)
+        self._bind_shortcut_action("file_browser", self._focus_file_browser, saved)
         self._bind_shortcut_action("file_search", self._open_file_search, saved)
+        self._bind_shortcut_action("reopen_closed_file", self._reopen_closed_file, saved)
         self._bind_shortcut_action("text_search", self._open_text_search, saved)
 
     def _bind_shortcut_action(self, action: str, callback, saved: dict):
@@ -205,7 +311,7 @@ class MainWindow(QMainWindow):
             store=self._chat.store,
             cwd=os.getcwd(),
             is_streaming=self._chat.is_streaming,
-            on_open_conversation=self._chat.load_conversation,
+            on_open_conversation=self._load_conversation,
             on_open_file=self._open_file,
             on_new_chat=self._new_conversation,
             on_export=self._chat.export_conversation,
@@ -215,6 +321,22 @@ class MainWindow(QMainWindow):
             on_set_model=self._chat.set_model,
         )
         CommandPalette(build_palette_items(ctx), parent=self).exec()
+
+    def _show_workbench(self):
+        self._center_stack.setCurrentWidget(self._workbench)
+
+    def _show_workspace_dashboard(self):
+        self._workspace_dashboard.refresh(git_changes=self._initial_git_changes)
+        self._center_stack.setCurrentWidget(self._workspace_dashboard)
+        self._collapse_context()
+
+    def _on_activity_selected(self, key: str):
+        if key != "workspace":
+            self._show_workbench()
+
+    def _focus_file_browser(self):
+        self._show_workbench()
+        self._left.focus_file_browser()
 
     def _open_file_search(self):
         FileSearchDialog(os.getcwd(), self._open_file, parent=self).exec()
@@ -227,12 +349,28 @@ class MainWindow(QMainWindow):
         ).exec()
 
     def _new_conversation(self):
+        self._show_workbench()
+        self._left.set_active_activity("chats")
         self._chat.new_conversation()
         self._left.clear_conversation_selection()
+
+    def _load_conversation(self, path: str):
+        self._show_workbench()
+        self._chat.load_conversation(path)
 
     def _close_viewer_tab(self):
         if self._viewer.isVisible():
             self._viewer.close_current_tab()
+
+    def _reopen_closed_file(self):
+        path = self._viewer.reopen_recent_closed_file(repo_root=os.getcwd())
+        if not path:
+            return
+        self._show_workbench()
+        self._left.reveal_file(path)
+        self._viewer.show()
+        total = max(1, self._workbench.width())
+        self._workbench.setSizes([total * 55 // 100, total * 45 // 100])
 
     def _stop_streaming_if_active(self):
         if self._chat.is_streaming():
@@ -246,10 +384,12 @@ class MainWindow(QMainWindow):
         self.resize(1360, 820)
 
         activity = saved.get("activity_sizes")
-        if activity and len(activity) == 3:
+        has_saved_activity = bool(activity and len(activity) == 3)
+        if has_saved_activity:
             self._root_splitter.setSizes(activity)
         else:
-            self._root_splitter.setSizes([320, 780, 260])
+            self._root_splitter.setSizes([DEFAULT_ACTIVITY_WIDTH, 700, 260])
+            self._pending_default_activity_width = True
 
         workbench = saved.get("workbench_sizes")
         if workbench and len(workbench) == 2:
@@ -265,6 +405,13 @@ class MainWindow(QMainWindow):
             self._collapse_context()
         else:
             self._expand_context()
+        if not has_saved_activity and not bool(saved.get("activity_collapsed", False)):
+            sizes = self._root_splitter.sizes()
+            if len(sizes) == 3:
+                total = max(1, sum(sizes))
+                right = 30 if self._is_context_collapsed() else min(300, max(240, total // 5))
+                left = min(DEFAULT_ACTIVITY_WIDTH, max(MIN_ACTIVITY_WIDTH, total - right - 1))
+                self._root_splitter.setSizes([left, max(1, total - left - right), right])
 
     def closeEvent(self, event):
         context_collapsed = self._is_context_collapsed()
@@ -295,9 +442,10 @@ class MainWindow(QMainWindow):
         self._chat.apply_appearance()
         self._viewer.apply_appearance()
         self._context.apply_appearance()
-        self._context_tab.setStyleSheet(
-            "QPushButton { padding:6px 0px; border-radius:0px; text-align:center; }"
-        )
+        self._workspace_dashboard.apply_appearance()
+        tab_style = "QPushButton { padding:6px 0px; border-radius:0px; text-align:center; }"
+        self._context_tab.setStyleSheet(tab_style)
+        self._language_context_tab.setStyleSheet(tab_style)
 
     def _open_file(
         self,
@@ -307,6 +455,7 @@ class MainWindow(QMainWindow):
         line_no: int | None = None,
         activate_files: bool = True,
     ):
+        self._show_workbench()
         self._viewer.open_file(
             path,
             repo_root=os.getcwd(),
@@ -325,6 +474,7 @@ class MainWindow(QMainWindow):
         self._left.reveal_file(path, activate=False)
 
     def _open_content(self, content: str, title: str):
+        self._show_workbench()
         self._viewer.open_content(content, title)
         self._viewer.show()
         total = max(1, self._workbench.width())
@@ -338,6 +488,85 @@ class MainWindow(QMainWindow):
 
     def _chat_draft_diagnostic_fix(self, text: str, file_refs: list[str]):
         self._chat.draft_diagnostic_fix(text, file_refs)
+
+    def _switch_workspace(self, path: str) -> bool:
+        target = os.path.abspath(os.path.expanduser(str(path or "").strip()))
+        if not target or not os.path.isdir(target):
+            QMessageBox.warning(self, "Workspace unavailable", "Choose an existing folder.")
+            return False
+
+        if os.path.normcase(target) == os.path.normcase(os.getcwd()):
+            self._workspace_dashboard.set_current_workspace(target)
+            self._show_workspace_dashboard()
+            return True
+
+        if not self._confirm_workspace_switch():
+            return False
+
+        if self._chat.is_streaming():
+            self._chat.stop_streaming()
+        get_process_manager().stop_workspace(os.getcwd())
+
+        store = ConversationStore(target)
+        self._viewer.close_all_tabs()
+        self._viewer.hide()
+
+        os.chdir(target)
+        self._chat.set_workspace(store, cwd=target)
+        self._left.set_workspace(target, store=store)
+        self._viewer.set_repo_root(target)
+        self._workspace_dashboard.set_current_workspace(target)
+        self._initial_git_changes = None
+        self._settings.update({"workspace_path": target})
+        self._left.clear_conversation_selection()
+        self._context.set_current_conversation("")
+        self._show_workspace_dashboard()
+        self._extension_review_prompt_shown = False
+        self._review_new_extensions()
+        return True
+
+    def _review_new_extensions(self):
+        if self._extension_review_prompt_shown:
+            return
+        self._extension_review_prompt_shown = True
+        summaries = disable_unreviewed_extensions(os.getcwd())
+        if not summaries:
+            return
+        count = len(summaries)
+        noun = "extension" if count == 1 else "extensions"
+        result = QMessageBox.question(
+            self,
+            "Review extensions?",
+            (
+                f"{count} new or changed {noun} found. They were disabled until "
+                "you review them. Enabled extensions run local Python code; "
+                "manifest permissions are AICHS-level controls, not an OS sandbox.\n\n"
+                "Open Extensions now?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if result == QMessageBox.StandardButton.Yes:
+            self._chat.show_extensions()
+
+    def _confirm_workspace_switch(self) -> bool:
+        has_stream = self._chat.is_streaming()
+        has_processes = bool(get_process_manager().status(workspace=os.getcwd()))
+        if not has_stream and not has_processes:
+            return True
+
+        result = QMessageBox.question(
+            self,
+            "Switch workspace?",
+            "Switching workspaces will stop active work in this workspace. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return result == QMessageBox.StandardButton.Yes
+
+    def _show_context_panel(self, panel: str):
+        self._context.set_active_panel(panel)
+        self._expand_context()
 
     def _collapse_context(self):
         self._context_stack.setCurrentIndex(1)
@@ -369,6 +598,20 @@ class MainWindow(QMainWindow):
     def _is_context_collapsed(self) -> bool:
         return self._context_stack.currentIndex() == 1
 
+    def _set_activity_panel_width(self, width: int):
+        sizes = self._root_splitter.sizes()
+        if len(sizes) != 3:
+            return
+        total = max(1, sum(sizes))
+        right_width = sizes[2]
+        available = max(1, total - right_width - 1)
+        left_width = min(max(width, MIN_ACTIVITY_WIDTH), available)
+        self._root_splitter.setSizes([
+            left_width,
+            max(1, total - left_width - right_width),
+            right_width,
+        ])
+
     def _prepare_splitters_for_close(self):
         self._context_stack.setCurrentIndex(0)
         self._context_shell.setMinimumWidth(0)
@@ -380,9 +623,11 @@ class MainWindow(QMainWindow):
             return
         total = max(1, sum(sizes))
         right_width = sizes[2]
-        left_width = 64 if collapsed else 320
+        if not collapsed:
+            self._set_activity_panel_width(DEFAULT_ACTIVITY_WIDTH)
+            return
         self._root_splitter.setSizes([
-            left_width,
-            max(1, total - left_width - right_width),
+            COLLAPSED_ACTIVITY_WIDTH,
+            max(1, total - COLLAPSED_ACTIVITY_WIDTH - right_width),
             right_width,
         ])

@@ -92,14 +92,17 @@ class CompletionItem:
 
 
 class CompletionProvider(Protocol):
-    def complete(self, *, path: str, content: str, position: int, prefix: str) -> list[CompletionItem]:
-        ...
+    def complete(
+        self, *, path: str, content: str, position: int, prefix: str
+    ) -> list[CompletionItem]: ...
 
 
 class LocalCompletionProvider:
     """Complete from visible document symbols and conservative language keywords."""
 
-    def complete(self, *, path: str, content: str, position: int, prefix: str) -> list[CompletionItem]:
+    def complete(
+        self, *, path: str, content: str, position: int, prefix: str
+    ) -> list[CompletionItem]:
         prefix = prefix.strip()
         if not prefix:
             return []
@@ -115,7 +118,9 @@ class LocalCompletionProvider:
                 continue
             candidates.setdefault(word, CompletionItem(word, word, "document"))
 
-        return sorted(candidates.values(), key=lambda item: (item.label.lower(), item.label))[:80]
+        return sorted(
+            candidates.values(), key=lambda item: (item.label.lower(), item.label)
+        )[:80]
 
 
 def prefix_at(content: str, position: int) -> str:

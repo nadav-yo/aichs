@@ -3,8 +3,6 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-import anthropic
-from openai import OpenAI
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from config import SYSTEM_PROMPT
@@ -74,6 +72,12 @@ def _compaction_settings() -> dict:
 
     raw = SettingsStore().load().get("compaction")
     return raw if isinstance(raw, dict) else {}
+
+
+def _prompt_settings() -> dict:
+    from storage.settings import SettingsStore
+
+    return SettingsStore().load()
 
 
 def configured_reserve_tokens() -> int | None:
@@ -237,7 +241,7 @@ def _call_model(model: str, prompt: str, max_tokens: int) -> str:
         kwargs["base_url"] = cfg.base_url
 
     if cfg.api == "anthropic":
-        client = anthropic.Anthropic(**kwargs)
+        client = _anthropic_client(**kwargs)
         request = {
             "model": model,
             "max_tokens": max_tokens,
@@ -248,7 +252,7 @@ def _call_model(model: str, prompt: str, max_tokens: int) -> str:
         resp = client.messages.create(**request)
         return resp.content[0].text
     else:
-        client = OpenAI(**kwargs)
+        client = _openai_client(**kwargs)
         request = {
             "model": model,
             "max_tokens": max_tokens,
@@ -260,6 +264,29 @@ def _call_model(model: str, prompt: str, max_tokens: int) -> str:
         apply_generation_params(request, cfg)
         resp = client.chat.completions.create(**request)
         return resp.choices[0].message.content
+
+
+def _anthropic_client(**kwargs):
+    import anthropic
+
+    return anthropic.Anthropic(**kwargs)
+
+
+def _openai_client(**kwargs):
+    from openai import OpenAI
+
+    return OpenAI(**kwargs)
+
+
+def _summary_prompt(transcript: str) -> str:
+    from storage.settings import compaction_summary_guidance
+
+    parts = [SUMMARY_PROMPT]
+    guidance = compaction_summary_guidance(_prompt_settings())
+    if guidance:
+        parts.extend(["Additional user guidance:", guidance])
+    parts.extend(["---", transcript])
+    return "\n\n".join(parts)
 
 
 def compact_with_result(
@@ -289,7 +316,7 @@ def compact_with_result(
         f"{m['role'].upper()}: {content_preview(m['content'])}" for m in to_summarize
     )
     window = context_window_tokens(model)
-    prompt = continuation_prompt(transcript) if ledger else f"{SUMMARY_PROMPT}\n\n---\n{transcript}"
+    prompt = continuation_prompt(transcript) if ledger else _summary_prompt(transcript)
     summary = _call_model(
         model,
         prompt,

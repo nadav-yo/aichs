@@ -14,6 +14,7 @@ from ui import theme
         (theme.send_button_style, ()),
         (theme.stop_button_style, ()),
         (theme.floating_button_style, ()),
+        (theme.primary_button_style, ()),
         (theme.new_chat_button_style, ()),
         (theme.icon_button_style, (28,)),
         (theme.sidebar_section_label_style, ()),
@@ -43,3 +44,10 @@ def test_app_and_mono_font(qapp):
     assert font.pointSize() > 0
     mono = theme.mono_font(12)
     assert mono.family()
+
+
+def test_primary_button_style_has_hover_and_pressed(qapp):
+    css = theme.primary_button_style(selector="QPushButton#primary")
+    assert "QPushButton#primary:hover" in css
+    assert theme.ACCENT_HOVER in css
+    assert "QPushButton#primary:pressed" in css

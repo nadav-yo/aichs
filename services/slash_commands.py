@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from services.tool_registry import extension_command, extension_commands
+from storage.settings import DEFAULT_ARCHIVIST_PROMPT, SettingsStore, archivist_prompt
 
 
 @dataclass(frozen=True)
@@ -16,24 +17,23 @@ class SlashCommand:
     capabilities: list[str] | None = None
 
 
-_ARCHIVIST_PROMPT = (
-    "Act as Archivist for this turn. Focus on saved chat memory, durable decisions, "
-    "open threads, and context worth carrying forward. Use read_project_chat for exact "
-    "dropped chat references and search_project_chats for fuzzy memory lookup. Keep the "
-    "answer concise and cite conversation titles or ids when useful."
-)
+_ARCHIVIST_PROMPT = DEFAULT_ARCHIVIST_PROMPT
 
 
-BUILTIN_COMMANDS: list[SlashCommand] = [
-    SlashCommand("compact", "Summarize older messages to free context", executable=True),
-    SlashCommand("reload", "Reload skills and extensions", executable=True),
-    SlashCommand(
-        "archivist",
-        "Use saved chat memory and exact dropped chat references",
-        prompt=_ARCHIVIST_PROMPT,
-        tools=["search_project_chats", "read_project_chat"],
-    ),
-]
+def _builtin_commands() -> list[SlashCommand]:
+    return [
+        SlashCommand("compact", "Summarize older messages to free context", executable=True),
+        SlashCommand("reload", "Reload skills and extensions", executable=True),
+        SlashCommand(
+            "archivist",
+            "Use saved chat memory and exact dropped chat references",
+            prompt=archivist_prompt(SettingsStore().load()),
+            tools=["search_project_chats", "read_project_chat"],
+        ),
+    ]
+
+
+BUILTIN_COMMANDS: list[SlashCommand] = _builtin_commands()
 
 
 def parse_builtin_command(text: str) -> str | None:
@@ -43,7 +43,7 @@ def parse_builtin_command(text: str) -> str | None:
     name = t[1:].split()[0] if len(t) > 1 else ""
     if not name:
         return None
-    for cmd in BUILTIN_COMMANDS:
+    for cmd in _builtin_commands():
         if cmd.name == name and cmd.executable:
             return cmd.name
     return None
@@ -56,14 +56,14 @@ def parse_builtin_prompt_command(text: str) -> SlashCommand | None:
     name = t[1:].split()[0] if len(t) > 1 else ""
     if not name:
         return None
-    for cmd in BUILTIN_COMMANDS:
+    for cmd in _builtin_commands():
         if cmd.name == name and not cmd.executable:
             return cmd
     return None
 
 
 def load_all_commands(cwd: str | None = None) -> list[SlashCommand]:
-    commands = list(BUILTIN_COMMANDS)
+    commands = _builtin_commands()
     commands.extend(
         SlashCommand(
             name=cmd.name,

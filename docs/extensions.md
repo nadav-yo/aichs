@@ -21,8 +21,8 @@ turns also reload extension files automatically.
 You can also open the Extensions dialog, use the reload button next to the
 title, or toggle an extension file between Loaded and Disabled. Disabled
 extensions stay visible in the dialog but do not register tools, commands,
-hooks, context, badges, or panels. The per-workspace disabled list is stored in
-`.aichs/extensions.disabled.json`.
+hooks, context, badges, or panels. Disabled-extension state is stored with user
+app data under `~/.aichs/project/`, outside the workspace tree.
 
 ## Installing From Git
 
@@ -87,6 +87,38 @@ is disabled or fails to load. Core records missing requirements on the extension
 summary so installers, future registries, and UI surfaces can explain degraded
 language support without executing extension code.
 
+Folder manifests should declare extension permissions:
+
+```json
+{
+  "permissions": {
+    "tools": true,
+    "commands": false,
+    "context": true,
+    "hooks": false,
+    "ui": false,
+    "language": false,
+    "processes": false,
+    "network": false,
+    "workspace_read": false,
+    "workspace_write": false,
+    "extension_storage": true
+  }
+}
+```
+
+These permissions are a disclosure and app-level contribution contract. Core
+blocks undeclared registry contributions such as tools, commands, context,
+hooks, UI, language features, and process-control commands. They are not an
+operating-system sandbox: enabled extensions still run local Python code in the
+AICHS process, and workspace/network declarations are shown as risk disclosures.
+Imported, new, or changed extensions are disabled until reviewed.
+
+Disabled-extension state and review acknowledgements are app-owned user state
+stored under `~/.aichs/project/`, not in the workspace `.aichs/` folder. The
+review record is for visibility and prompting only; it is not a cryptographic
+trust root or a tamper-proof security boundary.
+
 `registry.metadata(...)` is used when the extension is loaded. If there is no
 manifest description, the module-level `EXTENSION_DESCRIPTION` constant,
 `EXTENSION = {"description": "..."}`, or the module docstring is used as a safe
@@ -131,6 +163,9 @@ def hello(ctx, inputs):
 | `ctx.storage.save_config(data, scope)` | Save project/global extension JSON config |
 | `ctx.storage.load_state(name)` | Load project-scoped extension JSON state |
 | `ctx.storage.save_state(data, name)` | Save project-scoped extension JSON state |
+| `ctx.storage.artifact_path(name)` | Return a project-scoped artifact path |
+| `ctx.storage.save_artifact(name, content)` | Save UTF-8 text under project extension state |
+| `ctx.storage.load_artifact(name, max_chars)` | Load a saved UTF-8 text artifact |
 | `inputs` | The model-provided JSON arguments |
 
 `approval="once"` asks the user before the tool is first used in a conversation.
@@ -196,6 +231,9 @@ Executable command context:
 | `ctx.storage.save_config(data, scope)` | Save project/global extension JSON config |
 | `ctx.storage.load_state(name)` | Load project conversation-scoped JSON state |
 | `ctx.storage.save_state(data, name)` | Save project conversation-scoped JSON state |
+| `ctx.storage.artifact_path(name)` | Return a project-scoped artifact path |
+| `ctx.storage.save_artifact(name, content)` | Save UTF-8 text under project extension state |
+| `ctx.storage.load_artifact(name, max_chars)` | Load a saved UTF-8 text artifact |
 | `ctx.runtime.notice(text)` | Show a center notice |
 | `ctx.runtime.send(text)` | Send now, or queue if a run is active |
 | `ctx.runtime.enqueue(text)` | Queue a normal chat message |
@@ -255,6 +293,29 @@ def after_tool_result(ctx):
         ctx.output = ctx.output[:12000] + "\n\n[trimmed by extension]"
 ```
 
+Hook handlers receive:
+
+| Field/API | Description |
+|---|---|
+| `ctx.cwd` | Current workspace path |
+| `ctx.model` | Selected model id |
+| `ctx.system` | Current system prompt text |
+| `ctx.history` | Current runtime history |
+| `ctx.tool_name` | Tool name for tool hooks |
+| `ctx.inputs` | Tool inputs for tool hooks |
+| `ctx.output` | Tool result or turn output, depending on event |
+| `ctx.status` | `ok`, `error`, or `cancelled` |
+| `ctx.error` | Error text for blocking/failure hooks |
+| `ctx.process` | Process event data for process hooks |
+| `ctx.extension_id` | Safe id derived from the extension filename |
+| `ctx.storage.load_config(scope)` | Load project/global extension JSON config |
+| `ctx.storage.save_config(data, scope)` | Save project/global extension JSON config |
+| `ctx.storage.load_state(name)` | Load project-scoped extension JSON state |
+| `ctx.storage.save_state(data, name)` | Save project-scoped extension JSON state |
+| `ctx.storage.artifact_path(name)` | Return a project-scoped artifact path |
+| `ctx.storage.save_artifact(name, content)` | Save UTF-8 text under project extension state |
+| `ctx.storage.load_artifact(name, max_chars)` | Load a saved UTF-8 text artifact |
+
 Supported hook names:
 
 | Hook | When it runs |
@@ -263,7 +324,64 @@ Supported hook names:
 | `before_model_request` | Before each model request |
 | `before_tool_call` | Before a tool is approved/executed |
 | `after_tool_result` | After a tool returns, before the model sees output |
+| `before_next_model_request` | After tool results are recorded, before the next provider request |
 | `turn_done` | After the turn finishes, errors, or is cancelled |
+
+## Working Notes and Large Outputs
+
+Use JSON state for compact handoff data and artifacts for bulky text. Artifacts
+are stored under `.aichs/state/<extension-id>/artifacts/` with sanitized file
+names, so an extension does not need to hand-roll project paths.
+
+```python
+def register(registry):
+    registry.tool(
+        name="save_handoff",
+        description="Persist a compact continuation handoff.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "next": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["summary"],
+        },
+        execute=save_handoff,
+    )
+    registry.context("Current handoff", current_handoff)
+    registry.hook("after_tool_result", spool_large_output)
+
+
+def save_handoff(ctx, inputs):
+    ctx.storage.save_state({
+        "summary": inputs["summary"],
+        "next": inputs.get("next", []),
+    }, name="handoff")
+    return "Handoff saved."
+
+
+def current_handoff(ctx):
+    handoff = ctx.storage.load_state("handoff")
+    if not handoff:
+        return ""
+    return f"Handoff: {handoff.get('summary', '')}"
+
+
+def spool_large_output(ctx):
+    if len(ctx.output) <= 12000:
+        return
+    path = ctx.storage.save_artifact(f"{ctx.tool_name}-latest.txt", ctx.output)
+    ctx.output = (
+        f"[large output saved]\n"
+        f"Tool: {ctx.tool_name}\n"
+        f"Path: {path}\n"
+        f"Preview:\n{ctx.output[:2000]}"
+    )
+```
+
+Store explicit working state: decisions, findings, next steps, blockers, and
+paths to large outputs. Do not store hidden reasoning, secrets, or raw
+transcripts by default.
 
 ## Runtime Extensions
 
@@ -289,6 +407,7 @@ The current runtime-extension surface covers the main control-flow gap:
 | Core compaction/resume | `compact_now` and `compact_and_resume` directives are app-owned |
 | Compaction proof | `compact_with_result()` returns status, cut index, proof metadata, and optional artifact |
 | Structured handoff | `aicc-continuation/v1` ledger validation is available for continuation compaction |
+| Handoff/artifact storage | Hooks, tools, commands, and context providers share `ctx.storage` |
 | Capabilities | Runtime-control commands declare visible capabilities |
 
 ### Hook Directives
@@ -422,6 +541,9 @@ Language providers receive:
 | `ctx.storage.save_config(data, scope)` | Save project/global extension JSON config. |
 | `ctx.storage.load_state(name)` | Load project-scoped extension JSON state. |
 | `ctx.storage.save_state(data, name)` | Save project-scoped extension JSON state. |
+| `ctx.storage.artifact_path(name)` | Return a project-scoped artifact path. |
+| `ctx.storage.save_artifact(name, content)` | Save UTF-8 text under project extension state. |
+| `ctx.storage.load_artifact(name, max_chars)` | Load a saved UTF-8 text artifact. |
 
 Diagnostic fields:
 

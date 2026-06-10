@@ -8,6 +8,7 @@ from services.slash_commands import (
     parse_extension_command,
     slash_invocation,
 )
+from storage.settings import ARCHIVIST_PROMPT_KEY, SettingsStore
 
 
 def test_builtin_names():
@@ -38,6 +39,16 @@ def test_parse_builtin_prompt_command():
     assert cmd.name == "archivist"
     assert cmd.tools == ["search_project_chats", "read_project_chat"]
     assert parse_builtin_prompt_command("/compact") is None
+
+
+def test_archivist_prompt_uses_settings_without_changing_tools():
+    SettingsStore().save({ARCHIVIST_PROMPT_KEY: "Search the durable project memory."})
+
+    cmd = parse_builtin_prompt_command("/archivist what did we decide?")
+
+    assert cmd is not None
+    assert cmd.prompt == "Search the durable project memory."
+    assert cmd.tools == ["search_project_chats", "read_project_chat"]
 
 
 @pytest.mark.parametrize(

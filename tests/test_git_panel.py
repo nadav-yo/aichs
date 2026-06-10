@@ -1,5 +1,3 @@
-import subprocess
-
 from PyQt6.QtWidgets import QMenu
 
 from services.git_status import GitCommandResult
@@ -96,29 +94,51 @@ def test_git_panel_passes_current_model_getter_to_changes(qapp, workspace):
     assert panel._changes._current_model_getter() == "model-a"
 
 
-def test_git_log_marks_origin_ref(qapp, git_repo, tmp_path):
-    remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
-    branch = subprocess.run(
-        ["git", "branch", "--show-current"],
-        cwd=git_repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=git_repo, check=True)
-    subprocess.run(["git", "push", "-u", "origin", branch], cwd=git_repo, check=True)
+def test_git_log_skips_git_command_outside_repo(qapp, workspace, monkeypatch):
+    import ui.widgets.git_panel as git_panel
 
-    panel = GitPanel(str(git_repo))
+    calls = []
+    monkeypatch.setattr(git_panel, "is_git_repo", lambda _path: False)
+    monkeypatch.setattr(git_panel, "run_git", lambda *_args: calls.append(_args) or "")
+
+    panel = GitPanel(str(workspace))
+
+    assert panel.log.count() == 0
+    assert calls == []
+
+
+def test_git_log_marks_origin_ref(qapp, workspace, monkeypatch):
+    import ui.widgets.git_panel as git_panel
+
+    monkeypatch.setattr(git_panel, "is_git_repo", lambda _path: True)
+    monkeypatch.setattr(git_panel, "count_commits_to_pull", lambda _path: 0)
+    monkeypatch.setattr(git_panel, "count_commits_to_push", lambda _path: 0)
+    monkeypatch.setattr(
+        git_panel,
+        "run_git",
+        lambda _cmd, _path: "abcdef123456\x1fabcdef1\x1fHEAD -> main, origin/main\x1finitial",
+    )
+
+    panel = GitPanel(str(workspace))
     item = panel.log.item(0)
 
     assert ("HEAD", "head") in item.data(_ROLE_REF_BADGES)
-    assert (f"origin/{branch}", "origin") in item.data(_ROLE_REF_BADGES)
-    assert f"origin/{branch}" in item.toolTip()
+    assert ("origin/main", "origin") in item.data(_ROLE_REF_BADGES)
+    assert "origin/main" in item.toolTip()
 
 
-def test_git_log_context_menu_offers_copy_actions(qapp, git_repo, monkeypatch):
-    panel = GitPanel(str(git_repo))
+def test_git_log_context_menu_offers_copy_actions(qapp, workspace, monkeypatch):
+    import ui.widgets.git_panel as git_panel
+
+    monkeypatch.setattr(git_panel, "is_git_repo", lambda _path: True)
+    monkeypatch.setattr(git_panel, "count_commits_to_pull", lambda _path: 0)
+    monkeypatch.setattr(git_panel, "count_commits_to_push", lambda _path: 0)
+    monkeypatch.setattr(
+        git_panel,
+        "run_git",
+        lambda _cmd, _path: "abcdef123456\x1fabcdef1\x1finitial",
+    )
+    panel = GitPanel(str(workspace))
     item = panel.log.item(0)
     panel.log.setCurrentItem(item)
     monkeypatch.setattr(panel.log, "itemAt", lambda _pos: item)
@@ -135,8 +155,18 @@ def test_git_log_context_menu_offers_copy_actions(qapp, git_repo, monkeypatch):
     assert action_texts == ["Copy commit message", "Copy commit hash"]
 
 
-def test_git_log_copy_helpers_copy_commit_message_and_hash(qapp, git_repo):
-    panel = GitPanel(str(git_repo))
+def test_git_log_copy_helpers_copy_commit_message_and_hash(qapp, workspace, monkeypatch):
+    import ui.widgets.git_panel as git_panel
+
+    monkeypatch.setattr(git_panel, "is_git_repo", lambda _path: True)
+    monkeypatch.setattr(git_panel, "count_commits_to_pull", lambda _path: 0)
+    monkeypatch.setattr(git_panel, "count_commits_to_push", lambda _path: 0)
+    monkeypatch.setattr(
+        git_panel,
+        "run_git",
+        lambda _cmd, _path: "abcdef123456\x1fabcdef1\x1finitial",
+    )
+    panel = GitPanel(str(workspace))
     item = panel.log.item(0)
     qapp.clipboard().clear()
 

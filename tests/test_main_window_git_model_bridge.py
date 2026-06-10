@@ -1,13 +1,31 @@
 import os
 
+import pytest
 from PyQt6.QtCore import QThreadPool, Qt
+from PyQt6.QtWidgets import QMessageBox
 
-from ui.main_window import MainWindow
+from storage.repository import ConversationStore, register_workspace
+from ui.main_window import DEFAULT_ACTIVITY_WIDTH, MAX_ACTIVITY_WIDTH, MIN_ACTIVITY_WIDTH, MainWindow
+from ui.widgets.workspace_dashboard import WorkspaceDashboard
 
 
 def _settle_file_viewer_workers(qapp):
+    qapp.processEvents()
     QThreadPool.globalInstance().waitForDone(1500)
     qapp.processEvents()
+
+
+@pytest.fixture
+def quiet_file_language(monkeypatch):
+    monkeypatch.setattr(
+        "ui.widgets.file_viewer._TextFileTab._refresh_diagnostics",
+        lambda self, delay_ms=None: None,
+    )
+
+
+@pytest.fixture(autouse=True)
+def fast_app_theme(monkeypatch):
+    monkeypatch.setattr("ui.main_window.apply_app_theme", lambda *_args, **_kwargs: None)
 
 
 def test_main_window_wires_current_chat_model_to_git_changes(qapp, workspace):
@@ -27,7 +45,54 @@ def test_main_window_wires_current_chat_model_to_git_changes(qapp, workspace):
         qapp.setStyleSheet(app_style)
 
 
-def test_main_window_reveals_opened_file_in_left_panel(qapp, workspace):
+def test_main_window_constructor_defers_git_status_refresh(qapp, workspace, monkeypatch):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+
+    def fail_list_file_changes(_repo_path):
+        raise AssertionError("startup should not synchronously load git status")
+
+    monkeypatch.setattr("ui.main_window.list_file_changes", fail_list_file_changes)
+    monkeypatch.setattr("ui.widgets.left_panel.list_file_changes", fail_list_file_changes)
+    monkeypatch.setattr("ui.widgets.git_changes_list.list_file_changes", fail_list_file_changes)
+    monkeypatch.setattr("ui.widgets.workspace_dashboard.list_file_changes", fail_list_file_changes)
+
+    window = MainWindow(startup_workspace=str(workspace))
+    try:
+        assert window._initial_git_changes is None
+        assert window._left._file_tree.topLevelItemCount() > 0
+        assert window._left._git.log.count() == 0
+        assert window._workspace_dashboard._git_status.text() == "Git pending"
+    finally:
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
+def test_main_window_uses_wider_default_activity_panel(qapp, workspace):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    window = MainWindow(startup_workspace=str(workspace))
+    try:
+        assert window._left.minimumWidth() == MIN_ACTIVITY_WIDTH
+        assert window._left.maximumWidth() == MAX_ACTIVITY_WIDTH
+        window._root_splitter.resize(1360, 820)
+        window._root_splitter.setSizes([MIN_ACTIVITY_WIDTH, 1050, 30])
+        window._apply_default_activity_width()
+        assert window._root_splitter.sizes()[0] >= DEFAULT_ACTIVITY_WIDTH - 8
+    finally:
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
+def test_main_window_reveals_opened_file_in_left_panel(
+    qapp, workspace, quiet_file_language
+):
     cwd = os.getcwd()
     app_style = qapp.styleSheet()
     app_font = qapp.font()
@@ -50,7 +115,9 @@ def test_main_window_reveals_opened_file_in_left_panel(qapp, workspace):
         qapp.setStyleSheet(app_style)
 
 
-def test_main_window_git_open_reveals_file_without_switching_left_tab(qapp, workspace):
+def test_main_window_git_open_reveals_file_without_switching_left_tab(
+    qapp, workspace, quiet_file_language
+):
     cwd = os.getcwd()
     app_style = qapp.styleSheet()
     app_font = qapp.font()
@@ -73,7 +140,9 @@ def test_main_window_git_open_reveals_file_without_switching_left_tab(qapp, work
         qapp.setStyleSheet(app_style)
 
 
-def test_main_window_viewer_tab_change_reveals_file_in_left_panel(qapp, workspace):
+def test_main_window_viewer_tab_change_reveals_file_in_left_panel(
+    qapp, workspace, quiet_file_language
+):
     cwd = os.getcwd()
     app_style = qapp.styleSheet()
     app_font = qapp.font()
@@ -98,7 +167,9 @@ def test_main_window_viewer_tab_change_reveals_file_in_left_panel(qapp, workspac
         qapp.setStyleSheet(app_style)
 
 
-def test_main_window_close_last_file_hides_viewer_not_chat(qapp, workspace):
+def test_main_window_close_last_file_hides_viewer_not_chat(
+    qapp, workspace, quiet_file_language
+):
     cwd = os.getcwd()
     app_style = qapp.styleSheet()
     app_font = qapp.font()
@@ -154,6 +225,40 @@ def test_main_window_left_rail_search_and_extensions_actions(qapp, workspace):
         qapp.setStyleSheet(app_style)
 
 
+def test_main_window_startup_disables_new_extensions_for_review(qapp, workspace, monkeypatch):
+    from services.tool_registry import is_extension_disabled, is_extension_seen
+
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    ext_dir = workspace / ".aichs" / "extensions"
+    ext_dir.mkdir(parents=True)
+    ext = ext_dir / "startup.py"
+    ext.write_text("def register(registry): pass\n", encoding="utf-8")
+    prompts = []
+    monkeypatch.setattr(
+        "ui.main_window.QMessageBox.question",
+        lambda *args, **kwargs: prompts.append(args) or QMessageBox.StandardButton.No,
+    )
+    window = MainWindow(startup_workspace=str(workspace))
+    try:
+        window.show()
+        qapp.processEvents()
+
+        assert prompts
+        assert is_extension_disabled(ext, str(workspace))
+        assert is_extension_seen(ext, str(workspace))
+
+        prompts.clear()
+        window._review_new_extensions()
+        assert prompts == []
+    finally:
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
 def test_main_window_left_rail_clicks_toggle_activity_drawer(qapp, workspace):
     cwd = os.getcwd()
     app_style = qapp.styleSheet()
@@ -193,6 +298,207 @@ def test_main_window_left_rail_clicks_toggle_activity_drawer(qapp, workspace):
         qapp.setStyleSheet(app_style)
 
 
+def test_main_window_workspace_rail_shows_dashboard(qapp, workspace):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    window = MainWindow(startup_workspace=str(workspace))
+    try:
+        assert window._center_stack.currentWidget() is window._workbench
+
+        window._left._activity_buttons["workspace"].click()
+
+        assert window._left.active_activity() == "workspace"
+        assert window._left._activity_buttons["workspace"].text() == "Work"
+        assert window._left._activity_buttons["workspace"].toolTip() == "Workspace"
+        assert window._left.is_activity_panel_collapsed()
+        assert window._center_stack.currentWidget() is window._workspace_dashboard
+        dashboard_style = window._workspace_dashboard.styleSheet()
+        assert "}}" not in dashboard_style
+        assert "QWidget {" not in dashboard_style
+        assert "QLabel { background:transparent; }" in dashboard_style
+        assert "QPushButton#workspaceOpenFolder:hover" in dashboard_style
+        assert window._is_context_collapsed()
+
+        window._left._activity_buttons["files"].click()
+
+        assert window._center_stack.currentWidget() is window._workbench
+        assert window._left.active_activity() == "files"
+    finally:
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
+def test_workspace_dashboard_shows_home_context(qapp, workspace):
+    (workspace / "README.md").write_text("# Project Readme\n\nUseful context.\n", encoding="utf-8")
+    (workspace / "AGENTS.md").write_text("Always run the tests.\n", encoding="utf-8")
+    skills_dir = workspace / ".aichs" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "review.md").write_text(
+        "---\nname: review\ndescription: Review code\n---\nReview carefully.\n",
+        encoding="utf-8",
+    )
+    ext_dir = workspace / ".aichs" / "extensions"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "demo.py").write_text("def register(registry):\n    pass\n", encoding="utf-8")
+    store = ConversationStore(str(workspace))
+    path = store.save(
+        "dash-chat",
+        {
+            "id": "dash-chat",
+            "title": "Dashboard chat",
+            "updated_at": "2026-02-03T04:05:00",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    dashboard = WorkspaceDashboard(str(workspace))
+    try:
+        qapp.processEvents()
+
+        assert "Project Readme" in dashboard._readme_preview.toPlainText()
+        assert "Always run the tests." in dashboard._instructions_preview.text()
+        assert dashboard._agents_status.text() == "AGENTS.md"
+        assert dashboard._skills_status.text() == "1 skill"
+        assert dashboard._extensions_status.text() == "1 extension"
+        assert dashboard._recent_chats.item(0).text().startswith("Dashboard chat")
+        assert dashboard._recent_chats.item(0).toolTip() == str(path)
+    finally:
+        dashboard.close()
+
+
+def test_workspace_dashboard_actions(qapp, workspace):
+    readme = workspace / "README.md"
+    readme.write_text("# Readme\n", encoding="utf-8")
+    dashboard = WorkspaceDashboard(str(workspace))
+    calls = []
+    try:
+        dashboard.open_file_requested.connect(lambda path: calls.append(("open", path)))
+        dashboard.new_chat_requested.connect(lambda: calls.append(("new", "")))
+        dashboard.file_search_requested.connect(lambda: calls.append(("file-search", "")))
+        dashboard.text_search_requested.connect(lambda: calls.append(("text-search", "")))
+
+        dashboard._open_readme_btn.click()
+        dashboard._new_chat_btn.click()
+        dashboard._file_search_btn.click()
+        dashboard._text_search_btn.click()
+
+        assert ("open", str(readme)) in calls
+        assert ("new", "") in calls
+        assert ("file-search", "") in calls
+        assert ("text-search", "") in calls
+    finally:
+        dashboard.close()
+
+
+def test_main_window_recent_workspace_switch_retargets_panels(qapp, workspace, tmp_path):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "notes.txt").write_text("other\n", encoding="utf-8")
+    register_workspace(other)
+    window = MainWindow(startup_workspace=str(workspace))
+    try:
+        window._left._activity_buttons["workspace"].click()
+        item = window._workspace_dashboard._recent.item(0)
+
+        window._workspace_dashboard._recent.itemClicked.emit(item)
+        qapp.processEvents()
+
+        assert os.getcwd() == str(other.resolve())
+        assert window._chat.cwd == str(other.resolve())
+        assert window._left._file_tree.root_path == str(other.resolve())
+        assert window._left._git.repo_path == str(other.resolve())
+        assert window._chat.store.workspace == other.resolve()
+        assert window._left._conv.store is window._chat.store
+        assert window._center_stack.currentWidget() is window._workspace_dashboard
+    finally:
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
+def test_main_window_workspace_open_folder_switches(qapp, workspace, tmp_path, monkeypatch):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    other = tmp_path / "folder-choice"
+    other.mkdir()
+    monkeypatch.setattr(
+        "ui.widgets.workspace_dashboard.QFileDialog.getExistingDirectory",
+        lambda *_args, **_kwargs: str(other),
+    )
+    window = MainWindow(startup_workspace=str(workspace))
+    try:
+        window._left._activity_buttons["workspace"].click()
+
+        window._workspace_dashboard._open_btn.click()
+        qapp.processEvents()
+
+        assert os.getcwd() == str(other.resolve())
+        assert window._chat.cwd == str(other.resolve())
+        assert window._settings.load()["workspace_path"] == str(other.resolve())
+    finally:
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
+def test_workspace_dashboard_missing_recent_workspace_is_disabled(qapp, workspace, tmp_path):
+    cwd = os.getcwd()
+    missing = tmp_path / "missing"
+    register_workspace(missing)
+    dashboard = WorkspaceDashboard(str(workspace))
+    calls = []
+    try:
+        dashboard.switch_requested.connect(calls.append)
+        item = dashboard._recent.item(0)
+
+        assert "Missing folder" in item.text()
+        assert not item.flags() & Qt.ItemFlag.ItemIsEnabled
+        dashboard._recent.itemClicked.emit(item)
+
+        assert calls == []
+        assert os.getcwd() == cwd
+    finally:
+        dashboard.close()
+        os.chdir(cwd)
+
+
+def test_main_window_workspace_switch_cancelled_while_streaming(
+    qapp, workspace, tmp_path, monkeypatch
+):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    other = tmp_path / "other"
+    other.mkdir()
+    window = MainWindow(startup_workspace=str(workspace))
+    stopped = []
+    try:
+        window._chat.is_streaming = lambda: True
+        window._chat.stop_streaming = lambda: stopped.append(True)
+        monkeypatch.setattr(
+            "ui.main_window.QMessageBox.question",
+            lambda *_args, **_kwargs: QMessageBox.StandardButton.No,
+        )
+
+        assert window._switch_workspace(str(other)) is False
+
+        assert os.getcwd() == str(workspace.resolve())
+        assert stopped == []
+    finally:
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
 def test_main_window_activity_shelf_tracks_tool_activity(qapp, workspace):
     cwd = os.getcwd()
     app_style = qapp.styleSheet()
@@ -200,12 +506,14 @@ def test_main_window_activity_shelf_tracks_tool_activity(qapp, workspace):
     window = MainWindow(startup_workspace=str(workspace))
     try:
         assert window._is_context_collapsed()
-        assert window._context._tool_activity.item(0).text() == "No run log yet"
+        assert window._context._tool_activity.item(0).text() == "No run log for this chat"
         assert window._context._copy_btn.isEnabled() is False
         assert window._context._copy_details_btn.isEnabled() is False
         assert window._context._clear_btn.isEnabled() is False
 
-        window._chat.tool_activity.emit("Reading file 'src/main.py'")
+        window._chat.conversation_changed.emit("chat-1")
+        window._chat.run_log_activity.emit("Reading file 'src/main.py'", "chat-1")
+        window._chat.run_log_activity.emit("Running command: pytest -q", "chat-2")
 
         assert window._context._tool_activity.count() == 1
         item = window._context._tool_activity.item(0)
@@ -226,14 +534,181 @@ def test_main_window_activity_shelf_tracks_tool_activity(qapp, workspace):
         details = qapp.clipboard().text()
         assert "Type: Read file" in details
         assert "Target: src/main.py" in details
+        assert "Conversation: chat-1" in details
         assert "Original:\nReading file 'src/main.py'" in details
+
+        window._context._scope_combo.setCurrentIndex(1)
+
+        assert window._context._tool_activity.count() == 2
+        assert window._context._tool_activity.item(0).text() == "Run command - pytest -q"
+        assert window._context._tool_activity.item(1).text() == "Read file - src/main.py"
+
+        window._context._scope_combo.setCurrentIndex(0)
 
         window._context.clear_activity()
 
-        assert window._context._tool_activity.item(0).text() == "No run log yet"
+        assert window._context._tool_activity.item(0).text() == "No run log for this chat"
         assert window._context._copy_btn.isEnabled() is False
         assert window._context._copy_details_btn.isEnabled() is False
+        assert window._context._clear_btn.isEnabled() is True
+
+        window._context._scope_combo.setCurrentIndex(1)
+
+        assert window._context._tool_activity.count() == 1
+        assert window._context._tool_activity.item(0).text() == "Run command - pytest -q"
     finally:
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
+def test_main_window_language_section_tracks_supported_active_file(qapp, workspace):
+    from tests.conftest import write_extension
+
+    write_extension(
+        workspace,
+        "python_lang.py",
+        '''
+        def diagnose(ctx):
+            return [{
+                "line": 1,
+                "column": 0,
+                "severity": "warning",
+                "message": "demo warning",
+                "source": "demo",
+                "code": "W1",
+            }]
+
+        def actions(ctx):
+            return [{
+                "id": "fix-demo",
+                "title": "Fix demo warning",
+                "safe": True,
+            }]
+
+        def apply(ctx):
+            if ctx.action_id == "fix-demo":
+                return {
+                    "content": "print('fixed')\\n",
+                    "message": "Applied demo fix.",
+                }
+            return {}
+
+        def format_doc(ctx):
+            return {
+                "content": "print('formatted')\\n",
+                "message": "Formatted.",
+            }
+
+        def register(registry):
+            registry.language(
+                name="python",
+                file_patterns=["*.py"],
+                diagnostics=diagnose,
+                code_actions=actions,
+                apply_code_action=apply,
+                format_document=format_doc,
+            )
+        ''',
+    )
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    window = MainWindow(startup_workspace=str(workspace))
+    opened = workspace / "src" / "main.py"
+    unsupported = workspace / "notes.txt"
+    unsupported.write_text("notes\n", encoding="utf-8")
+    drafted = []
+    try:
+        assert not window._language_context_tab.isHidden()
+        window._language_context_tab.click()
+
+        assert window._context._active_panel == "language"
+        assert window._context._language_type.text() == "No language"
+        assert window._context._language_file.text() == "No supported file"
+        assert window._context._language_summary.text() == "Open a file with registered language support."
+
+        window._viewer.diagnostic_fix_requested.connect(
+            lambda text, refs: drafted.append((text, refs))
+        )
+        window._open_file(str(opened))
+        _settle_file_viewer_workers(qapp)
+
+        assert not window._language_context_tab.isHidden()
+        window._language_context_tab.click()
+
+        assert not window._is_context_collapsed()
+        assert window._context._active_panel == "language"
+        assert window._context._pages.currentIndex() == 1
+        assert window._context._title.text() == "Language"
+        assert window._context._tool_activity.item(0).text() == "No run log for this chat"
+        assert window._context._language_icon.text() == "Py"
+        assert window._context._language_type.text() == "Python"
+        assert window._context._language_file.text() == "src/main.py"
+        assert window._context._language_summary.text() == ""
+        assert not window._context._language_summary.isVisible()
+        assert not window._context._language_format_btn.isHidden()
+        assert window._context._language_format_btn.isEnabled()
+        assert not window._context._language_fix_safe_btn.isHidden()
+        assert window._context._language_fix_safe_btn.isEnabled()
+        assert not window._context._language_ask_file_btn.isHidden()
+        assert window._context._language_ask_file_btn.isEnabled()
+        assert not window._context._language_refresh_btn.isHidden()
+        assert window._context._language_refresh_btn.isEnabled()
+        assert not window._context._language_problems_label.isHidden()
+        assert not window._context._language_diagnostics.isHidden()
+        assert window._context._language_diagnostics.item(0).text().startswith(
+            "1:1 warning [demo W1] - demo warning"
+        )
+        assert not window._context._language_quick_fix_btn.isHidden()
+        assert window._context._language_quick_fix_btn.isEnabled()
+        assert not window._context._language_ask_btn.isHidden()
+        assert window._context._language_ask_btn.isEnabled()
+
+        window._context._language_ask_file_btn.click()
+
+        assert "Please review @src/main.py" in drafted[-1][0]
+        assert drafted[-1][1] == ["src/main.py"]
+
+        window._context._language_ask_btn.click()
+
+        assert "Please fix this diagnostic in @src/main.py:1." in drafted[-1][0]
+        assert drafted[-1][1] == ["src/main.py"]
+
+        window._context._language_fix_safe_btn.click()
+        _settle_file_viewer_workers(qapp)
+
+        tab = window._viewer._tabs.currentWidget()
+        assert tab._editor.toPlainText() == "print('fixed')\n"
+
+        window._context._language_format_btn.click()
+        _settle_file_viewer_workers(qapp)
+
+        assert tab._editor.toPlainText() == "print('formatted')\n"
+
+        window._open_file(str(unsupported))
+        _settle_file_viewer_workers(qapp)
+
+        assert not window._language_context_tab.isHidden()
+        assert window._context._active_panel == "language"
+        assert window._context._pages.currentIndex() == 1
+        assert window._context._title.text() == "Language"
+        assert window._context._language_icon.text() == "--"
+        assert window._context._language_type.text() == "No language"
+        assert window._context._language_file.text() == "notes.txt"
+        assert window._context._language_summary.text() == "No language support for this file."
+        assert window._context._language_actions_label.isHidden()
+        assert window._context._language_problems_label.isHidden()
+
+        window._context_tab.click()
+
+        assert window._context._active_panel == "run_log"
+        assert window._context._pages.currentIndex() == 0
+        assert window._context._title.text() == "Run Log"
+        assert window._context._tool_activity.item(0).text() == "No run log for this chat"
+    finally:
+        _settle_file_viewer_workers(qapp)
         window.close()
         os.chdir(cwd)
         qapp.setFont(app_font)
@@ -250,6 +725,7 @@ def test_main_window_context_panel_can_collapse_and_reopen(qapp, workspace):
         assert window._context_shell.maximumWidth() == 30
         assert window._root_splitter.sizes()[2] <= 36
         assert window._context_tab.text() == "R\nu\nn\n\nL\no\ng"
+        assert window._context_tab.toolTip() == "Show run log"
 
         window._expand_context()
 

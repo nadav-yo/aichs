@@ -38,6 +38,17 @@ def test_search_file_contents_ignores_hidden_and_configured_noise(workspace):
     assert matches == []
 
 
+def test_search_file_contents_skips_binary_and_honors_limit(workspace):
+    (workspace / "binary.bin").write_bytes(b"needle\x00hidden")
+    for idx in range(3):
+        (workspace / f"match{idx}.txt").write_text("needle\n", encoding="utf-8")
+
+    matches = search_file_contents(workspace, "needle", limit=2)
+
+    assert len(matches) == 2
+    assert all(not match.path.endswith("binary.bin") for match in matches)
+
+
 def test_highlight_line_html_marks_match():
     match = TextSearchMatch(
         path="C:/repo/src/main.py",

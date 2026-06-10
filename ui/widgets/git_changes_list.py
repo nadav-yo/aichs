@@ -24,10 +24,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from services.commit_message import (
-    COMMIT_MESSAGE_PROMPT_ADDITION_KEY,
-    CommitMessageThread,
-)
+from services.commit_message import CommitMessageThread
+from storage.settings import COMMIT_MESSAGE_PROMPT_ADDITION_KEY
 from services.chat_drag import AICHS_FILE_DROP_MIME, file_drop_payload, file_drop_text
 from services.git_status import (
     GitCommandResult,
@@ -122,6 +120,7 @@ class GitChangesList(QWidget):
         *,
         settings: SettingsStore | None = None,
         current_model_getter: Callable[[], str] | None = None,
+        defer_refresh: bool = False,
     ):
         super().__init__(parent)
         self.repo_path = repo_path
@@ -131,6 +130,7 @@ class GitChangesList(QWidget):
         self._message_thread: CommitMessageThread | None = None
         self._generate_icon = _commit_message_action_icon(self)
         self._generate_frame = 0
+        self._auto_refresh_started = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -181,11 +181,15 @@ class GitChangesList(QWidget):
         layout.addWidget(self.unstaged_list)
 
         self.apply_appearance()
-        self.refresh()
+        if defer_refresh:
+            self._set_loading()
+        else:
+            self.refresh()
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self.refresh)
-        self._refresh_timer.start(5000)
+        if not defer_refresh:
+            self.start_auto_refresh()
 
     def _configure_list(self, widget: QListWidget):
         widget.itemDoubleClicked.connect(self._on_open)
@@ -213,6 +217,9 @@ class GitChangesList(QWidget):
             self.file_open.emit(path)
 
     def refresh(self):
+        self.set_changes(list_file_changes(self.repo_path))
+
+    def set_changes(self, changes: list[GitFileChange]):
         self.staged_list.clear()
         self.unstaged_list.clear()
         self._staged_count = 0
@@ -224,7 +231,6 @@ class GitChangesList(QWidget):
             self._update_action_state()
             return
 
-        changes = list_file_changes(self.repo_path)
         for ch in changes:
             if ch.staged:
                 self._add_change(self.staged_list, ch, ch.staged_label or ch.label)
@@ -238,6 +244,21 @@ class GitChangesList(QWidget):
         self._unstaged_label.setText(
             f"Unstaged ({unstaged_count})" if unstaged_count else "Unstaged — clean"
         )
+        self._update_action_state()
+
+    def start_auto_refresh(self):
+        if self._auto_refresh_started:
+            return
+        self._auto_refresh_started = True
+        self._refresh_timer.start(5000)
+
+    def _set_loading(self):
+        self.staged_list.clear()
+        self.unstaged_list.clear()
+        self._staged_count = 0
+        self._staged_label.setText("Staged")
+        self._unstaged_label.setText("Unstaged")
+        self._add_disabled(self.unstaged_list, "(loading git status)")
         self._update_action_state()
 
     def _add_change(self, widget: QListWidget, ch: GitFileChange, label: str):
@@ -424,6 +445,7 @@ class GitChangesList(QWidget):
     def set_repo_path(self, path: str):
         self.repo_path = path
         self.refresh()
+        self.start_auto_refresh()
 
     def shutdown(self):
         self._refresh_timer.stop()

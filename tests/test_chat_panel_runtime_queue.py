@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from storage.settings import COMPACT_RESUME_PROMPT_KEY, SettingsStore
 from ui.widgets.chat_panel import (
     ChatPanel,
     _chat_ref_context,
@@ -204,6 +205,30 @@ def test_runtime_text_queue_marks_draft_synthetic(workspace):
     assert runtime.queued[0]["synthetic"] == "extension_resume"
 
 
+def test_compact_and_resume_command_uses_configured_default_prompt():
+    SettingsStore().save({
+        COMPACT_RESUME_PROMPT_KEY: "Resume from the short context.",
+    })
+    panel = SimpleNamespace()
+    panel.history = [{"role": "user", "content": "old"}]
+    panel._settings = SettingsStore()
+    panel.sent = []
+    panel.notices = []
+    panel.compacted = []
+    panel._send_or_queue_runtime_text = lambda text, synthetic: panel.sent.append((text, synthetic))
+    panel._visible_run = lambda: None
+    panel._visible_compaction = lambda: None
+    panel._add_notice = panel.notices.append
+    panel.compact_conversation = lambda force=False: panel.compacted.append(force)
+    panel._start_next_queued = lambda: None
+
+    ChatPanel._compact_and_resume_from_command(panel, "", True)
+
+    assert panel.sent == [("Resume from the short context.", "extension_resume")]
+    assert panel.compacted == [True]
+    assert panel.notices == []
+
+
 def test_history_ends_with_assistant_text():
     history = [{"role": "assistant", "content": "done"}]
 
@@ -236,24 +261,34 @@ def test_message_files_keeps_sentence_punctuation_outside_bare_refs(workspace):
     assert files[0]["content"] == "content"
 
 
-def test_edit_file_result_emits_completion_signal(qapp, store, workspace, monkeypatch):
-    panel = ChatPanel(store, cwd=str(workspace))
-    panel.conv_id = "c1"
-    run = SimpleNamespace(conv_id="c1", active_terminal=None, last_edit_path="src/main.py")
+def test_edit_file_result_emits_completion_signal():
     completed = []
     cards = []
+    run = SimpleNamespace(conv_id="c1", active_terminal=None, last_edit_path="src/main.py")
+    panel = SimpleNamespace(
+        conv_id="c1",
+        file_write_completed=SimpleNamespace(emit=completed.append),
+        _find_run=lambda _run_id: run,
+        _add_file_card=lambda path: cards.append(path),
+        _show_post_tool_thinking=lambda _run: None,
+        _active_terminal=None,
+    )
 
-    panel.file_write_completed.connect(completed.append)
-    monkeypatch.setattr(panel, "_find_run", lambda _run_id: run)
-    monkeypatch.setattr(panel, "_add_file_card", lambda path: cards.append(path))
-    monkeypatch.setattr(panel, "_show_post_tool_thinking", lambda _run: None)
-
-    panel._on_tool_result("run-1", "edit_file", "Edited src/main.py")
+    ChatPanel._on_tool_result(panel, "run-1", "edit_file", "Edited src/main.py")
 
     assert completed == ["src/main.py"]
     assert cards == ["src/main.py"]
     assert run.last_edit_path == ""
+
+
+def test_chat_panel_initializes_context_ui(qapp, store, workspace):
+    panel = ChatPanel(store, cwd=str(workspace))
+
+    assert panel._context_ui_suspended is False
+    assert panel.context_ring._budget is not None
     panel.close()
+    panel.deleteLater()
+    qapp.processEvents()
 
 
 def test_edit_file_tool_debug_counts_old_text_matches(workspace):
@@ -298,11 +333,12 @@ def test_edit_file_tool_debug_omits_newline_flexible_when_same(workspace):
 
 def test_tool_notice_context_menu_copies_debug_info(qapp, store, workspace, monkeypatch):
     from PyQt6.QtCore import QPoint
-    from PyQt6.QtWidgets import QLabel, QMenu
+    from PyQt6.QtWidgets import QLabel, QMenu, QWidget
 
-    panel = ChatPanel(store, cwd=str(workspace))
-    panel._add_tool_notice("Tool error: exact match failed", debug_text="debug payload")
-    label = panel.findChild(QLabel, "aichs-tool-notice")
+    parent = QWidget()
+    label = QLabel("Tool error: exact match failed", parent)
+    label.setProperty("aichs-tool-text", "Tool error: exact match failed")
+    label.setProperty("aichs-tool-debug-text", "debug payload")
     copied = []
 
     def choose_copy_debug(menu, _pos):
@@ -315,21 +351,22 @@ def test_tool_notice_context_menu_copies_debug_info(qapp, store, workspace, monk
         SimpleNamespace(clipboard=lambda: clipboard),
     )
 
-    panel._show_tool_notice_menu(label, QPoint(0, 0))
+    ChatPanel._show_tool_notice_menu(parent, label, QPoint(0, 0))
 
     assert copied == ["debug payload"]
-    panel.close()
-    panel.deleteLater()
+    parent.close()
+    parent.deleteLater()
     qapp.processEvents()
 
 
 def test_tool_notice_context_menu_copies_message(qapp, store, workspace, monkeypatch):
     from PyQt6.QtCore import QPoint
-    from PyQt6.QtWidgets import QLabel, QMenu
+    from PyQt6.QtWidgets import QLabel, QMenu, QWidget
 
-    panel = ChatPanel(store, cwd=str(workspace))
-    panel._add_tool_notice("Tool error: exact match failed", debug_text="debug payload")
-    label = panel.findChild(QLabel, "aichs-tool-notice")
+    parent = QWidget()
+    label = QLabel("Tool error: exact match failed", parent)
+    label.setProperty("aichs-tool-text", "Tool error: exact match failed")
+    label.setProperty("aichs-tool-debug-text", "debug payload")
     copied = []
 
     def choose_copy_message(menu, _pos):
@@ -342,11 +379,11 @@ def test_tool_notice_context_menu_copies_message(qapp, store, workspace, monkeyp
         SimpleNamespace(clipboard=lambda: clipboard),
     )
 
-    panel._show_tool_notice_menu(label, QPoint(0, 0))
+    ChatPanel._show_tool_notice_menu(parent, label, QPoint(0, 0))
 
     assert copied == ["Tool error: exact match failed"]
-    panel.close()
-    panel.deleteLater()
+    parent.close()
+    parent.deleteLater()
     qapp.processEvents()
 
 

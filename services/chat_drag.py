@@ -19,10 +19,12 @@ def commit_drop_payload(commits: list[dict]) -> bytes:
         sha = _clean(str(commit.get("hash") or ""))
         if not sha:
             continue
-        cleaned.append({
-            "hash": sha,
-            "subject": " ".join(str(commit.get("subject") or "").split()),
-        })
+        cleaned.append(
+            {
+                "hash": sha,
+                "subject": " ".join(str(commit.get("subject") or "").split()),
+            }
+        )
     return _payload("aichs-commit-drop", {"commits": cleaned})
 
 
@@ -34,10 +36,13 @@ def chat_drop_payload(chats: list[dict]) -> bytes:
         conv_id = _clean(str(chat.get("id") or ""))
         if not conv_id:
             continue
-        cleaned.append({
-            "id": conv_id,
-            "title": " ".join(str(chat.get("title") or "Untitled").split()) or "Untitled",
-        })
+        cleaned.append(
+            {
+                "id": conv_id,
+                "title": " ".join(str(chat.get("title") or "Untitled").split())
+                or "Untitled",
+            }
+        )
     return _payload("aichs-chat-drop", {"chats": cleaned})
 
 
@@ -57,10 +62,12 @@ def parse_commit_drop(raw: bytes | bytearray | memoryview) -> list[dict]:
         sha = _clean(str(commit.get("hash") or ""))
         if not sha:
             continue
-        out.append({
-            "hash": sha,
-            "subject": " ".join(str(commit.get("subject") or "").split()),
-        })
+        out.append(
+            {
+                "hash": sha,
+                "subject": " ".join(str(commit.get("subject") or "").split()),
+            }
+        )
     return out
 
 
@@ -75,10 +82,13 @@ def parse_chat_drop(raw: bytes | bytearray | memoryview) -> list[dict]:
         conv_id = _clean(str(chat.get("id") or ""))
         if not conv_id:
             continue
-        out.append({
-            "id": conv_id,
-            "title": " ".join(str(chat.get("title") or "Untitled").split()) or "Untitled",
-        })
+        out.append(
+            {
+                "id": conv_id,
+                "title": " ".join(str(chat.get("title") or "Untitled").split())
+                or "Untitled",
+            }
+        )
     return out
 
 

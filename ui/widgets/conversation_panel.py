@@ -431,6 +431,14 @@ class ConversationPanel(QWidget):
         self._apply_styles()
         self._refresh_item_titles()
 
+    def set_store(self, store: ConversationStore):
+        self.store = store
+        self.search.blockSignals(True)
+        self.search.clear()
+        self.search.blockSignals(False)
+        self.clear_selection()
+        self.refresh()
+
     def eventFilter(self, obj, event):
         if obj is self.list.viewport() and event.type() == QEvent.Type.Resize:
             self._refresh_item_titles()

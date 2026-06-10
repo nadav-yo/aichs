@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from services.auto_title import clean_title, fallback_title, generate_title
+from storage.settings import AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY, SettingsStore
 
 
 class TestCleanTitle:
@@ -29,7 +30,7 @@ def test_generate_title_anthropic(monkeypatch):
 
     with patch("services.auto_title.get_model_config") as cfg, patch(
         "services.auto_title.resolve_api_key", return_value="key"
-    ), patch("services.auto_title.anthropic.Anthropic", return_value=mock_client):
+    ), patch("services.auto_title._anthropic_client", return_value=mock_client):
         cfg.return_value = MagicMock(
             provider_id="claude",
             api="anthropic",
@@ -39,7 +40,7 @@ def test_generate_title_anthropic(monkeypatch):
         title = generate_title("claude-sonnet-4-6", "user msg")
     assert title == "Refactor auth module"
     prompt = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
-    assert "FIRST USER MESSAGE" in prompt
+    assert "First user message" in prompt
     assert "assistant" not in prompt.lower()
 
 
@@ -63,7 +64,7 @@ def test_generate_title_openai(monkeypatch):
 
     with patch("services.auto_title.get_model_config") as cfg, patch(
         "services.auto_title.resolve_api_key", return_value="key"
-    ), patch("services.auto_title.OpenAI", return_value=mock_client):
+    ), patch("services.auto_title._openai_client", return_value=mock_client):
         cfg.return_value = MagicMock(
             provider_id="openai",
             api="openai-compatible",
@@ -88,7 +89,7 @@ def test_generate_title_uses_current_model_for_custom_provider(monkeypatch):
 
     with patch("services.auto_title.get_model_config") as cfg, patch(
         "services.auto_title.resolve_api_key", return_value="key"
-    ), patch("services.auto_title.OpenAI", return_value=mock_client):
+    ), patch("services.auto_title._openai_client", return_value=mock_client):
         cfg.return_value = MagicMock(
             provider_id="local",
             api="openai-compatible",
@@ -109,7 +110,7 @@ def test_generate_title_truncates_user_preview(monkeypatch):
 
     with patch("services.auto_title.get_model_config") as cfg, patch(
         "services.auto_title.resolve_api_key", return_value="key"
-    ), patch("services.auto_title.anthropic.Anthropic", return_value=mock_client):
+    ), patch("services.auto_title._anthropic_client", return_value=mock_client):
         cfg.return_value = MagicMock(
             provider_id="claude",
             api="anthropic",
@@ -123,6 +124,60 @@ def test_generate_title_truncates_user_preview(monkeypatch):
     assert "x" * 101 not in prompt
 
 
+def test_generate_title_uses_configured_prompt_instructions(monkeypatch):
+    SettingsStore().save({
+        AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY: "Custom title instructions.",
+    })
+    mock_resp = MagicMock()
+    mock_resp.content = [MagicMock(text="Custom prompt title")]
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_resp
+
+    with patch("services.auto_title.get_model_config") as cfg, patch(
+        "services.auto_title.resolve_api_key", return_value="key"
+    ), patch("services.auto_title._anthropic_client", return_value=mock_client):
+        cfg.return_value = MagicMock(
+            provider_id="claude",
+            api="anthropic",
+            api_key_spec="ANTHROPIC_API_KEY",
+            base_url=None,
+        )
+        title = generate_title("claude-sonnet-4-6", "custom first message")
+
+    assert title == "Custom prompt title"
+    prompt = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert prompt == (
+        "Custom title instructions.\n\n"
+        "First user message:\ncustom first message"
+    )
+
+
+def test_generate_title_instruction_braces_are_literal(monkeypatch):
+    SettingsStore().save({
+        AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY: "Prefer {literal} short titles.",
+    })
+    mock_resp = MagicMock()
+    mock_resp.content = [MagicMock(text="Fallback template title")]
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_resp
+
+    with patch("services.auto_title.get_model_config") as cfg, patch(
+        "services.auto_title.resolve_api_key", return_value="key"
+    ), patch("services.auto_title._anthropic_client", return_value=mock_client):
+        cfg.return_value = MagicMock(
+            provider_id="claude",
+            api="anthropic",
+            api_key_spec="ANTHROPIC_API_KEY",
+            base_url=None,
+        )
+        generate_title("claude-sonnet-4-6", "fallback message")
+
+    prompt = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "Prefer {literal} short titles." in prompt
+    assert "First user message" in prompt
+    assert "fallback message" in prompt
+
+
 def test_generate_title_empty_api_response_uses_fallback(monkeypatch):
     mock_resp = MagicMock()
     mock_resp.content = [MagicMock(text="")]
@@ -131,7 +186,7 @@ def test_generate_title_empty_api_response_uses_fallback(monkeypatch):
 
     with patch("services.auto_title.get_model_config") as cfg, patch(
         "services.auto_title.resolve_api_key", return_value="key"
-    ), patch("services.auto_title.anthropic.Anthropic", return_value=mock_client):
+    ), patch("services.auto_title._anthropic_client", return_value=mock_client):
         cfg.return_value = MagicMock(
             provider_id="claude",
             api="anthropic",
@@ -151,7 +206,7 @@ def test_generate_title_rejects_handshake_title(monkeypatch):
 
     with patch("services.auto_title.get_model_config") as cfg, patch(
         "services.auto_title.resolve_api_key", return_value="key"
-    ), patch("services.auto_title.anthropic.Anthropic", return_value=mock_client):
+    ), patch("services.auto_title._anthropic_client", return_value=mock_client):
         cfg.return_value = MagicMock(
             provider_id="claude",
             api="anthropic",

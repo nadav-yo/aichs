@@ -18,7 +18,7 @@ from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPainterPath, 
 from config import IGNORED, MAX_FILE_PREVIEW_BYTES, MAX_TOOL_READ_BYTES
 from config import MODELS, MODEL_PROVIDER
 from storage.repository import ConversationStore
-from storage.settings import SettingsStore
+from storage.settings import SettingsStore, compact_resume_prompt
 from services.chat import ChatThread
 from services.crew import (
     CrewMember,
@@ -36,7 +36,7 @@ from services.crew import (
 from services.crew_context import crew_context_window
 from services.tool_policy import ConversationToolPolicy, ToolApprovalBus, path_in_repo
 from ui.widgets.tool_approval_dialog import confirm_process_start, handle_pending_approval
-from services.compaction import CompactionThread, should_compact, can_compact, _estimate_tokens
+from services.compaction import CompactionThread, should_compact, can_compact
 from services.content import (
     build_user_content,
     content_preview,
@@ -45,14 +45,13 @@ from services.content import (
 )
 from services.auto_title import TitleThread
 from services.context_budget import analyze_context
-from services.model_registry import api_key_env_var, get_provider_config, load_user_providers
+from services.model_registry import configured_provider_ids
 from services.workspace import build_system
 from services.export import export_conversation_dialog
 from services.processes import RuntimeProcessApi, get_process_manager
 from services.tool_registry import (
     RuntimeCommandApi,
     extension_errors,
-    extension_overview,
     run_extension_command,
 )
 from ui.theme import (
@@ -431,11 +430,13 @@ class _ScrollHost(QWidget):
 class ChatPanel(QWidget):
     saved        = pyqtSignal()
     conversation_created = pyqtSignal(str)
+    conversation_changed = pyqtSignal(str)
     open_code    = pyqtSignal(str, str)   # content, title
     open_file    = pyqtSignal(str, object)
     file_written = pyqtSignal(str)
     file_write_completed = pyqtSignal(str)
     tool_activity = pyqtSignal(str)
+    run_log_activity = pyqtSignal(str, str)
 
     def __init__(self, store: ConversationStore, cwd: str = "",
                  settings: SettingsStore | None = None, parent=None):
@@ -443,6 +444,7 @@ class ChatPanel(QWidget):
         self.store              = store
         self._settings          = settings or SettingsStore()
         self.cwd                = cwd or os.getcwd()
+        self._context_ui_suspended = True
         self._approval_bus      = ToolApprovalBus(self)
         self._approval_bus.approval_needed.connect(self._on_approval_needed)
         self.history            = []
@@ -631,6 +633,8 @@ class ChatPanel(QWidget):
 
         self._apply_chrome()
         self._apply_input_preferences()
+        self._context_ui_suspended = False
+        self._update_context_ui()
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -736,6 +740,7 @@ class ChatPanel(QWidget):
         self.history       = []
         self.conv_id       = None
         self.conv_data     = None
+        self.conversation_changed.emit("")
         self._sync_header_title()
         self.active_bubble = None
         self._stream_buffer.clear()
@@ -757,6 +762,17 @@ class ChatPanel(QWidget):
         self._save()
         self._reset_view()
 
+    def set_workspace(self, store: ConversationStore, cwd: str):
+        self._flush_stream_buffer()
+        self._detach_visible_run_ui()
+        self._save()
+        self.stop_managed_processes()
+        self.store = store
+        self.cwd = cwd or os.getcwd()
+        for conv_id in list(self._runtimes):
+            self._dispose_runtime(conv_id)
+        self._reset_view()
+
     def on_conversation_deleted(self, conv_id: str):
         was_active = self.conv_id == conv_id
         if was_active:
@@ -776,6 +792,7 @@ class ChatPanel(QWidget):
         self.new_conversation()
         self.conv_id   = data["id"]
         self.conv_data = data
+        self.conversation_changed.emit(self.conv_id)
         self.history   = prepare_for_storage(data.get("messages", []))
         self.conv_data["messages"] = self.history
         self._set_model(data.get("model", ""))
@@ -1128,6 +1145,7 @@ class ChatPanel(QWidget):
         self.store.save(self.conv_id, self.conv_data)
         self.saved.emit()
         self.conversation_created.emit(self.conv_id)
+        self.conversation_changed.emit(self.conv_id)
         self._sync_header_title()
 
     def _start_assistant(self, skill=None, crew: CrewMember | None = None):
@@ -1330,37 +1348,7 @@ class ChatPanel(QWidget):
         self._update_context_ui()
 
     def _configured_providers(self) -> list[str]:
-        saved = self._settings.load()
-        user_providers = set(load_user_providers().keys())
-        provider_keys = saved.get("provider_api_keys", {})
-        configured = []
-        for provider in MODELS:
-            cfg = get_provider_config(provider)
-            if not cfg:
-                continue
-            if provider in user_providers:
-                configured.append(provider)
-                continue
-            key = str(provider_keys.get(provider, "")).strip()
-            if not key and provider == "claude":
-                key = str(saved.get("anthropic_api_key", "")).strip()
-            if not key and provider == "openai":
-                key = str(saved.get("openai_api_key", "")).strip()
-            env_var = api_key_env_var(cfg.api_key_spec)
-            if key or (env_var and os.environ.get(env_var)) or (cfg.api_key_spec and not env_var):
-                configured.append(provider)
-        order = saved.get("provider_order", [])
-        if not isinstance(order, list):
-            return configured
-        ordered = []
-        seen = set()
-        for provider in order:
-            provider = str(provider)
-            if provider in configured and provider not in seen:
-                ordered.append(provider)
-                seen.add(provider)
-        ordered.extend(provider for provider in configured if provider not in seen)
-        return ordered
+        return configured_provider_ids(self._settings.load())
 
     def _build_system(
         self,
@@ -1622,7 +1610,7 @@ class ChatPanel(QWidget):
     def _compact_and_resume_from_command(self, resume_prompt: str, force: bool):
         prompt = str(resume_prompt or "").strip()
         if not prompt:
-            prompt = "Continue the active task from the compacted context."
+            prompt = compact_resume_prompt(self._settings.load())
         if not self.history:
             self._add_notice("Nothing to continue — start a conversation first.")
             return
@@ -2182,6 +2170,8 @@ class ChatPanel(QWidget):
         )
 
     def _update_context_ui(self):
+        if getattr(self, "_context_ui_suspended", False):
+            return
         budget = self._context_budget()
         self.context_ring.set_budget(budget)
         self._refresh_extension_ui()
@@ -2290,6 +2280,7 @@ class ChatPanel(QWidget):
     ):
         if emit_activity:
             self.tool_activity.emit(text)
+            self.run_log_activity.emit(text, self.conv_id or "")
         wrapper = QWidget()
         row = QHBoxLayout(wrapper)
         row.setContentsMargins(60, 1, 24, 1)
@@ -2425,7 +2416,6 @@ class ChatPanel(QWidget):
         self._subtitle_label.setText(detail or "AICHS workspace")
 
     def _apply_chrome(self):
-        self._update_context_ui()
         sep = separator_color()
         p = palette()
         self._header.setStyleSheet(
@@ -2444,6 +2434,9 @@ class ChatPanel(QWidget):
         self.jump_btn.setStyleSheet(floating_button_style())
         self.btn.setStyleSheet(send_button_style())
         self.stop_btn.setStyleSheet(stop_button_style())
+        self.context_ring.update()
+        if hasattr(self, "_extension_bar"):
+            self._extension_bar.apply_appearance()
 
     def _apply_input_preferences(self):
         self.composer.set_enter_to_send(

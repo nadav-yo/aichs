@@ -47,6 +47,20 @@ def test_content_helpers():
     assert content_length(None) == 0
 
 
+def test_content_helpers_handle_scalars_and_unknown_blocks():
+    blocks = [
+        "ignored",
+        {"type": "tool_result", "content": [{"type": "text", "text": "nested"}]},
+        {"type": "custom", "content": 1234},
+    ]
+
+    assert content_text(42) == "42"
+    assert content_preview(42) == "42"
+    assert content_length(42) == 2
+    assert content_preview(blocks) == "nested"
+    assert content_length(blocks) == len("nested") + 4
+
+
 def test_content_length_nested():
     nested = [{"type": "tool_result", "content": [{"type": "text", "text": "ok"}]}]
     assert content_length(nested) > 0
@@ -106,6 +120,22 @@ def test_prepare_prefixes_crew_assistant_for_model_context():
     }
 
 
+def test_prepare_prefixes_first_text_block_for_crew_assistant():
+    messages = [
+        {
+            "role": "assistant",
+            "crew": {"name": "Scout"},
+            "content": [
+                {"type": "image", "media_type": "image/png", "data": "abc"},
+                {"type": "text", "text": "found it"},
+            ],
+        }
+    ]
+
+    anthropic = prepare_for_anthropic(messages)
+    assert anthropic[0]["content"][1]["text"] == "Scout: found it"
+
+
 def test_prepare_skips_crew_bubble_after_lead_synthesis():
     messages = [
         {"role": "user", "content": "check"},
@@ -149,6 +179,35 @@ def test_compact_ephemeral_attachments_removes_payloads():
     assert blocks[2]["type"] == "text"
     assert "Image attachment omitted" in blocks[2]["text"]
     assert content_length(compacted[0]["content"]) < content_length(messages[0]["content"])
+
+
+def test_compact_ephemeral_attachments_preserves_non_dicts_and_nested_blocks():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                "raw",
+                {
+                    "type": "tool_result",
+                    "content": [
+                        {
+                            "type": "file",
+                            "path": "a.py",
+                            "content": "print('x')",
+                            "ephemeral": True,
+                        }
+                    ],
+                },
+            ],
+        }
+    ]
+
+    compacted = compact_ephemeral_attachments(messages)
+
+    assert compacted[0]["content"][0] == "raw"
+    nested = compacted[0]["content"][1]["content"][0]
+    assert nested["content"] == ""
+    assert nested["omitted_after_turn"] is True
 
 
 def test_prepare_for_storage_removes_runtime_only_messages():
@@ -220,6 +279,26 @@ def test_prepare_file_block_notes_omitted_attachment():
     assert "content omitted after the original turn" in anthropic[0]["content"][1]["text"]
 
 
+def test_prepare_file_block_notes_truncated_attachment_for_openai():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "file",
+                    "path": "a.py",
+                    "content": "print('x')",
+                    "size": 100,
+                    "truncated": True,
+                },
+            ],
+        }
+    ]
+
+    openai = prepare_for_openai(messages)
+    assert "Preview truncated" in openai[0]["content"][0]["text"]
+
+
 def test_terminal_summary_uses_reference_not_full_context():
     output = "\n".join(f"line {i}" for i in range(1, 51))
     summary = build_terminal_summary({
@@ -282,5 +361,52 @@ def test_terminal_refs_expand_exact_line_without_shift():
     assert "pytest.ini" not in anthropic[1]["content"]
 
 
+def test_terminal_refs_append_to_block_content_for_model_context():
+    messages = [
+        {
+            "role": "assistant",
+            "synthetic": "terminal_result",
+            "content": "Terminal summary\nOutput reference: !term[1:1]",
+            "terminal": {"command": "pytest -q", "output": "ready", "stored_line_count": 1},
+        },
+        {"role": "user", "content": [{"type": "text", "text": "show !term[1:1]"}]},
+    ]
+
+    anthropic = prepare_for_anthropic(messages)
+
+    assert anthropic[1]["content"][-1]["type"] == "text"
+    assert "Referenced terminal output" in anthropic[1]["content"][-1]["text"]
+
+
 def test_expand_terminal_refs_without_previous_terminal_is_empty():
     assert expand_terminal_refs("see !term[1:2]", []) == ""
+
+
+def test_terminal_refs_ignore_missing_and_out_of_range_requests():
+    messages = [
+        {
+            "role": "assistant",
+            "synthetic": "terminal_result",
+            "content": "Terminal summary",
+            "terminal": {"output": "one\ntwo", "stored_line_count": 2},
+        },
+        {"role": "user", "content": "show !term[9:10]"},
+    ]
+
+    assert expand_terminal_refs("no refs here", messages) == ""
+    assert "no stored terminal output lines" in expand_terminal_refs("show !term[9:10]", messages)
+
+
+def test_terminal_summary_running_and_truncated():
+    summary = build_terminal_summary({
+        "name": "server",
+        "exit_code": None,
+        "duration_s": 0.4,
+        "line_count": 5,
+        "stored_line_count": 1,
+        "truncated": True,
+        "output": "ready",
+    })
+
+    assert "running" in summary
+    assert "(1 stored)" in summary

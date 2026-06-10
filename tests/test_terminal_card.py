@@ -1,5 +1,3 @@
-from PyQt6.QtGui import QGuiApplication
-
 from services.terminal_refs import TERMINAL_REF_MIME
 from ui.widgets.terminal_card import TerminalCard
 
@@ -23,10 +21,8 @@ def test_terminal_output_copy_uses_selection_and_precise_hidden_reference(qapp):
     cursor.setPosition(10, cursor.MoveMode.KeepAnchor)
     output.setTextCursor(cursor)
 
-    output.copy()
-
-    mime = QGuiApplication.clipboard().mimeData()
-    assert QGuiApplication.clipboard().text() == "beta"
+    mime = output.copy_mime()
+    assert mime.text() == "beta"
     assert bytes(mime.data(TERMINAL_REF_MIME)).decode("utf-8") == "!term[2:2]"
 
 
@@ -40,22 +36,24 @@ def test_terminal_output_partial_line_copy_has_no_hidden_reference(qapp):
     cursor.setPosition(10, cursor.MoveMode.KeepAnchor)
     output.setTextCursor(cursor)
 
-    output.copy()
-
-    mime = QGuiApplication.clipboard().mimeData()
-    assert QGuiApplication.clipboard().text() == "eta"
+    mime = output.copy_mime()
+    assert mime.text() == "eta"
     assert not mime.hasFormat(TERMINAL_REF_MIME)
 
 
-def test_terminal_output_copy_without_selection_copies_plain_text_and_hidden_reference(qapp):
+def test_terminal_output_copy_without_selection_copies_plain_text_and_hidden_reference(qapp, monkeypatch):
+    import ui.widgets.terminal_card as terminal_card
+
+    clipboard = _FakeClipboard()
+    monkeypatch.setattr(terminal_card.QGuiApplication, "clipboard", lambda: clipboard)
     card = TerminalCard()
     card.set_output("alpha\nbeta")
     card.finish(0, detail="exit 0", ref="!term[1:2]")
 
     card._output.copy()
 
-    mime = QGuiApplication.clipboard().mimeData()
-    assert QGuiApplication.clipboard().text() == "alpha\nbeta"
+    mime = clipboard.mimeData()
+    assert clipboard.text() == "alpha\nbeta"
     assert bytes(mime.data(TERMINAL_REF_MIME)).decode("utf-8") == "!term[1:2]"
 
 
@@ -73,8 +71,20 @@ def test_terminal_card_stream_skips_leading_blank_before_ref_lines(qapp):
     cursor.setPosition(len(text), cursor.MoveMode.KeepAnchor)
     output.setTextCursor(cursor)
 
-    output.copy()
-
-    mime = QGuiApplication.clipboard().mimeData()
-    assert QGuiApplication.clipboard().text().endswith("README.md")
+    mime = output.copy_mime()
+    assert mime.text().endswith("README.md")
     assert bytes(mime.data(TERMINAL_REF_MIME)).decode("utf-8") == "!term[2:2]"
+
+
+class _FakeClipboard:
+    def __init__(self):
+        self._mime = None
+
+    def setMimeData(self, mime):
+        self._mime = mime
+
+    def mimeData(self):
+        return self._mime
+
+    def text(self):
+        return self._mime.text() if self._mime is not None else ""

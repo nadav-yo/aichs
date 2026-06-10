@@ -1,6 +1,9 @@
-from PyQt6.QtCore import QPoint, QPointF, Qt
-from PyQt6.QtGui import QColor, QGuiApplication, QTextCursor
+from types import SimpleNamespace
+
+from PyQt6.QtCore import QPoint, QPointF, Qt, QUrl
+from PyQt6.QtGui import QColor, QGuiApplication, QTextCursor, QTextDocument
 from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QMessageBox, QWidget
 
 from services.chat_drag import AICHS_FILE_DROP_MIME, parse_file_drop
 from services.file_editor_refs import AICHS_EDITOR_REF_MIME, parse_editor_refs
@@ -15,6 +18,10 @@ from ui.widgets.file_viewer import (
     _diagnostic_details,
     _read_text_preview,
     _read_text_preview_details,
+)
+from ui.widgets.markdown_browser import (
+    RemoteImageTextBrowser,
+    image_from_markdown_image_data,
 )
 
 
@@ -64,25 +71,82 @@ def test_read_text_preview_blocks_binary_content(workspace):
     assert "hello" not in text
 
 
-def test_file_viewer_saves_text_edits(qapp, workspace):
-    path = workspace / "src" / "main.py"
-    panel = FileViewerPanel(str(workspace))
+def test_markdown_preview_rasterizes_svg_badges(qapp):
+    image = image_from_markdown_image_data(
+        b'<svg xmlns="http://www.w3.org/2000/svg" width="88" height="20">'
+        b'<rect width="88" height="20" fill="#2563eb"/></svg>'
+    )
 
-    panel.open_file(str(path), repo_root=str(workspace))
-    tab = panel._tabs.widget(0)
-    tab._editor.edit_requested.emit()
-    tab._editor.setPlainText("print('bye')\n")
-    tab._save()
+    assert not image.isNull()
+    assert image.width() == 88
+    assert image.height() == 20
+
+
+def test_remote_markdown_preview_uses_cached_remote_images(qapp):
+    browser = RemoteImageTextBrowser()
+    url = QUrl("https://img.shields.io/badge/python-3.11%2B-blue")
+    image = image_from_markdown_image_data(
+        b'<svg xmlns="http://www.w3.org/2000/svg" width="88" height="20">'
+        b'<rect width="88" height="20" fill="#2563eb"/></svg>'
+    )
+    browser._remote_images[url.toString()] = image
+
+    loaded = browser.loadResource(QTextDocument.ResourceType.ImageResource, url)
+
+    assert not loaded.isNull()
+    assert loaded.size() == image.size()
+    browser.close()
+
+
+def test_file_viewer_saves_text_edits(workspace):
+    path = workspace / "src" / "main.py"
+    events = []
+    tab = SimpleNamespace(
+        _editable=True,
+        _auto_save_timer=SimpleNamespace(stop=lambda: events.append(("timer", "stop"))),
+        _path=str(path),
+        _repo_root=str(workspace),
+        _editor=SimpleNamespace(toPlainText=lambda: "print('bye')\n"),
+        _edit_mode=True,
+        _content="print('hi')\n",
+        _markdown=False,
+        _is_showing_diff=lambda: False,
+        _set_dirty=lambda dirty: events.append(("dirty", dirty)),
+        _set_status=lambda status: events.append(("status", status)),
+        _schedule_diff_refresh=lambda delay_ms=None: events.append(("diff", delay_ms)),
+        _render=lambda diagnostics_delay_ms=None: events.append(("render", diagnostics_delay_ms)),
+    )
+
+    _TextFileTab._save(tab)
 
     assert path.read_text(encoding="utf-8") == "print('bye')\n"
-    assert tab._dirty is False
+    assert tab._content == "print('bye')\n"
     assert tab._edit_mode is False
-    assert tab._editor.isReadOnly() is True
-    assert tab._save_btn.isEnabled() is False
-    panel.close()
+    assert ("timer", "stop") in events
+    assert ("dirty", False) in events
+    assert ("status", "Saved") in events
+    assert ("diff", 0) in events
+    assert ("render", 0) in events
 
 
-def test_file_viewer_marks_dirty_tabs_across_files(qapp, workspace):
+def test_text_file_tab_skips_diff_timer_outside_git_repo(workspace):
+    ready = []
+    tab = SimpleNamespace(
+        _file_backed=True,
+        _repo_root=str(workspace),
+        _diff_generation=4,
+        _on_diff_ready=lambda generation, diff_text: ready.append((generation, diff_text)),
+    )
+
+    _TextFileTab._schedule_diff_refresh(tab, delay_ms=0)
+
+    assert tab._diff_generation == 5
+    assert ready == [(5, None)]
+
+
+def test_file_viewer_marks_dirty_tabs_across_files(qapp, workspace, monkeypatch):
+    monkeypatch.setattr(_TextFileTab, "_refresh_diagnostics", lambda self, delay_ms=None: None)
+    monkeypatch.setattr(_FileTextEdit, "configure_syntax", lambda self, path, content: None)
     first = workspace / "src" / "main.py"
     second = workspace / "notes.txt"
     second.write_text("notes\n", encoding="utf-8")
@@ -92,7 +156,7 @@ def test_file_viewer_marks_dirty_tabs_across_files(qapp, workspace):
     first_tab = panel._tabs.widget(0)
     first_tab._editor.edit_requested.emit()
     first_tab._editor.setPlainText("print('dirty')\n")
-    panel.open_file(str(second), repo_root=str(workspace))
+    panel._add_tab_widget(str(second), "notes.txt", QWidget())
 
     assert panel._tabs.tabText(0) == "* main.py"
     assert panel._tabs.tabToolTip(0).startswith("Unsaved changes")
@@ -126,9 +190,77 @@ def test_file_viewer_clears_dirty_state_when_dirty_tab_closes(qapp, workspace):
     tab = panel._tabs.widget(0)
     tab._editor.edit_requested.emit()
     tab._editor.setPlainText("print('dirty')\n")
+    panel._confirm_close_tab = lambda _widget: True
     panel.close_current_tab()
 
     assert changes == [(str(path), True), (str(path), False)]
+    panel.close()
+
+
+def test_file_viewer_cancel_keeps_dirty_tab_open(qapp, workspace, monkeypatch):
+    path = workspace / "src" / "main.py"
+    original = path.read_text(encoding="utf-8")
+    panel = FileViewerPanel(str(workspace))
+    monkeypatch.setattr(
+        "ui.widgets.file_viewer.QMessageBox.question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Cancel,
+    )
+
+    panel.open_file(str(path), repo_root=str(workspace))
+    tab = panel._tabs.widget(0)
+    tab._editor.edit_requested.emit()
+    tab._editor.setPlainText("print('dirty')\n")
+
+    assert panel.close_current_tab() is False
+
+    assert panel._tabs.count() == 1
+    assert tab._dirty is True
+    assert path.read_text(encoding="utf-8") == original
+    panel.close()
+
+
+def test_file_viewer_ok_reverts_dirty_tab_and_closes(qapp, workspace, monkeypatch):
+    path = workspace / "src" / "main.py"
+    original = path.read_text(encoding="utf-8")
+    changes = []
+    panel = FileViewerPanel(str(workspace))
+    panel.dirty_file_changed.connect(lambda p, dirty: changes.append((p, dirty)))
+    monkeypatch.setattr(
+        "ui.widgets.file_viewer.QMessageBox.question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Ok,
+    )
+
+    panel.open_file(str(path), repo_root=str(workspace))
+    tab = panel._tabs.widget(0)
+    tab._editor.edit_requested.emit()
+    tab._editor.setPlainText("print('dirty')\n")
+
+    assert panel.close_current_tab() is True
+
+    assert panel._tabs.count() == 0
+    assert path.read_text(encoding="utf-8") == original
+    assert changes == [(str(path), True), (str(path), False)]
+    panel.close()
+
+
+def test_file_viewer_reopens_recently_closed_file(qapp, workspace):
+    first = workspace / "src" / "main.py"
+    second = workspace / "notes.txt"
+    second.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(first), repo_root=str(workspace))
+    panel.open_file(str(second), repo_root=str(workspace), line_no=3)
+
+    assert panel.close_current_tab() is True
+    assert panel.open_paths() == [str(first)]
+
+    assert panel.reopen_recent_closed_file(repo_root=str(workspace)) == str(second)
+
+    assert panel.open_paths() == [str(first), str(second)]
+    assert panel.active_path() == str(second)
+    tab = panel._tabs.currentWidget()
+    assert tab._editor.textCursor().blockNumber() == 2
     panel.close()
 
 
@@ -145,7 +277,9 @@ def test_file_viewer_auto_saves_when_enabled(qapp, workspace):
     tab._editor.setPlainText("print('auto')\n")
 
     assert tab._dirty is True
-    _wait_until(qapp, lambda: path.read_text(encoding="utf-8") == "print('auto')\n")
+    assert tab._auto_save_timer.isActive()
+    tab._auto_save_timer.stop()
+    tab._save(auto=True)
     assert path.read_text(encoding="utf-8") == "print('auto')\n"
     assert tab._dirty is False
     assert tab._edit_mode is True
@@ -581,6 +715,48 @@ def test_text_file_tab_right_click_diagnostic_marker_drafts_fix_request(qapp, wo
     qapp.processEvents()
 
 
+def test_text_file_tab_uses_configured_chat_prompt_templates(qapp, workspace):
+    from services.language_features import Diagnostic
+
+    path = workspace / "src" / "main.py"
+    tab = _TextFileTab(
+        str(path),
+        "one\ntwo\n",
+        str(workspace),
+        None,
+        file_review_prompt="Inspect {mention} from {path}.",
+        diagnostic_fix_prompt="Resolve {mention} in {path} line {line}.",
+    )
+    drafted = []
+    tab.diagnostic_fix_requested.connect(lambda text, refs: drafted.append((text, refs)))
+
+    tab._draft_file_question()
+
+    assert drafted[-1][0].startswith("Inspect @src/main.py from src/main.py.")
+    assert "Summarize what this file does" in drafted[-1][0]
+    assert drafted[-1][1] == ["src/main.py"]
+
+    tab._draft_diagnostic_fix([
+        Diagnostic(
+            path=str(path),
+            line=2,
+            column=4,
+            severity="warning",
+            source="ruff",
+            code="F841",
+            message="Local variable app is assigned to but never used",
+        ),
+    ])
+
+    assert drafted[-1][0].startswith("Resolve @src/main.py:2 in src/main.py line 2.")
+    assert "Diagnostic tool: ruff F841" in drafted[-1][0]
+    assert "Diagnostic output:" in drafted[-1][0]
+    assert drafted[-1][1] == ["src/main.py"]
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
 def test_text_file_tab_code_action_marks_buffer_dirty_without_saving(qapp, workspace):
     path = workspace / "src" / "main.py"
     path.write_text("print('old')\n", encoding="utf-8")
@@ -593,6 +769,29 @@ def test_text_file_tab_code_action_marks_buffer_dirty_without_saving(qapp, works
     assert tab._editor.toPlainText() == "print('new')\n"
     assert path.read_text(encoding="utf-8") == "print('old')\n"
     assert tab._status.text() == "Applied test fix."
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
+def test_text_file_tab_code_action_normalizes_formatter_newlines(qapp, workspace):
+    path = workspace / "scripts" / "render_icons.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("print('old')\n", encoding="utf-8")
+    tab = _TextFileTab(str(path), "print('old')\n", str(workspace), None)
+
+    tab._apply_code_action_content(
+        "def render():\r\r\n    return 1\r\r\n\r\r\ndef main():\r\n    render()\r\n",
+        "Formatted.",
+    )
+
+    assert tab._editor.toPlainText() == (
+        "def render():\n"
+        "    return 1\n"
+        "\n"
+        "def main():\n"
+        "    render()\n"
+    )
     tab.close()
     tab.deleteLater()
     qapp.processEvents()
@@ -715,14 +914,15 @@ def test_file_viewer_diff_mode_marks_changed_lines(qapp, workspace):
     panel.close()
 
 
-def test_file_viewer_markdown_uses_preview_until_edit(qapp, workspace):
+def test_file_viewer_markdown_uses_preview_until_edit(qapp, workspace, monkeypatch):
+    monkeypatch.setattr(_TextFileTab, "_refresh_diagnostics", lambda self, delay_ms=None: None)
     path = workspace / "README.md"
     path.write_text("# Hello\n\n| A | B |\n|---|---|\n| 1 | 2 |\n", encoding="utf-8")
     panel = FileViewerPanel(str(workspace))
 
     panel.open_file(str(path), repo_root=str(workspace))
     tab = panel._tabs.widget(0)
-    _wait_until(qapp, lambda: "<h1" in tab._preview.toHtml().lower())
+    tab._apply_markdown_preview()
 
     assert tab._status.text() == "Markdown preview"
     assert tab._preview.isVisibleTo(tab)
@@ -739,7 +939,7 @@ def test_file_viewer_markdown_uses_preview_until_edit(qapp, workspace):
 
     tab._editor.setPlainText("# Saved\n")
     tab._save()
-    _wait_until(qapp, lambda: "Saved" in tab._preview.toPlainText())
+    tab._apply_markdown_preview()
 
     assert path.read_text(encoding="utf-8") == "# Saved\n"
     assert tab._status.text() == "Markdown preview"

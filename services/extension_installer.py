@@ -3,11 +3,17 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import stat
 
-from services.tool_registry import _static_extension_description
+from services.tool_registry import (
+    ExtensionPermissions,
+    ExtensionRequirements,
+    extension_static_summary,
+    set_extension_enabled,
+    _static_extension_description,
+)
 
 
 @dataclass(frozen=True)
@@ -17,6 +23,9 @@ class ExtensionInstallCandidate:
     entrypoint: Path
     kind: str
     description: str = ""
+    permissions: ExtensionPermissions = field(default_factory=ExtensionPermissions)
+    requirements: ExtensionRequirements = field(default_factory=ExtensionRequirements)
+    missing_requirements: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -127,6 +136,7 @@ def install_extension_candidates(
     for candidate in candidates:
         dest = target_root / candidate.name
         _replace_path(candidate.source_path, dest, target_root)
+        set_extension_enabled(dest, False, cwd)
         results.append(ExtensionInstallResult(name=candidate.name, path=dest))
     return results
 
@@ -142,22 +152,30 @@ def extension_install_root(scope: str, cwd: str | None = None) -> Path:
 
 
 def _folder_candidate(path: Path, entrypoint: Path) -> ExtensionInstallCandidate:
+    summary = extension_static_summary(entrypoint)
     return ExtensionInstallCandidate(
         name=_safe_install_name(path.name or "extension"),
         source_path=path,
         entrypoint=entrypoint,
         kind="folder",
         description=_static_extension_description(entrypoint),
+        permissions=summary.permissions,
+        requirements=summary.requirements,
+        missing_requirements=summary.missing_requirements,
     )
 
 
 def _file_candidate(path: Path) -> ExtensionInstallCandidate:
+    summary = extension_static_summary(path)
     return ExtensionInstallCandidate(
         name=_safe_install_name(path.name),
         source_path=path,
         entrypoint=path,
         kind="file",
         description=_static_extension_description(path),
+        permissions=summary.permissions,
+        requirements=summary.requirements,
+        missing_requirements=summary.missing_requirements,
     )
 
 

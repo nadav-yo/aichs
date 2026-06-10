@@ -13,6 +13,10 @@ def test_default_text_search_shortcuts_include_control_and_meta():
     assert shortcut_sequences("text_search") == ("Ctrl+Shift+F", "Meta+Shift+F")
 
 
+def test_default_reopen_closed_file_shortcuts_include_control_and_meta():
+    assert shortcut_sequences("reopen_closed_file") == ("Ctrl+Shift+T", "Meta+Shift+T")
+
+
 def test_shortcut_sequences_accept_custom_string():
     saved = {"keyboard_shortcuts": {"file_search": "Alt+P"}}
 

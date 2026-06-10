@@ -4,7 +4,14 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 
 from services.context_budget import ContextBudget, format_bytes
-from ui.theme import palette, ACCENT, meta_font_pt, chat_font_pt, MONO_FONT_CSS, separator_color
+from ui.theme import (
+    palette,
+    meta_font_pt,
+    chat_font_pt,
+    MONO_FONT_CSS,
+    separator_color,
+    primary_button_style,
+)
 
 
 class ContextBreakdownDialog(QDialog):
@@ -81,10 +88,7 @@ class ContextBreakdownDialog(QDialog):
         btn_row.addStretch()
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
-        close.setStyleSheet(
-            f"QPushButton {{ background:{ACCENT}; color:white; border:none;"
-            f"border-radius:6px; padding:6px 18px; font-size:{meta}px; }}"
-        )
+        close.setStyleSheet(primary_button_style(font_size=meta, font_weight="600"))
         btn_row.addWidget(close)
         root.addLayout(btn_row)
 

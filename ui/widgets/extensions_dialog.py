@@ -296,6 +296,11 @@ class ExtensionInstallDialog(QDialog):
             return
         cleanup_extension_install_source(self._source)
         self._source = None
+        QMessageBox.information(
+            self,
+            "Extensions installed",
+            "Installed extensions are disabled until you review and enable them.",
+        )
         self.accept()
 
     def selected_candidates(self) -> list[ExtensionInstallCandidate]:
@@ -317,10 +322,15 @@ class ExtensionInstallDialog(QDialog):
             return
         for candidate in candidates:
             checkbox = QCheckBox(_candidate_label(candidate))
+            checkbox.setToolTip(_candidate_disclosure(candidate))
             checkbox.setChecked(True)
             checkbox.setStyleSheet(_enabled_checkbox_style())
             checkbox.toggled.connect(self._sync_install_enabled)
             self.candidate_layout.addWidget(checkbox)
+            disclosure = QLabel(_candidate_disclosure(candidate))
+            disclosure.setWordWrap(True)
+            disclosure.setStyleSheet(_list_path_style())
+            self.candidate_layout.addWidget(disclosure)
             self._candidate_checks.append((checkbox, candidate))
         self.candidate_layout.addStretch()
         self._sync_install_enabled()
@@ -399,6 +409,9 @@ class _ExtensionDetailPane(QWidget):
 
         self._add_header(root, file)
         self._add_description(root, file)
+        _add_detail_section(root, "Review & Risk", _risk_rows(file), tone=_risk_tone(file))
+        _add_detail_section(root, "Declared Permissions", _permission_rows(file))
+        _add_detail_section(root, "Contributions", _observed_rows(file))
         _add_detail_section(
             root,
             "Tools",
@@ -459,6 +472,18 @@ class _ExtensionDetailPane(QWidget):
         ui_rows = [(badge.name, "Status badge") for badge in file.badges]
         ui_rows += [(panel.name, f"Panel: {panel.title}") for panel in file.panels]
         _add_detail_section(root, "UI Contributions", ui_rows)
+        _add_detail_section(
+            root,
+            "Permission Violations",
+            [(violation, "Blocked by manifest permissions") for violation in file.permission_violations],
+            tone="danger",
+        )
+        _add_detail_section(
+            root,
+            "Requirements",
+            _requirements_rows(file),
+            tone="danger" if file.missing_requirements else "",
+        )
         _add_detail_section(
             root,
             "Errors",
@@ -629,7 +654,29 @@ def _candidate_label(candidate: ExtensionInstallCandidate) -> str:
     return " · ".join(details)
 
 
+def _candidate_disclosure(candidate: ExtensionInstallCandidate) -> str:
+    parts = [
+        "Runs local Python when enabled.",
+        "Installs disabled until reviewed.",
+        f"Permissions: {_permissions_text(candidate.permissions)}",
+    ]
+    if candidate.requirements.executables or candidate.requirements.python:
+        reqs = []
+        if candidate.requirements.executables:
+            reqs.append("executables: " + ", ".join(candidate.requirements.executables))
+        if candidate.requirements.python:
+            reqs.append("python: " + ", ".join(candidate.requirements.python))
+        parts.append("Requires " + "; ".join(reqs))
+    if candidate.missing_requirements:
+        parts.append("Missing: " + ", ".join(candidate.missing_requirements))
+    return " ".join(parts)
+
+
 def _list_status_text(file: ExtensionFileSummary) -> str:
+    if file.permission_violations:
+        return f"{file.status} · blocked"
+    if file.review_required:
+        return f"{file.status} · review"
     if file.errors:
         return f"{file.status} · {len(file.errors)} error(s)"
     return file.status
@@ -651,6 +698,10 @@ def _list_subtitle(file: ExtensionFileSummary) -> str:
     ]
     if not parts:
         parts.append("No registered contributions")
+    if file.review_required:
+        parts.append("needs review")
+    if not file.permissions.declared:
+        parts.append("permissions undisclosed")
     if file.description:
         parts.append(file.description)
     return " · ".join(parts)
@@ -658,6 +709,59 @@ def _list_subtitle(file: ExtensionFileSummary) -> str:
 
 def _join_details(*parts: str) -> str:
     return " | ".join(part for part in parts if part)
+
+
+def _risk_rows(file: ExtensionFileSummary) -> list[tuple[str, str]]:
+    rows = [
+        ("Review", "Reviewed" if file.reviewed else "Needs review"),
+        ("Python", "Enabled extensions run local Python code in the AICHS process."),
+    ]
+    rows.extend((message, "") for message in file.risk_messages[1:])
+    return rows
+
+
+def _risk_tone(file: ExtensionFileSummary) -> str:
+    return "danger" if file.review_required or not file.permissions.declared else ""
+
+
+def _permission_rows(file: ExtensionFileSummary) -> list[tuple[str, str]]:
+    return [
+        ("Manifest", "Declared" if file.permissions.declared else "Undisclosed"),
+        ("Allowed", _permissions_text(file.permissions)),
+    ]
+
+
+def _permissions_text(permissions) -> str:
+    if not permissions.declared:
+        return "undisclosed"
+    names = permissions.enabled_names()
+    return ", ".join(names) if names else "none"
+
+
+def _observed_rows(file: ExtensionFileSummary) -> list[tuple[str, str]]:
+    rows = []
+    observed = [
+        (len(file.tools), "tools"),
+        (len(file.commands), "commands"),
+        (len(file.contexts), "context"),
+        (len(file.hooks), "hooks"),
+        (len(file.badges) + len(file.panels), "ui"),
+        (len(file.languages), "language"),
+    ]
+    for count, label in observed:
+        rows.append((label, str(count)))
+    return rows
+
+
+def _requirements_rows(file: ExtensionFileSummary) -> list[tuple[str, str]]:
+    rows = []
+    if file.requirements.executables:
+        rows.append(("Executables", ", ".join(file.requirements.executables)))
+    if file.requirements.python:
+        rows.append(("Python modules", ", ".join(file.requirements.python)))
+    if file.missing_requirements:
+        rows.append(("Missing", ", ".join(file.missing_requirements)))
+    return rows
 
 
 def _heading_style(tone: str = "") -> str:
@@ -766,7 +870,7 @@ def _status_label_style(tone: str) -> str:
 def _status_tone(file: ExtensionFileSummary) -> str:
     if file.status == "Disabled":
         return "disabled"
-    if file.errors:
+    if file.errors or file.permission_violations:
         return "danger"
     return "success"
 

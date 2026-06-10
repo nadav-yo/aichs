@@ -6,6 +6,11 @@ import pytest
 
 from storage.repository import (
     ConversationStore,
+    _available_path,
+    _load_json,
+    list_workspaces,
+    _parse_datetime,
+    register_workspace,
     workspace_conversations_dir,
     workspace_id,
     _message_text,
@@ -56,6 +61,10 @@ class TestConversationStore:
         assert len(trashed) == 1
         assert trashed[0][1]["id"] == "x"
         assert trashed[0][1]["deleted_at"]
+
+    def test_delete_missing_path_is_noop(self, store, tmp_path):
+        store.delete(str(tmp_path / "missing.json"))
+        assert store.list_trash() == []
 
     def test_restore_deleted_conversation(self, store):
         path = store.save("x", _sample_conv("x"))
@@ -153,6 +162,10 @@ class TestConversationStore:
         assert not store.matches_search(path, summary, "runtime")
         assert not store.matches_search(path, summary, "missing")
 
+    def test_matches_search_returns_false_when_body_cannot_load(self, store, tmp_path):
+        missing = tmp_path / "missing.json"
+        assert not store.matches_search(missing, {"title": "No match"}, "needle")
+
     def test_workspace_store_uses_workspace_id_directory(self, tmp_path):
         workspace = tmp_path / "repo"
         workspace.mkdir()
@@ -179,6 +192,37 @@ class TestConversationStore:
         wid = workspace_id(workspace)
         assert data["version"] == 1
         assert data["workspaces"][wid]["path"] == str(workspace.resolve())
+
+    def test_list_workspaces_sorts_by_recent_and_marks_missing(self, tmp_path):
+        older = tmp_path / "older"
+        newer = tmp_path / "newer"
+        missing = tmp_path / "missing"
+        older.mkdir()
+        newer.mkdir()
+
+        register_workspace(older)
+        register_workspace(missing)
+        register_workspace(newer)
+
+        rows = list_workspaces()
+
+        assert [Path(row["path"]).name for row in rows] == ["newer", "missing", "older"]
+        assert rows[0]["exists"] is True
+        assert rows[1]["exists"] is False
+        assert list_workspaces(limit=2) == rows[:2]
+
+    def test_list_workspaces_ignores_invalid_registry_shapes(self, isolate_aichs_home):
+        from storage import repository
+
+        repository.WORKSPACES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        repository.WORKSPACES_PATH.write_text("[]", encoding="utf-8")
+        assert list_workspaces() == []
+
+        repository.WORKSPACES_PATH.write_text(
+            json.dumps({"workspaces": {"bad": None, "empty": {"path": ""}}}),
+            encoding="utf-8",
+        )
+        assert list_workspaces() == []
 
     def test_workspace_store_lists_only_its_workspace(self, tmp_path):
         one = tmp_path / "one"
@@ -223,19 +267,34 @@ class TestConversationStore:
 
         assert store.load_by_id("x")["title"] == "Workspace chat"
 
+    def test_load_by_id_raises_for_missing_id(self, store):
+        with pytest.raises(FileNotFoundError):
+            store.load_by_id("missing")
+
 
 class TestHelpers:
     def test_message_text_blocks(self):
         content = [
             {"type": "text", "text": "hello"},
             {"type": "image"},
+            {"type": "tool_result", "content": [{"type": "text", "text": "nested"}]},
         ]
         assert "hello" in _message_text(content)
         assert "[image]" in _message_text(content)
+        assert "nested" in _message_text(content)
         assert _message_text(None) == ""
+        assert _message_text(123) == "123"
 
     def test_summary_message_count(self):
         assert _summary(_sample_conv())["message_count"] == 1
         summary = _summary({**_sample_conv(), "cwd": "/repo", "messages": [{}, {}, {}]})
         assert summary["message_count"] == 3
         assert summary["cwd"] == "/repo"
+
+    def test_file_and_datetime_helpers(self, tmp_path):
+        path = tmp_path / "chat.json"
+        path.write_text("{}", encoding="utf-8")
+
+        assert _available_path(path).name == "chat-1.json"
+        assert _load_json(tmp_path / "missing.json") is None
+        assert _parse_datetime("not a date") is None

@@ -300,9 +300,12 @@ class GitPanel(QWidget):
         *,
         settings: SettingsStore | None = None,
         current_model_getter: Callable[[], str] | None = None,
+        defer_refresh: bool = False,
     ):
         super().__init__(parent)
         self.repo_path = repo_path
+        self._loaded = False
+        self._auto_refresh_started = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -314,6 +317,7 @@ class GitPanel(QWidget):
             repo_path,
             settings=settings,
             current_model_getter=current_model_getter,
+            defer_refresh=defer_refresh,
         )
         self._changes.file_open.connect(self.file_open.emit)
         self._changes.git_changed.connect(self._on_changes_changed)
@@ -360,11 +364,14 @@ class GitPanel(QWidget):
         root.addWidget(splitter, 1)
 
         self.apply_appearance()
-        self._refresh_log()
-        self._update_git_action_state()
+        if not defer_refresh:
+            self._refresh_log()
+            self._update_git_action_state()
+            self._loaded = True
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self.refresh)
-        self._refresh_timer.start(5000)
+        if not defer_refresh:
+            self.start_auto_refresh()
 
     def apply_appearance(self):
         mono = mono_font_pt()
@@ -384,6 +391,22 @@ class GitPanel(QWidget):
         self._changes.refresh()
         self._refresh_log()
         self._update_git_action_state()
+        self._loaded = True
+        self.start_auto_refresh()
+
+    def set_changes(self, changes):
+        self._changes.set_changes(changes)
+
+    def ensure_loaded(self):
+        if not self._loaded:
+            self.refresh()
+
+    def start_auto_refresh(self):
+        if self._auto_refresh_started:
+            return
+        self._auto_refresh_started = True
+        self._refresh_timer.start(5000)
+        self._changes.start_auto_refresh()
 
     def _on_changes_changed(self):
         self._refresh_log()
@@ -409,6 +432,8 @@ class GitPanel(QWidget):
 
     def _refresh_log(self):
         self.log.clear()
+        if not is_git_repo(self.repo_path):
+            return
         for raw in run_git(
             ["git", "log", "--decorate=short", "--format=%H%x1f%h%x1f%D%x1f%s", "-40"],
             self.repo_path,

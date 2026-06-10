@@ -4,14 +4,18 @@ from unittest.mock import patch
 import services.commit_message as cm
 
 
-def test_staged_commit_context_includes_names_stats_and_diff(git_repo):
-    main = git_repo / "src" / "main.py"
-    main.write_text("print('message')\n", encoding="utf-8")
-    from services.git_status import stage_files
+def test_staged_commit_context_includes_names_stats_and_diff(monkeypatch):
+    monkeypatch.setattr(
+        cm,
+        "staged_commit_parts",
+        lambda repo_path: (
+            "M\tsrc/main.py",
+            " src/main.py | 2 +-",
+            "@@\n-print('hi')\n+print('message')\n",
+        ),
+    )
 
-    assert stage_files(str(git_repo), ["src/main.py"]).ok
-
-    context = cm.staged_commit_context(str(git_repo))
+    context = cm.staged_commit_context("repo")
 
     assert "STAGED FILES:" in context
     assert "M\tsrc/main.py" in context
@@ -21,16 +25,46 @@ def test_staged_commit_context_includes_names_stats_and_diff(git_repo):
     assert "+print('message')" in context
 
 
-def test_staged_commit_context_truncates_large_diff(git_repo):
-    main = git_repo / "src" / "main.py"
-    main.write_text("\n".join(f"print({i})" for i in range(100)) + "\n", encoding="utf-8")
-    from services.git_status import stage_files
+def test_staged_commit_context_truncates_large_diff(monkeypatch):
+    monkeypatch.setattr(
+        cm,
+        "staged_commit_parts",
+        lambda repo_path: (
+            "M\tsrc/main.py",
+            " src/main.py | 100 +++++",
+            "\n".join(f"+print({i})" for i in range(100)),
+        ),
+    )
 
-    assert stage_files(str(git_repo), ["src/main.py"]).ok
-
-    context = cm.staged_commit_context(str(git_repo), max_diff_chars=80)
+    context = cm.staged_commit_context("repo", max_diff_chars=80)
 
     assert "[diff truncated]" in context
+
+
+def test_staged_commit_context_returns_empty_for_no_staged_parts(monkeypatch):
+    monkeypatch.setattr(cm, "staged_commit_parts", lambda repo_path: ("", "", ""))
+
+    assert cm.staged_commit_context("repo") == ""
+
+
+def test_build_commit_message_prompt_includes_optional_guidance():
+    prompt = cm.build_commit_message_prompt("STAGED DIFF", "Mention ticket IDs.")
+
+    assert "STAGED DIFF" in prompt
+    assert "Mention ticket IDs." in prompt
+
+
+def test_generate_commit_message_validates_model_and_staged_context(monkeypatch):
+    monkeypatch.setattr(cm, "staged_commit_parts", lambda repo_path: ("", "", ""))
+
+    for model, expected in [("", "No model"), ("local-model", "No staged changes")]:
+        try:
+            cm.generate_commit_message(model, "repo")
+        except ValueError as exc:
+            error = str(exc)
+        else:
+            error = ""
+        assert expected in error
 
 
 def test_clean_and_split_commit_message():
@@ -62,9 +96,42 @@ def test_clean_commit_message_removes_think_blocks():
     assert cm.clean_commit_message(raw) == "Update git commit generation"
 
 
+def test_commit_message_response_helpers_cover_unusual_shapes():
+    dict_content = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=[
+            {"text": "Update "},
+            {"type": "output_text", "text": "settings"},
+            {"content": " ignored"},
+        ]))]
+    )
+    plain_content = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=123))]
+    )
+
+    assert cm._openai_message_text(dict_content) == "Update settings ignored"
+    assert cm._openai_message_text(plain_content) == "123"
+    assert cm._openai_message_text(SimpleNamespace(choices=[])) == ""
+    assert cm._finish_reason(SimpleNamespace(stop_reason="max_tokens")) == "max_tokens"
+    assert cm._finish_reason(SimpleNamespace()) == ""
+    assert cm._empty_summary_note(SimpleNamespace(stop_reason="length")) == (
+        "[chunk summary ran out of output tokens]"
+    )
+    assert cm._empty_summary_note(SimpleNamespace()) == "[chunk summary returned no visible text]"
+
+
+def test_commit_message_small_helpers():
+    cfg = SimpleNamespace(api="anthropic", base_url="http://api", api_key_spec="")
+
+    assert cm._client_kwargs(cfg) == {"api_key": "", "base_url": "http://api"}
+    assert cm._final_max_tokens(cfg) == cm.COMMIT_MESSAGE_MAX_TOKENS
+    assert cm._chunk_text("", 10) == [""]
+    assert cm._chunk_text("abcdef", 2) == ["ab", "cd", "ef"]
+    assert cm.split_commit_message("   ") == ("", "")
+
+
 def test_generate_commit_message_uses_anthropic_current_model(monkeypatch):
     cfg = SimpleNamespace(api="anthropic", api_key_spec="ANTHROPIC_API_KEY", base_url="")
-    mock_client = patch("services.commit_message.anthropic.Anthropic").start()
+    mock_client = patch("services.commit_message._anthropic_client").start()
     mock_client.return_value.messages.create.return_value = SimpleNamespace(
         content=[SimpleNamespace(text="Update staged files")]
     )
@@ -97,7 +164,7 @@ def test_generate_commit_message_uses_openai_compatible_current_model(monkeypatc
         top_k=20,
         min_p=0.05,
     )
-    mock_client = patch("services.commit_message.OpenAI").start()
+    mock_client = patch("services.commit_message._openai_client").start()
     mock_client.return_value.chat.completions.create.return_value = SimpleNamespace(
         choices=[
             SimpleNamespace(
@@ -130,7 +197,7 @@ def test_generate_commit_message_uses_openai_compatible_current_model(monkeypatc
 
 def test_generate_commit_message_reports_length_empty_response(monkeypatch):
     cfg = SimpleNamespace(api="openai-compatible", api_key_spec="OPENAI_API_KEY", base_url="")
-    mock_client = patch("services.commit_message.OpenAI").start()
+    mock_client = patch("services.commit_message._openai_client").start()
     mock_client.return_value.chat.completions.create.side_effect = [
         SimpleNamespace(
             choices=[
@@ -172,7 +239,7 @@ def test_generate_commit_message_reports_length_empty_response(monkeypatch):
 
 def test_generate_commit_message_retries_empty_length_response(monkeypatch):
     cfg = SimpleNamespace(api="openai-compatible", api_key_spec="OPENAI_API_KEY", base_url="")
-    mock_client = patch("services.commit_message.OpenAI").start()
+    mock_client = patch("services.commit_message._openai_client").start()
     mock_client.return_value.chat.completions.create.side_effect = [
         SimpleNamespace(
             choices=[
@@ -213,7 +280,7 @@ def test_generate_commit_message_retries_empty_length_response(monkeypatch):
 
 def test_generate_commit_message_compacts_large_diff_iteratively(monkeypatch):
     cfg = SimpleNamespace(api="openai-compatible", api_key_spec="OPENAI_API_KEY", base_url="")
-    mock_client = patch("services.commit_message.OpenAI").start()
+    mock_client = patch("services.commit_message._openai_client").start()
     mock_client.return_value.chat.completions.create.side_effect = [
         SimpleNamespace(
             choices=[

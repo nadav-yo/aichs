@@ -15,6 +15,7 @@ from services.compaction import (
     should_compact,
     summary_max_tokens,
 )
+from storage.settings import COMPACTION_SUMMARY_GUIDANCE_KEY, SettingsStore
 
 
 def _msgs(n: int, size: int = 5000) -> list[dict]:
@@ -142,6 +143,20 @@ def test_compact_replaces_prefix(monkeypatch):
     assert "Files, symbols, commands, tests" in call.call_args.args[1]
     assert out[0]["content"].startswith("[Conversation summary]")
     assert len(out) < len(messages)
+
+
+def test_compact_appends_configured_summary_guidance():
+    SettingsStore().save({
+        COMPACTION_SUMMARY_GUIDANCE_KEY: "Preserve exact test commands.",
+    })
+    messages = _msgs(4, size=20)
+    with patch("services.compaction._call_model", return_value="Guided summary.") as call:
+        compact("claude-sonnet-4-6", messages, force=True)
+
+    prompt = call.call_args.args[1]
+    assert "Preserve only durable" in prompt
+    assert "Additional user guidance:" in prompt
+    assert "Preserve exact test commands." in prompt
 
 
 def test_compact_with_result_includes_proof():

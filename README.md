@@ -5,6 +5,9 @@ Adapt it to your workflows, not the other way around.
 
 Open a repository, chat with a model, and let the agent work with your code
 through approved tools, git context, file references, skills, and extensions.
+aichs treats the agent as something you can shape: prompts, models, UI behavior,
+workflow defaults, skills, extensions, tools, hooks, badges, and panels are all
+meant to be customized.
 
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Tests](https://github.com/nadav-yo/aichs/actions/workflows/tests.yml/badge.svg)
@@ -14,6 +17,12 @@ through approved tools, git context, file references, skills, and extensions.
 aichs is early software. It is intended for developers who are comfortable
 running a local app that can read a workspace and, with approval, edit files or
 run shell commands.
+
+## Why aichs exists
+
+Most coding agents give you a workflow. aichs gives you a workbench. It is for
+developers who want to tune the prompts, tools, context, approvals, memory, and
+UI around how they already work.
 
 ## Install From PyPI
 
@@ -57,7 +66,7 @@ Open a workspace folder, pick a model, and work in one window:
 - **Approval-gated tools**: read, edit, search, git context, shell commands, and extension tools with workspace-scoped paths
 - **Coding workspace**: file tree, syntax-highlighted tabs, git status, diffs, file references, and conversation history
 - **Context management**: usage view, auto-compaction, compacted summaries, and decision memory for long sessions
-- **Customization**: slash-command skills, command palette, project/user extensions, custom tools, hooks, badges, and panels
+- **Customization**: configurable prompts and workflow defaults, slash-command skills, command palette, project/user extensions, custom tools, hooks, badges, and panels
 - **Conversation flow**: streaming Markdown, vision-capable models, file mentions, edit/resend, queued messages, pinned chats, search, and export
 
 Shell commands and extensions run as the current user; only enable extensions
@@ -77,14 +86,14 @@ Contributor setup, source installs, tests, packaging, and release notes live in
 | Extensions and custom tools | [docs/extensions.md](docs/extensions.md) |
 | Slash-command skills | [docs/skills.md](docs/skills.md) |
 | Compaction and decision memory | [docs/compact.md](docs/compact.md) |
+| YUK user kits | [docs/yuk.md](docs/yuk.md) |
 
 ## FAQ
 
 ### What does aichs stand for?
 
-**AI Choding Harness Studio.** It is also a play on Hebrew "ichs" (`איכס`),
-from Arabic `إخسا`, roughly "yuck" or "ew." The name is a little cursed on
-purpose.
+It is a play on Hebrew "ichs" (`איכס`), from Arabic `إخسا`, roughly "yuck" or
+"ew." The name is a little cursed on purpose.
 
 ### Why use aichs when Cursor, Claude Code, Codex, and other agent tools exist?
 

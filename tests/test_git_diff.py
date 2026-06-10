@@ -1,5 +1,5 @@
-import subprocess
-
+import services.git_diff as gd
+from services.git_status import GitFileChange
 from services.git_diff import (
     can_diff_against_head,
     commit_diff,
@@ -29,27 +29,86 @@ class TestGitDiff:
         main = git_repo / "src" / "main.py"
         assert not can_diff_against_head(str(git_repo), str(main))
 
-    def test_commit_diff_contains_committed_change(self, git_repo):
-        main = git_repo / "src" / "main.py"
-        main.write_text("print('second')\n", encoding="utf-8")
-        subprocess.run(["git", "add", "src/main.py"], cwd=git_repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "second"], cwd=git_repo, check=True, capture_output=True)
-        sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=git_repo,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+    def test_commit_diff_contains_committed_change(self, workspace, monkeypatch):
+        calls = []
 
-        diff = commit_diff(str(git_repo), sha)
+        def fake_run_git(cmd, repo_path):
+            calls.append((cmd, repo_path))
+            if cmd == ["git", "show", "--no-patch", "--format=%H", "abc123"]:
+                return 0, "abc123\n"
+            if cmd == ["git", "show", "--format=", "--no-color", "--patch", "abc123"]:
+                return 0, "diff --git a/src/main.py b/src/main.py\n+second\n"
+            raise AssertionError(f"unexpected git command: {cmd!r}")
+
+        monkeypatch.setattr("services.git_diff.is_git_repo", lambda repo_path: True)
+        monkeypatch.setattr("services.git_diff._run_git", fake_run_git)
+
+        diff = commit_diff(str(workspace), "abc123")
 
         assert diff is not None
         assert "src/main.py" in diff
         assert "second" in diff
+        assert calls == [
+            (["git", "show", "--no-patch", "--format=%H", "abc123"], str(workspace)),
+            (["git", "show", "--format=", "--no-color", "--patch", "abc123"], str(workspace)),
+        ]
 
-    def test_commit_diff_invalid_commit_returns_none(self, git_repo):
-        assert commit_diff(str(git_repo), "missing") is None
+    def test_commit_diff_invalid_commit_returns_none(self, workspace, monkeypatch):
+        monkeypatch.setattr("services.git_diff.is_git_repo", lambda repo_path: True)
+        monkeypatch.setattr("services.git_diff._run_git", lambda cmd, repo_path: (1, ""))
+
+        assert commit_diff(str(workspace), "missing") is None
+
+    def test_commit_diff_returns_none_when_patch_fetch_fails(self, workspace, monkeypatch):
+        monkeypatch.setattr("services.git_diff.is_git_repo", lambda repo_path: True)
+        monkeypatch.setattr(
+            "services.git_diff._run_git",
+            lambda cmd, repo_path: (0, "abc123") if "--no-patch" in cmd else (1, ""),
+        )
+
+        assert commit_diff(str(workspace), "abc123") is None
+
+    def test_commit_diff_rejects_blank_hash(self, workspace, monkeypatch):
+        calls = []
+        monkeypatch.setattr("services.git_diff.is_git_repo", lambda repo_path: calls.append(repo_path) or True)
+
+        assert commit_diff(str(workspace), "  ") is None
+        assert calls == []
+
+    def test_diff_against_head_builds_added_file_diff(self, workspace, monkeypatch):
+        path = workspace / "new.py"
+        path.write_text("print('new')\n", encoding="utf-8")
+        change = GitFileChange("A ", "A", "new.py", str(path), staged=True, unstaged=False)
+        monkeypatch.setattr("services.git_diff.is_git_repo", lambda repo_path: True)
+        monkeypatch.setattr("services.git_diff.change_for_file", lambda repo_path, abs_path: change)
+
+        diff = diff_against_head(str(workspace), str(path))
+
+        assert "--- a/new.py" in diff
+        assert "+print('new')" in diff
+
+    def test_diff_against_head_deleted_file_returns_none_without_head_text(self, workspace, monkeypatch):
+        path = workspace / "gone.py"
+        change = GitFileChange(" D", "D", "gone.py", str(path), staged=False, unstaged=True)
+        monkeypatch.setattr("services.git_diff.is_git_repo", lambda repo_path: True)
+        monkeypatch.setattr("services.git_diff.change_for_file", lambda repo_path, abs_path: change)
+        monkeypatch.setattr("services.git_diff._head_text", lambda repo_path, rel_path: None)
+
+        assert diff_against_head(str(workspace), str(path)) is None
+
+    def test_diff_against_head_falls_back_to_synthetic_diff(self, workspace, monkeypatch):
+        path = workspace / "src" / "main.py"
+        path.write_text("print('new')\n", encoding="utf-8")
+        change = GitFileChange(" M", "M", "src/main.py", str(path), staged=False, unstaged=True)
+        monkeypatch.setattr("services.git_diff.is_git_repo", lambda repo_path: True)
+        monkeypatch.setattr("services.git_diff.change_for_file", lambda repo_path, abs_path: change)
+        monkeypatch.setattr("services.git_diff.run_git", lambda cmd, repo_path: "")
+        monkeypatch.setattr("services.git_diff._head_text", lambda repo_path, rel_path: "print('old')\n")
+
+        diff = diff_against_head(str(workspace), str(path))
+
+        assert "-print('old')" in diff
+        assert "+print('new')" in diff
 
     def test_split_diff_by_file_groups_chunks(self):
         diff = "\n".join([
@@ -74,3 +133,21 @@ class TestGitDiff:
         assert [file.path for file in files] == ["src/main.py", "README.md"]
         assert [(file.added, file.removed) for file in files] == [(1, 1), (2, 0)]
         assert files[0].diff.startswith("diff --git a/src/main.py")
+
+    def test_split_diff_by_file_handles_dev_null_and_unknown_paths(self):
+        added = split_diff_by_file("\n".join([
+            "diff --git a/new.py b/new.py",
+            "--- /dev/null",
+            "+++ b/new.py",
+            "+new",
+        ]))
+        malformed = split_diff_by_file('"broken diff')
+
+        assert added[0].path == "new.py"
+        assert malformed[0].path == "(unknown file)"
+
+
+def test_run_git_returns_failure_tuple_on_exception(monkeypatch):
+    monkeypatch.setattr("services.git_diff.run_no_window", lambda *args, **kwargs: (_ for _ in ()).throw(OSError()))
+
+    assert gd._run_git(["git", "status"], "repo") == (1, "")

@@ -2,12 +2,16 @@ import json
 import os
 import re
 import hashlib
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from config import AICHS_HOME, CONV_DIR, WORKSPACES_PATH
 from services.content import is_visible_message
 from storage.settings import SettingsStore, trash_retention_days
+
+
+_last_workspace_updated_at: datetime | None = None
 
 
 class ConversationStore:
@@ -211,6 +215,52 @@ def workspace_trash_dir(workspace: str | Path) -> Path:
     return workspace_data_dir(workspace) / "trash"
 
 
+def register_workspace(workspace: str | Path) -> dict:
+    path = Path(workspace).expanduser().resolve()
+    wid = workspace_id(path)
+    updated_at = _workspace_updated_at()
+    _register_workspace(path, wid, updated_at=updated_at)
+    return {
+        "id": wid,
+        "path": str(path),
+        "name": path.name or str(path),
+        "updated_at": updated_at,
+        "exists": path.is_dir(),
+    }
+
+
+def list_workspaces(limit: int | None = None) -> list[dict]:
+    data = _load_json(WORKSPACES_PATH)
+    if not isinstance(data, dict):
+        return []
+    raw_workspaces = data.get("workspaces")
+    if not isinstance(raw_workspaces, dict):
+        return []
+
+    rows = []
+    for wid, raw in raw_workspaces.items():
+        if not isinstance(raw, dict):
+            continue
+        if _is_leaked_test_workspace(str(wid), raw):
+            continue
+        path = str(raw.get("path") or "").strip()
+        if not path:
+            continue
+        name = str(raw.get("name") or "").strip()
+        rows.append({
+            "id": str(raw.get("id") or wid),
+            "path": path,
+            "name": name or Path(path).name or path,
+            "updated_at": str(raw.get("updated_at") or ""),
+            "exists": Path(path).expanduser().is_dir(),
+        })
+
+    rows.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
+    if limit is not None:
+        return rows[:max(0, int(limit))]
+    return rows
+
+
 def project_conversation_records(cwd: str) -> list[tuple[Path, dict]]:
     return ConversationStore(cwd).iter_records()
 
@@ -266,7 +316,9 @@ def _parse_datetime(value) -> datetime | None:
         return None
 
 
-def _register_workspace(workspace: Path, wid: str) -> None:
+def _register_workspace(workspace: Path, wid: str, *, updated_at: str | None = None) -> None:
+    if _skip_workspace_registration(workspace):
+        return
     WORKSPACES_PATH.parent.mkdir(parents=True, exist_ok=True)
     data = _load_json(WORKSPACES_PATH)
     if not isinstance(data, dict):
@@ -274,15 +326,29 @@ def _register_workspace(workspace: Path, wid: str) -> None:
     workspaces = data.get("workspaces")
     if not isinstance(workspaces, dict):
         workspaces = {}
+    workspaces = {
+        key: value
+        for key, value in workspaces.items()
+        if not _is_leaked_test_workspace(str(key), value)
+    }
     workspaces[wid] = {
         "id": wid,
         "path": str(workspace),
         "name": workspace.name or str(workspace),
-        "updated_at": datetime.now().isoformat(),
+        "updated_at": updated_at or _workspace_updated_at(),
     }
     data["version"] = 1
     data["workspaces"] = workspaces
     WORKSPACES_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _workspace_updated_at() -> str:
+    global _last_workspace_updated_at
+    now = datetime.now()
+    if _last_workspace_updated_at is not None and now <= _last_workspace_updated_at:
+        now = _last_workspace_updated_at + timedelta(microseconds=1)
+    _last_workspace_updated_at = now
+    return now.isoformat()
 
 
 def _prune_leaked_test_conversations() -> None:
@@ -298,6 +364,40 @@ def _prune_leaked_test_conversations() -> None:
             and data.get("updated_at") == "2026-01-01T12:00:00"
         ):
             p.unlink(missing_ok=True)
+
+
+def _skip_workspace_registration(workspace: Path) -> bool:
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+    if _is_inside_path(workspace, Path(tempfile.gettempdir())):
+        registry_text = str(WORKSPACES_PATH)
+        return "fake_home" not in registry_text
+    return False
+
+
+def _is_leaked_test_workspace(wid: str, raw: object) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    name = str(raw.get("name") or "")
+    path = str(raw.get("path") or "")
+    if name != "proj" or not str(wid).startswith("proj-"):
+        return False
+    try:
+        workspace = Path(path).expanduser().resolve()
+    except OSError:
+        return False
+    if not _is_inside_path(workspace, Path(tempfile.gettempdir())):
+        return False
+    parent = workspace.parent.name.lower()
+    return parent.startswith("tmp") or parent.startswith("pytest-")
+
+
+def _is_inside_path(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def _is_newer(summary: dict, prev_summary: dict, path: Path, prev_path: Path) -> bool:

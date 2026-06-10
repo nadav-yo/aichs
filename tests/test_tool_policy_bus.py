@@ -1,4 +1,5 @@
 import threading
+import time
 
 import pytest
 
@@ -68,13 +69,15 @@ def test_extension_tool_approval(bus, workspace_with_tool):
     assert "ping" in policy.approved_extension_tools
 
 
-def test_cancel_wait(bus, workspace):
+def test_cancel_wait(bus, workspace, qapp):
     policy = ConversationToolPolicy()
     cwd = str(workspace)
     holder = {}
+    approval_seen = threading.Event()
 
     def on_needed(pending):
         holder["pending"] = pending
+        approval_seen.set()
 
     bus.approval_needed.connect(on_needed)
 
@@ -84,7 +87,11 @@ def test_cancel_wait(bus, workspace):
 
     t = threading.Thread(target=wait)
     t.start()
-    t.join(timeout=2)
+    deadline = time.monotonic() + 1
+    while not approval_seen.wait(timeout=0.01) and time.monotonic() < deadline:
+        qapp.processEvents()
+    assert approval_seen.is_set()
     bus.cancel_wait("stopped")
-    t.join(timeout=2)
+    t.join(timeout=1)
+    assert not t.is_alive()
     assert holder.get("out") == "[cancelled]"

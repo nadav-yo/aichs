@@ -99,6 +99,12 @@ def _path_key(path: str) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(path)))
 
 
+def _is_visible_tree_entry(name: str, is_dir: bool) -> bool:
+    if name in IGNORED:
+        return False
+    return is_dir or not name.startswith(".")
+
+
 def _file_icon_type(name: str) -> tuple[str, str]:
     lowered = name.lower()
     if lowered in _FILE_NAME_ICON_TYPES:
@@ -290,7 +296,7 @@ class FileTree(QTreeWidget):
     file_opened = pyqtSignal(str)
     file_attached = pyqtSignal(str)
 
-    def __init__(self, root_path: str, parent=None):
+    def __init__(self, root_path: str, parent=None, *, defer_git_status: bool = False):
         super().__init__(parent)
         self.setObjectName("fileTree")
         self.root_path = root_path
@@ -299,6 +305,7 @@ class FileTree(QTreeWidget):
         self._dirty_dir_paths: set[str] = set()
         self._git_by_path: dict[str, tuple[str, str]] = {}
         self._filter_text = ""
+        self._git_timer_started = False
         self.setHeaderHidden(True)
         self.setAnimated(False)
         self.setAllColumnsShowFocus(False)
@@ -315,12 +322,13 @@ class FileTree(QTreeWidget):
         self._watcher = QFileSystemWatcher([root_path])
         self._watcher.directoryChanged.connect(lambda _: self.refresh())
         self.itemExpanded.connect(self._on_item_expanded)
-        self._populate()
+        self._populate(load_git_status=not defer_git_status)
         self.expandToDepth(1)
         self.itemDoubleClicked.connect(self._on_double_click)
         self._git_timer = QTimer(self)
         self._git_timer.timeout.connect(self._refresh_git_status)
-        self._git_timer.start(5000)
+        if not defer_git_status:
+            self.start_git_timer()
 
     def _apply_tree_style(self):
         self.setFont(mono_font(mono_font_pt()))
@@ -357,6 +365,7 @@ class FileTree(QTreeWidget):
         self._filter_text = ""
         self._git_by_path.clear()
         self.refresh()
+        self.start_git_timer()
 
     def set_filter_text(self, text: str):
         value = " ".join(str(text or "").split()).casefold()
@@ -689,6 +698,10 @@ class FileTree(QTreeWidget):
 
     def refresh(self):
         self._populate()
+
+    def refresh_from_changes(self, changes):
+        self._populate(changes=changes)
+        self.start_git_timer()
         if not self._filter_text:
             self.expandToDepth(1)
 
@@ -761,25 +774,34 @@ class FileTree(QTreeWidget):
         self._apply_decorations()
         return item
 
-    def _load_git_status(self):
+    def _load_git_status(self, changes=None):
+        if changes is None:
+            changes = list_file_changes(self.root_path)
         self._git_by_path = {
             _path_key(ch.abs_path): (ch.code, ch.label)
-            for ch in list_file_changes(self.root_path)
+            for ch in changes
         }
 
-    def _refresh_git_status(self):
-        self._load_git_status()
+    def _refresh_git_status(self, changes=None):
+        self._load_git_status(changes)
         self._update_git_labels()
         self._apply_decorations()
 
-    def _populate(self):
+    def _populate(self, *, changes=None, load_git_status: bool = True):
         self.clear()
-        self._load_git_status()
+        if load_git_status:
+            self._load_git_status(changes)
         if self._filter_text:
             self._fill_filtered()
         else:
             self._fill(self.invisibleRootItem(), self.root_path)
         self._apply_decorations()
+
+    def start_git_timer(self):
+        if self._git_timer_started:
+            return
+        self._git_timer_started = True
+        self._git_timer.start(5000)
 
     def shutdown(self):
         self._git_timer.stop()
@@ -853,15 +875,12 @@ class FileTree(QTreeWidget):
 
         for dirpath, dirnames, filenames in os.walk(self.root_path, onerror=lambda _e: None):
             dirnames[:] = sorted(
-                [
-                    name for name in dirnames
-                    if name not in IGNORED and not name.startswith(".")
-                ],
+                [name for name in dirnames if _is_visible_tree_entry(name, True)],
                 key=str.lower,
             )
             entries = [(name, True) for name in dirnames] + [(name, False) for name in filenames]
             for name, is_dir in sorted(entries, key=lambda entry: (not entry[1], entry[0].lower())):
-                if name in IGNORED or name.startswith("."):
+                if not _is_visible_tree_entry(name, is_dir):
                     continue
                 path = os.path.join(dirpath, name)
                 try:
@@ -878,7 +897,7 @@ class FileTree(QTreeWidget):
                 parent.addChild(item)
                 matches += 1
                 if matches >= MAX_TREE_ENTRIES_PER_DIR:
-                    more = QTreeWidgetItem([f"... more matches"])
+                    more = QTreeWidgetItem(["... more matches"])
                     more.setDisabled(True)
                     parent.addChild(more)
                     return
@@ -890,7 +909,7 @@ class FileTree(QTreeWidget):
             return
         visible = [
             e for e in entries
-            if e.name not in IGNORED and not e.name.startswith(".")
+            if _is_visible_tree_entry(e.name, e.is_dir())
         ]
         for e in visible[:MAX_TREE_ENTRIES_PER_DIR]:
             item = QTreeWidgetItem([self._display_name(e.name, e.path)])
@@ -974,6 +993,8 @@ class LeftPanel(QWidget):
     file_search_requested = pyqtSignal()
     text_search_requested = pyqtSignal()
     extensions_requested  = pyqtSignal()
+    workspace_requested   = pyqtSignal()
+    activity_selected     = pyqtSignal(str)
     activity_panel_collapsed_changed = pyqtSignal(bool)
     settings_changed = pyqtSignal()
 
@@ -985,6 +1006,7 @@ class LeftPanel(QWidget):
         parent=None,
         *,
         current_model_getter: Callable[[], str] | None = None,
+        defer_refresh: bool = False,
     ):
         super().__init__(parent)
         self._settings = settings or SettingsStore()
@@ -992,8 +1014,9 @@ class LeftPanel(QWidget):
         self._activity_widgets: dict[str, QWidget] = {}
         self._active_activity = "chats"
         self._collapsed_width = 64
-        self._expanded_min_width = 240
-        self._expanded_max_width = 480
+        self._expanded_min_width = 280
+        self._expanded_max_width = 640
+        self._defer_refresh = defer_refresh
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1008,8 +1031,8 @@ class LeftPanel(QWidget):
 
         self._stack = QStackedWidget()
         self._stack.setObjectName("activityStack")
-        self._stack.setMinimumWidth(180)
-        self._stack.setMaximumWidth(420)
+        self._stack.setMinimumWidth(216)
+        self._stack.setMaximumWidth(576)
 
         self._conv = ConversationPanel(store, settings=self._settings)
         self._conv.selected.connect(self.selected)
@@ -1017,7 +1040,7 @@ class LeftPanel(QWidget):
         self._conv.renamed.connect(self.renamed)
         self._conv.deleted.connect(self.deleted)
 
-        self._file_tree = FileTree(root_path)
+        self._file_tree = FileTree(root_path, defer_git_status=defer_refresh)
         self._file_tree.file_opened.connect(self.file_open)
         self._file_tree.file_attached.connect(self.file_attach)
 
@@ -1037,6 +1060,7 @@ class LeftPanel(QWidget):
             root_path,
             settings=self._settings,
             current_model_getter=current_model_getter,
+            defer_refresh=defer_refresh,
         )
         self._git.file_open.connect(self.git_file_open)
 
@@ -1054,6 +1078,7 @@ class LeftPanel(QWidget):
         self._search_page.file_search_requested.connect(self.file_search_requested)
         self._search_page.text_search_requested.connect(self.text_search_requested)
 
+        self._add_activity_action("workspace", "Work", rail_layout, tooltip="Workspace")
         self._add_activity("chats", "Chats", self._conv, rail_layout)
         self._add_activity("files", "Files", files_wrap, rail_layout)
         self._add_activity("search", "Search", self._search_page, rail_layout)
@@ -1095,11 +1120,35 @@ class LeftPanel(QWidget):
         self._stack.addWidget(widget)
         rail_layout.addWidget(button)
 
+    def _add_activity_action(
+        self,
+        key: str,
+        label: str,
+        rail_layout: QVBoxLayout,
+        *,
+        tooltip: str | None = None,
+    ):
+        button = QPushButton(label)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip(tooltip or label)
+        button.clicked.connect(lambda _checked=False, k=key: self._on_activity_clicked(k))
+        self._activity_buttons[key] = button
+        rail_layout.addWidget(button)
+
     def _on_activity_clicked(self, key: str):
+        if key == "workspace":
+            self.show_workspace_activity()
+            return
         if key == self._active_activity and not self.is_activity_panel_collapsed():
             self.collapse_activity_panel()
             return
         self.set_active_activity(key)
+
+    def show_workspace_activity(self):
+        self._active_activity = "workspace"
+        self.collapse_activity_panel()
+        self._sync_activity_buttons()
+        self.workspace_requested.emit()
 
     def set_active_activity(self, key: str, *, expand: bool = True):
         widget = self._activity_widgets.get(key)
@@ -1107,9 +1156,12 @@ class LeftPanel(QWidget):
             return
         self._active_activity = key
         self._stack.setCurrentWidget(widget)
+        if key == "git" and not self._defer_refresh:
+            self._git.ensure_loaded()
         if expand:
             self.expand_activity_panel()
         self._sync_activity_buttons()
+        self.activity_selected.emit(key)
 
     def active_activity(self) -> str:
         return self._active_activity
@@ -1143,7 +1195,6 @@ class LeftPanel(QWidget):
 
     def _apply_styles(self):
         p = palette()
-        fs = max(11, chat_font_pt() - 2)
         self._rail.setStyleSheet(
             f"QFrame#activityRail {{ background:{p['BG']};"
             f"border-right:1px solid {p['BORDER_SUBTLE']}; }}"
@@ -1169,17 +1220,19 @@ class LeftPanel(QWidget):
         self._apply_styles()
         self._conv.apply_appearance()
         self._file_tree._apply_tree_style()
-        self._file_tree._refresh_git_status()
+        self._file_tree._apply_decorations()
         self._git.apply_appearance()
 
     def open_settings(self):
-        if SettingsDialog(self._settings, self).exec():
+        if SettingsDialog(self._settings, self, cwd=self._file_tree.root_path).exec():
             self.settings_changed.emit()
 
     def open_docs(self):
         DocsDialog(self).exec()
 
-    def set_workspace(self, path: str):
+    def set_workspace(self, path: str, store: ConversationStore | None = None):
+        if store is not None:
+            self._conv.set_store(store)
         self._file_tree.set_root(path)
         self._git.set_repo_path(path)
         self._files_header.set_path(path)
@@ -1214,6 +1267,13 @@ class LeftPanel(QWidget):
         if self._file_tree.currentItem() is None and self._file_tree.topLevelItemCount():
             self._file_tree.setCurrentItem(self._file_tree.topLevelItem(0))
         self._file_tree.setFocus(Qt.FocusReason.ShortcutFocusReason)
+
+    def apply_initial_git_changes(self, changes):
+        self._file_tree.refresh_from_changes(changes)
+        self._git.set_changes(changes)
+        self._defer_refresh = False
+        if self._active_activity == "git":
+            self._git.ensure_loaded()
 
     def shutdown(self):
         self._file_tree.shutdown()

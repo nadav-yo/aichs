@@ -1,4 +1,4 @@
-from services.code_completion import LocalCompletionProvider, prefix_at
+from services.code_completion import LocalCompletionProvider, _completion_scan_window, prefix_at
 
 
 def test_prefix_at_returns_word_fragment_before_cursor():
@@ -36,3 +36,17 @@ def test_local_completion_provider_is_case_insensitive():
     )
 
     assert [item.label for item in items] == ["widget_count", "WidgetFactory"]
+
+
+def test_local_completion_provider_ignores_empty_prefix():
+    provider = LocalCompletionProvider()
+
+    assert provider.complete(path="demo.py", content="alpha beta", position=3, prefix="") == []
+
+
+def test_completion_scan_window_clips_large_documents():
+    content = "a" * 200000 + "needle" + "b" * 200000
+    window = _completion_scan_window(content, 200003)
+
+    assert "needle" in window
+    assert len(window) < len(content)
