@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from ui.widgets.chat_panel import ChatPanel, _ConversationRuntime
+from ui.widgets.chat_panel import ChatPanel, _ConversationRuntime, _saved_tool_calls
 
 
 class _Signal:
@@ -134,3 +134,39 @@ def test_insert_history_bubble_skips_runtime_messages(qapp):
     panel._make_bubble = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("hidden"))
 
     assert ChatPanel._insert_history_bubble(panel, 0) is None
+
+
+def test_insert_history_bubble_replays_openai_tool_call_notice(qapp):
+    panel = SimpleNamespace()
+    notices = []
+    panel.history = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "function": {"name": "read_file", "arguments": '{"path": "src/main.py"}'},
+                }
+            ],
+        }
+    ]
+    panel.cwd = "C:\\repo"
+    panel._make_bubble = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("hidden"))
+    panel._insert_tool_notice = lambda text, debug_text="", **kwargs: notices.append((text, debug_text, kwargs))
+
+    assert ChatPanel._insert_history_bubble(panel, 0) is None
+    assert notices[0][0].replace("\\", "/") == "Reading file 'src/main.py'"
+    assert "Tool: read_file" in notices[0][1]
+    assert notices[0][2] == {"at_top": False}
+
+
+def test_saved_tool_calls_reads_anthropic_tool_use():
+    calls = _saved_tool_calls({
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "tu_1", "name": "search_files", "input": {"pattern": "persist"}},
+        ],
+    })
+
+    assert calls == [("search_files", {"pattern": "persist"})]

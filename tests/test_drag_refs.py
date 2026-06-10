@@ -1,6 +1,7 @@
 import pytest
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QKeySequence
 from services.chat_drag import (
     AICHS_CHAT_DROP_MIME,
     AICHS_COMMIT_DROP_MIME,
@@ -15,15 +16,23 @@ from services.chat_drag import (
     parse_commit_drop,
     parse_file_drop,
 )
-from PyQt6.QtWidgets import QLabel, QListWidget, QTextBrowser
+from PyQt6.QtWidgets import QLabel, QListWidget, QLineEdit, QTextBrowser
 from PyQt6.QtWidgets import QMessageBox
 
 from services.git_status import stage_files
 from storage.settings import SettingsStore
 from ui.theme import palette
 from ui.widgets.git_panel import GitPanel, _CommitDiffDialog
-from ui.widgets.left_panel import FileTree
+from ui.widgets.left_panel import FileTree, _FilesHeader
 from ui.widgets.conversation_panel import ConversationPanel
+
+
+def _has_shortcut(widget, sequence: str) -> bool:
+    wanted = QKeySequence(sequence)
+    return any(
+        shortcut.key().matches(wanted) == QKeySequence.SequenceMatch.ExactMatch
+        for shortcut in widget._shortcut_handles
+    )
 
 
 def test_files_tree_drags_file_mentions(qapp, workspace):
@@ -54,6 +63,106 @@ def test_files_tree_reveals_nested_file(qapp, workspace):
     assert item.text(0).endswith("api.py")
 
 
+def test_files_tree_registers_keyboard_shortcuts(qapp, workspace):
+    tree = FileTree(str(workspace))
+
+    for sequence in [
+        "F2",
+        "Delete",
+        "F5",
+        "Ctrl+Alt+N",
+        "Ctrl+Shift+N",
+        "Ctrl+C",
+        "Ctrl+Shift+C",
+        "Shift+F10",
+    ]:
+        assert _has_shortcut(tree, sequence)
+
+
+def test_files_tree_open_selected_emits_file(qapp, workspace):
+    tree = FileTree(str(workspace))
+    opened = []
+    tree.file_opened.connect(opened.append)
+    assert tree.reveal_file(str(workspace / "src" / "main.py"))
+
+    tree._open_selected()
+
+    assert opened == [str(workspace / "src" / "main.py")]
+
+
+def test_files_tree_copies_selected_paths(qapp, workspace):
+    tree = FileTree(str(workspace))
+    path = workspace / "src" / "main.py"
+    assert tree.reveal_file(str(path))
+
+    tree._copy_selected_relative_path()
+    assert qapp.clipboard().text() == "src/main.py"
+
+    tree._copy_selected_absolute_path()
+    assert qapp.clipboard().text() == str(path.resolve())
+
+
+def test_files_header_filter_replaces_path_label(qapp, workspace):
+    header = _FilesHeader(str(workspace), filter_enabled=True)
+    values = []
+    header.filter_changed.connect(values.append)
+    edit = header.findChild(QLineEdit, "filesFilter")
+
+    assert edit is not None
+    assert edit.placeholderText() == "Filter files"
+    assert edit.toolTip() == str(workspace)
+
+    edit.setText("main")
+
+    assert values == ["main"]
+
+
+def test_files_tree_uses_icons_for_folders_and_known_files(qapp, workspace):
+    tree = FileTree(str(workspace))
+    src = tree.topLevelItem(0)
+    tree._on_item_expanded(src)
+    item = src.child(0)
+
+    assert not src.icon(0).isNull()
+    assert not item.icon(0).isNull()
+
+
+def test_files_tree_filters_by_relative_path(qapp, workspace):
+    (workspace / "README.md").write_text("# demo\n", encoding="utf-8")
+    tree = FileTree(str(workspace))
+
+    tree.set_filter_text("main")
+
+    assert tree.topLevelItemCount() == 1
+    item = tree.topLevelItem(0)
+    assert item.text(0) == "src/main.py"
+    assert item.data(0, Qt.ItemDataRole.UserRole) == str(workspace / "src" / "main.py")
+    assert tree.mimeData([item]).text() == "@src/main.py"
+
+    tree.set_filter_text("")
+
+    assert tree.topLevelItem(0).text(0) == "src"
+
+
+def test_files_tree_marks_dirty_files_and_parent_folders(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    tree = FileTree(str(workspace))
+    src = tree.topLevelItem(0)
+    tree._on_item_expanded(src)
+
+    tree.set_file_dirty(str(path), True)
+
+    item = src.child(0)
+    assert item.text(0) == "* main.py"
+    assert "Unsaved editor changes" in item.toolTip(0)
+    assert "Contains unsaved editor changes" in src.toolTip(0)
+
+    tree.set_file_dirty(str(path), False)
+
+    assert item.text(0) == "main.py"
+    assert item.toolTip(0) == ""
+
+
 def test_files_tree_reveal_rejects_outside_workspace(qapp, workspace, tmp_path):
     tree = FileTree(str(workspace))
     outside = tmp_path / "outside.py"
@@ -69,6 +178,19 @@ def test_files_tree_creates_file_in_folder(qapp, workspace):
 
     assert created == workspace / "src" / "notes.txt"
     assert created.read_text(encoding="utf-8") == ""
+
+
+def test_files_tree_new_file_shortcut_uses_selected_file_parent(qapp, workspace, monkeypatch):
+    tree = FileTree(str(workspace))
+    assert tree.reveal_file(str(workspace / "src" / "main.py"))
+    monkeypatch.setattr(
+        "ui.widgets.left_panel.QInputDialog.getText",
+        lambda *args, **kwargs: ("notes.txt", True),
+    )
+
+    tree._new_file_selected()
+
+    assert (workspace / "src" / "notes.txt").exists()
 
 
 def test_files_tree_creates_folder_in_folder(qapp, workspace):
@@ -89,6 +211,15 @@ def test_files_tree_renames_file(qapp, workspace):
     assert new == workspace / "src" / "app.py"
     assert new.read_text(encoding="utf-8") == "print('hi')\n"
     assert not old.exists()
+
+
+def test_files_tree_renames_folder(qapp, workspace):
+    tree = FileTree(str(workspace))
+
+    new = tree.rename_path(str(workspace / "src"), "app")
+
+    assert new == workspace / "app"
+    assert (workspace / "app" / "main.py").exists()
 
 
 @pytest.mark.parametrize("name", ["", "  ", ".", "..", "../escape.py", "nested/file.py"])
@@ -228,6 +359,21 @@ def test_files_tree_discard_cancel_keeps_modified_file(qapp, git_repo, monkeypat
     tree._discard_file_dialog(str(path))
 
     assert path.read_text(encoding="utf-8") == "print('keep files tab change')\n"
+
+
+def test_files_tree_combines_git_and_dirty_markers(qapp, git_repo):
+    path = git_repo / "src" / "main.py"
+    path.write_text("print('modified')\n", encoding="utf-8")
+    tree = FileTree(str(git_repo))
+    src = tree.topLevelItem(0)
+    tree._on_item_expanded(src)
+
+    tree.set_file_dirty(str(path), True)
+
+    item = src.child(0)
+    assert item.text(0) == "* main.py"
+    assert not item.icon(0).isNull()
+    assert "Git: Modified" in item.toolTip(0)
 
 
 def test_git_log_drags_commit_reference(qapp, git_repo):

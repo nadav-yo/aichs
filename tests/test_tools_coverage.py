@@ -520,6 +520,11 @@ class TestRegistryApi:
 
 
 class TestHelpers:
+    def test_message_text_none_is_empty(self):
+        from services.tools import _message_text
+
+        assert _message_text(None) == ""
+
     def test_display_path_outside_cwd(self, tmp_path):
         outside = tmp_path / "other" / "file.txt"
         outside.parent.mkdir(parents=True)

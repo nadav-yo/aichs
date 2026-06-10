@@ -32,9 +32,18 @@ def test_git_changes_list_populates_staged_and_unstaged(qapp, git_repo):
     staged = [widget.staged_list.item(i).text() for i in range(widget.staged_list.count())]
     unstaged = [widget.unstaged_list.item(i).text() for i in range(widget.unstaged_list.count())]
 
-    assert staged == ["M src/main.py"]
-    assert "M src/main.py" in unstaged
-    assert "? note.txt" in unstaged
+    assert staged == ["src/main.py"]
+    assert "src/main.py" in unstaged
+    assert "note.txt" in unstaged
+    assert not widget.staged_list.item(0).icon().isNull()
+    assert widget.staged_list.item(0).toolTip() == "Modified — src/main.py"
+    note = next(
+        widget.unstaged_list.item(i)
+        for i in range(widget.unstaged_list.count())
+        if widget.unstaged_list.item(i).text() == "note.txt"
+    )
+    assert not note.icon().isNull()
+    assert note.toolTip() == "Untracked — note.txt"
     assert widget._staged_label.text() == "Staged (1)"
     assert widget._unstaged_label.text() == "Unstaged (2)"
 
@@ -262,7 +271,8 @@ def test_git_changes_list_drag_move_stages_selected_file(qapp, git_repo):
 
     assert widget.staged_list.count() == 1
     assert widget.unstaged_list.count() == 0
-    assert widget.staged_list.item(0).text() == "M src/main.py"
+    assert widget.staged_list.item(0).text() == "src/main.py"
+    assert not widget.staged_list.item(0).icon().isNull()
     assert history_refreshes == []
 
 
@@ -278,7 +288,8 @@ def test_git_changes_list_drag_move_unstages_selected_file(qapp, git_repo):
 
     assert widget.staged_list.count() == 0
     assert widget.unstaged_list.count() == 1
-    assert widget.unstaged_list.item(0).text() == "M src/main.py"
+    assert widget.unstaged_list.item(0).text() == "src/main.py"
+    assert not widget.unstaged_list.item(0).icon().isNull()
 
 
 def test_git_changes_list_failure_uses_dialog_without_status_row(qapp, git_repo, monkeypatch):

@@ -50,6 +50,7 @@ from ui.theme import (
     palette,
     sidebar_section_label_style,
 )
+from ui.widgets.git_status_icon import git_status_description, git_status_icon
 
 _ROLE_ABS_PATH = Qt.ItemDataRole.UserRole
 _ROLE_REL_PATH = Qt.ItemDataRole.UserRole + 1
@@ -241,8 +242,9 @@ class GitChangesList(QWidget):
 
     def _add_change(self, widget: QListWidget, ch: GitFileChange, label: str):
         prefix = label or "·"
-        item = QListWidgetItem(f"{prefix} {ch.rel_path}")
-        item.setToolTip(f"{prefix} — {ch.rel_path}")
+        item = QListWidgetItem(ch.rel_path)
+        item.setIcon(git_status_icon(ch.code, prefix))
+        item.setToolTip(f"{git_status_description(ch.code, prefix)} — {ch.rel_path}")
         item.setData(_ROLE_ABS_PATH, ch.abs_path)
         item.setData(_ROLE_REL_PATH, ch.rel_path)
         item.setForeground(QColor(git_status_color(ch.code)))

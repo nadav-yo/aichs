@@ -100,6 +100,38 @@ def test_file_viewer_marks_dirty_tabs_across_files(qapp, workspace):
     panel.close()
 
 
+def test_file_viewer_emits_dirty_file_state(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    panel = FileViewerPanel(str(workspace))
+    changes = []
+    panel.dirty_file_changed.connect(lambda p, dirty: changes.append((p, dirty)))
+
+    panel.open_file(str(path), repo_root=str(workspace))
+    tab = panel._tabs.widget(0)
+    tab._editor.edit_requested.emit()
+    tab._editor.setPlainText("print('dirty')\n")
+    tab._save()
+
+    assert changes == [(str(path), True), (str(path), False)]
+    panel.close()
+
+
+def test_file_viewer_clears_dirty_state_when_dirty_tab_closes(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    panel = FileViewerPanel(str(workspace))
+    changes = []
+    panel.dirty_file_changed.connect(lambda p, dirty: changes.append((p, dirty)))
+
+    panel.open_file(str(path), repo_root=str(workspace))
+    tab = panel._tabs.widget(0)
+    tab._editor.edit_requested.emit()
+    tab._editor.setPlainText("print('dirty')\n")
+    panel.close_current_tab()
+
+    assert changes == [(str(path), True), (str(path), False)]
+    panel.close()
+
+
 def test_file_viewer_auto_saves_when_enabled(qapp, workspace):
     path = workspace / "src" / "main.py"
     panel = FileViewerPanel(
@@ -695,6 +727,7 @@ def test_file_viewer_markdown_uses_preview_until_edit(qapp, workspace):
     assert tab._status.text() == "Markdown preview"
     assert tab._preview.isVisibleTo(tab)
     assert tab._editor.isHidden()
+    assert tab._preview_toggle.isChecked() is True
     assert "<h1" in tab._preview.toHtml().lower()
     assert "<table" in tab._preview.toHtml().lower()
 
@@ -702,6 +735,7 @@ def test_file_viewer_markdown_uses_preview_until_edit(qapp, workspace):
     assert tab._editor.isVisibleTo(tab)
     assert tab._preview.isHidden()
     assert tab._editor.isReadOnly() is False
+    assert tab._preview_toggle.isChecked() is False
 
     tab._editor.setPlainText("# Saved\n")
     tab._save()
@@ -711,7 +745,49 @@ def test_file_viewer_markdown_uses_preview_until_edit(qapp, workspace):
     assert tab._status.text() == "Markdown preview"
     assert tab._preview.isVisibleTo(tab)
     assert tab._editor.isHidden()
+    assert tab._preview_toggle.isChecked() is True
     assert "Saved" in tab._preview.toPlainText()
+    panel.close()
+
+
+def test_file_viewer_preview_checkbox_toggles_markdown_source(qapp, workspace):
+    path = workspace / "README.md"
+    path.write_text("# Preview\n", encoding="utf-8")
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace))
+    tab = panel._tabs.widget(0)
+    tab._preview_toggle.setChecked(False)
+
+    assert tab._editor.isVisibleTo(tab)
+    assert tab._preview.isHidden()
+    assert tab._edit_mode is True
+
+    tab._preview_toggle.setChecked(True)
+
+    assert tab._preview.isVisibleTo(tab)
+    assert tab._editor.isHidden()
+    panel.close()
+
+
+def test_file_viewer_escape_key_returns_clean_markdown_edit_to_preview(qapp, workspace):
+    path = workspace / "README.md"
+    path.write_text("# Original\n", encoding="utf-8")
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace))
+    tab = panel._tabs.widget(0)
+    tab._preview.edit_requested.emit()
+    tab._editor.setFocus()
+    qapp.processEvents()
+
+    QTest.keyClick(tab._editor, Qt.Key.Key_Escape)
+
+    assert tab._dirty is False
+    assert tab._edit_mode is False
+    assert tab._preview_toggle.isChecked() is True
+    assert tab._preview.isVisibleTo(tab)
+    assert tab._editor.isHidden()
     panel.close()
 
 
@@ -727,17 +803,40 @@ def test_file_viewer_escape_discards_markdown_edit_and_returns_to_preview(qapp, 
     tab._editor.setPlainText("# Unsaved\n")
     assert tab._dirty is True
 
-    tab._cancel_shortcut.activated.emit()
+    tab._editor.setFocus()
+    qapp.processEvents()
+    QTest.keyClick(tab._editor, Qt.Key.Key_Escape)
 
     assert path.read_text(encoding="utf-8") == original
     assert tab._dirty is False
     assert panel._tabs.tabText(0) == "README.md"
     assert tab._edit_mode is False
     assert tab._status.text() == "Reverted"
+    assert tab._preview_toggle.isChecked() is True
     assert tab._preview.isVisibleTo(tab)
     assert tab._editor.isHidden()
     _wait_until(qapp, lambda: "Original" in tab._preview.toPlainText())
     assert "Original" in tab._preview.toPlainText()
+    panel.close()
+
+
+def test_file_viewer_revert_only_enabled_for_unsaved_changes(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace))
+    tab = panel._tabs.widget(0)
+
+    assert tab._revert_btn.isEnabled() is False
+
+    tab._editor.edit_requested.emit()
+    tab._editor.setPlainText("print('dirty')\n")
+
+    assert tab._revert_btn.isEnabled() is True
+
+    tab._save()
+
+    assert tab._revert_btn.isEnabled() is False
     panel.close()
 
 

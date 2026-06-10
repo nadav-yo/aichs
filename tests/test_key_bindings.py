@@ -5,6 +5,10 @@ def test_default_file_search_shortcuts_include_control_and_meta():
     assert shortcut_sequences("file_search") == ("Ctrl+P", "Meta+P")
 
 
+def test_default_file_browser_shortcuts_include_control_and_meta():
+    assert shortcut_sequences("file_browser") == ("Ctrl+Shift+E", "Meta+Shift+E")
+
+
 def test_default_text_search_shortcuts_include_control_and_meta():
     assert shortcut_sequences("text_search") == ("Ctrl+Shift+F", "Meta+Shift+F")
 

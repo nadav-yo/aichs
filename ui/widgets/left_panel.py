@@ -6,10 +6,13 @@ from typing import Callable
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QStackedWidget, QTreeWidget, QTreeWidgetItem,
     QPushButton, QHBoxLayout, QLabel, QMenu, QSizePolicy, QStyleFactory,
-    QAbstractItemView, QInputDialog, QMessageBox, QFrame,
+    QAbstractItemView, QInputDialog, QMessageBox, QFrame, QLineEdit,
 )
-from PyQt6.QtCore import pyqtSignal, Qt, QFileSystemWatcher, QTimer, QMimeData
-from PyQt6.QtGui import QColor, QAction
+from PyQt6.QtCore import pyqtSignal, Qt, QFileSystemWatcher, QTimer, QMimeData, QSize, QRectF
+from PyQt6.QtGui import (
+    QColor, QAction, QBrush, QFont, QGuiApplication, QIcon, QKeySequence,
+    QPainter, QPen, QPixmap, QShortcut,
+)
 
 from config import IGNORED, MAX_TREE_ENTRIES_PER_DIR
 from services.chat_drag import AICHS_FILE_DROP_MIME, file_drop_payload, file_drop_text
@@ -19,16 +22,181 @@ from storage.settings import SettingsStore
 from ui.theme import (
     palette, ACCENT, git_status_color, icon_button_style, files_header_style,
     file_tree_sidebar_style, mono_font_pt, mono_font,
-    meta_font_pt, chat_font_pt,
+    meta_font_pt, chat_font_pt, current_theme,
 )
 from ui.widgets.conversation_panel import ConversationPanel
 from ui.widgets.git_panel import GitPanel
 from ui.widgets.docs_dialog import DocsDialog
+from ui.widgets.git_status_icon import git_status_description, paint_git_status_badge
 from ui.widgets.settings_dialog import SettingsDialog
+
+
+_FILE_ICON_TYPES = {
+    ".py": ("PY", "#3776ab"),
+    ".pyw": ("PY", "#3776ab"),
+    ".js": ("JS", "#f7df1e"),
+    ".jsx": ("JSX", "#61dafb"),
+    ".ts": ("TS", "#3178c6"),
+    ".tsx": ("TSX", "#3178c6"),
+    ".json": ("{}", "#f59e0b"),
+    ".jsonc": ("{}", "#f59e0b"),
+    ".md": ("MD", "#60a5fa"),
+    ".markdown": ("MD", "#60a5fa"),
+    ".yaml": ("YML", "#cb171e"),
+    ".yml": ("YML", "#cb171e"),
+    ".toml": ("TOML", "#9c4221"),
+    ".ini": ("INI", "#8b949e"),
+    ".cfg": ("CFG", "#8b949e"),
+    ".txt": ("TXT", "#94a3b8"),
+    ".css": ("CSS", "#2965f1"),
+    ".scss": ("SCSS", "#cf649a"),
+    ".html": ("HTML", "#e34f26"),
+    ".htm": ("HTML", "#e34f26"),
+    ".xml": ("XML", "#f97316"),
+    ".go": ("GO", "#00add8"),
+    ".rs": ("RS", "#dea584"),
+    ".java": ("JV", "#b07219"),
+    ".c": ("C", "#5555aa"),
+    ".h": ("H", "#5555aa"),
+    ".cc": ("C++", "#f34b7d"),
+    ".cpp": ("C++", "#f34b7d"),
+    ".hpp": ("H++", "#f34b7d"),
+    ".cs": ("CS", "#178600"),
+    ".php": ("PHP", "#777bb4"),
+    ".rb": ("RB", "#cc342d"),
+    ".sh": ("SH", "#89e051"),
+    ".bash": ("SH", "#89e051"),
+    ".ps1": ("PS", "#5391fe"),
+    ".bat": ("BAT", "#6b7280"),
+    ".sql": ("SQL", "#336791"),
+    ".png": ("IMG", "#a855f7"),
+    ".jpg": ("IMG", "#a855f7"),
+    ".jpeg": ("IMG", "#a855f7"),
+    ".gif": ("IMG", "#a855f7"),
+    ".webp": ("IMG", "#a855f7"),
+    ".svg": ("SVG", "#ffb13b"),
+    ".pdf": ("PDF", "#ef4444"),
+    ".zip": ("ZIP", "#64748b"),
+    ".tar": ("TAR", "#64748b"),
+    ".gz": ("GZ", "#64748b"),
+    ".docx": ("DOC", "#2b579a"),
+    ".xlsx": ("XLS", "#217346"),
+    ".pptx": ("PPT", "#d24726"),
+}
+
+_FILE_NAME_ICON_TYPES = {
+    "dockerfile": ("DOCK", "#2496ed"),
+    "makefile": ("MK", "#8b949e"),
+    "cmakelists.txt": ("CMAKE", "#064f8c"),
+    "license": ("LIC", "#94a3b8"),
+}
+
+_ICON_CACHE: dict[tuple, QIcon] = {}
+_DISPLAY_NAME_ROLE = Qt.ItemDataRole.UserRole.value + 1
 
 
 def _path_key(path: str) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+
+
+def _file_icon_type(name: str) -> tuple[str, str]:
+    lowered = name.lower()
+    if lowered in _FILE_NAME_ICON_TYPES:
+        return _FILE_NAME_ICON_TYPES[lowered]
+    return _FILE_ICON_TYPES.get(Path(name).suffix.lower(), ("", "#7f8a99"))
+
+
+def _tree_item_icon(
+    path: str,
+    *,
+    dirty: bool = False,
+    dirty_descendant: bool = False,
+    git_code: str = "",
+    git_label: str = "",
+) -> QIcon:
+    theme = current_theme()
+    is_dir = os.path.isdir(path)
+    name = os.path.basename(path)
+    label, color = ("folder", "#d6a84f") if is_dir else _file_icon_type(name)
+    key = (
+        theme,
+        "dir" if is_dir else label,
+        color,
+        dirty,
+        dirty_descendant,
+        git_code,
+        git_label,
+    )
+    cached = _ICON_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    pixmap = QPixmap(18, 18)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    if is_dir:
+        _paint_folder_icon(painter, color, dirty_descendant)
+    else:
+        _paint_file_icon(painter, label, color, dirty, git_code, git_label)
+    painter.end()
+    icon = QIcon(pixmap)
+    _ICON_CACHE[key] = icon
+    return icon
+
+
+def _paint_folder_icon(painter: QPainter, color: str, dirty_descendant: bool):
+    base = QColor(color)
+    shade = QColor("#b9852c") if current_theme() == "light" else QColor("#8f682c")
+    painter.setPen(QPen(shade, 1))
+    painter.setBrush(QBrush(base))
+    painter.drawRoundedRect(QRectF(2, 5, 14, 10), 2, 2)
+    painter.drawRoundedRect(QRectF(3, 3, 6, 4), 1.5, 1.5)
+    if dirty_descendant:
+        painter.setPen(QPen(QColor("#10213f"), 1))
+        painter.setBrush(QBrush(QColor(ACCENT)))
+        painter.drawEllipse(QRectF(12, 1.5, 5, 5))
+
+
+def _paint_file_icon(
+    painter: QPainter,
+    label: str,
+    color: str,
+    dirty: bool,
+    git_code: str = "",
+    git_label: str = "",
+):
+    p = palette()
+    painter.setPen(QPen(QColor(p["BORDER"]), 1))
+    painter.setBrush(QBrush(QColor(p["BG3"])))
+    painter.drawRoundedRect(QRectF(3, 2, 12, 14), 2, 2)
+    painter.setPen(QPen(QColor(color), 1))
+    painter.drawLine(6, 5, 12, 5)
+    painter.drawLine(6, 8, 12, 8)
+    badge = QColor(color)
+    if current_theme() != "light":
+        badge.setAlpha(220)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QBrush(badge))
+    painter.drawRoundedRect(QRectF(2, 9, 14, 7), 2, 2)
+    if label:
+        font = QFont()
+        font.setBold(True)
+        font.setPixelSize(5 if len(label) > 3 else 6)
+        painter.setFont(font)
+        painter.setPen(QColor("#111827") if label == "JS" else QColor("#ffffff"))
+        painter.drawText(QRectF(2, 9, 14, 7), Qt.AlignmentFlag.AlignCenter, label[:5])
+    if dirty:
+        painter.setPen(QPen(QColor("#10213f"), 1))
+        painter.setBrush(QBrush(QColor(ACCENT)))
+        painter.drawEllipse(QRectF(12, 1.5, 5, 5))
+    if git_code or git_label:
+        paint_git_status_badge(
+            painter,
+            git_code,
+            git_label,
+            QRectF(0.5, 10.5, 6.5, 6.5),
+        )
 
 
 class _PathLabel(QLabel):
@@ -62,17 +230,37 @@ class _PathLabel(QLabel):
 
 class _FilesHeader(QWidget):
     refresh_clicked = pyqtSignal()
+    filter_changed = pyqtSignal(str)
 
-    def __init__(self, path: str, refresh_tooltip: str = "Refresh file tree", parent=None):
+    def __init__(
+        self,
+        path: str,
+        refresh_tooltip: str = "Refresh file tree",
+        parent=None,
+        *,
+        filter_enabled: bool = False,
+    ):
         super().__init__(parent)
         self.setObjectName("filesHeader")
+        self._filter_enabled = filter_enabled
 
         row = QHBoxLayout(self)
         row.setContentsMargins(12, 6, 6, 6)
         row.setSpacing(4)
 
-        self._path = _PathLabel(path)
-        row.addWidget(self._path, 1)
+        self._path = None
+        self._filter = None
+        if filter_enabled:
+            self._filter = QLineEdit()
+            self._filter.setObjectName("filesFilter")
+            self._filter.setPlaceholderText("Filter files")
+            self._filter.setClearButtonEnabled(True)
+            self._filter.setToolTip(path)
+            self._filter.textChanged.connect(self.filter_changed.emit)
+            row.addWidget(self._filter, 1)
+        else:
+            self._path = _PathLabel(path)
+            row.addWidget(self._path, 1)
 
         self._refresh = QPushButton("↻")
         self._refresh.setToolTip(refresh_tooltip)
@@ -84,7 +272,14 @@ class _FilesHeader(QWidget):
         self.apply_appearance()
 
     def set_path(self, path: str):
-        self._path.set_path(path)
+        if self._path is not None:
+            self._path.set_path(path)
+        if self._filter is not None:
+            self._filter.setToolTip(path)
+            self._filter.setPlaceholderText("Filter files")
+            self._filter.blockSignals(True)
+            self._filter.clear()
+            self._filter.blockSignals(False)
 
     def apply_appearance(self):
         self.setStyleSheet(files_header_style())
@@ -100,10 +295,14 @@ class FileTree(QTreeWidget):
         self.setObjectName("fileTree")
         self.root_path = root_path
         self._highlighted: set[str] = set()
+        self._dirty_paths: set[str] = set()
+        self._dirty_dir_paths: set[str] = set()
         self._git_by_path: dict[str, tuple[str, str]] = {}
+        self._filter_text = ""
         self.setHeaderHidden(True)
         self.setAnimated(False)
         self.setAllColumnsShowFocus(False)
+        self.setIconSize(QSize(18, 18))
         self.setStyle(QStyleFactory.create("Fusion"))
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
@@ -111,6 +310,8 @@ class FileTree(QTreeWidget):
         self._apply_tree_style()
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._context_menu)
+        self._shortcut_handles: list[QShortcut] = []
+        self._setup_shortcuts()
         self._watcher = QFileSystemWatcher([root_path])
         self._watcher.directoryChanged.connect(lambda _: self.refresh())
         self.itemExpanded.connect(self._on_item_expanded)
@@ -125,19 +326,120 @@ class FileTree(QTreeWidget):
         self.setFont(mono_font(mono_font_pt()))
         self.setStyleSheet(file_tree_sidebar_style())
 
+    def _setup_shortcuts(self):
+        self._add_shortcut(QKeySequence(Qt.Key.Key_Return), self._open_selected)
+        self._add_shortcut(QKeySequence(Qt.Key.Key_Enter), self._open_selected)
+        self._add_shortcut(QKeySequence("F2"), self._rename_selected)
+        self._add_shortcut(QKeySequence("Delete"), self._delete_selected)
+        self._add_shortcut(QKeySequence("F5"), self.refresh)
+        self._add_shortcut(QKeySequence("Ctrl+Alt+N"), self._new_file_selected)
+        self._add_shortcut(QKeySequence("Meta+Alt+N"), self._new_file_selected)
+        self._add_shortcut(QKeySequence("Ctrl+Shift+N"), self._new_folder_selected)
+        self._add_shortcut(QKeySequence("Meta+Shift+N"), self._new_folder_selected)
+        self._add_shortcut(QKeySequence("Ctrl+C"), self._copy_selected_relative_path)
+        self._add_shortcut(QKeySequence("Ctrl+Shift+C"), self._copy_selected_absolute_path)
+        self._add_shortcut(QKeySequence("Shift+F10"), self._open_selected_context_menu)
+
+    def _add_shortcut(self, sequence: QKeySequence, callback):
+        shortcut = QShortcut(sequence, self)
+        shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        shortcut.activated.connect(callback)
+        self._shortcut_handles.append(shortcut)
+
     def set_root(self, path: str):
         self.root_path = path
         for d in self._watcher.directories():
             self._watcher.removePath(d)
         self._watcher.addPath(path)
         self._highlighted.clear()
+        self._dirty_paths.clear()
+        self._dirty_dir_paths.clear()
+        self._filter_text = ""
         self._git_by_path.clear()
         self.refresh()
+
+    def set_filter_text(self, text: str):
+        value = " ".join(str(text or "").split()).casefold()
+        if self._filter_text == value:
+            return
+        self._filter_text = value
+        self.refresh()
+
+    def set_file_dirty(self, path: str, dirty: bool):
+        abs_path = os.path.abspath(
+            path if os.path.isabs(path) else os.path.join(self.root_path, path)
+        )
+        try:
+            Path(abs_path).resolve(strict=False).relative_to(Path(self.root_path).resolve())
+        except (OSError, ValueError):
+            return
+        key = _path_key(abs_path)
+        if dirty:
+            self._dirty_paths.add(key)
+        else:
+            self._dirty_paths.discard(key)
+        self._rebuild_dirty_dirs()
+        self._update_git_labels()
+        self._apply_decorations()
 
     def _on_double_click(self, item: QTreeWidgetItem, _column: int):
         path = item.data(0, Qt.ItemDataRole.UserRole)
         if path and os.path.isfile(path):
             self.file_opened.emit(path)
+
+    def _current_path(self) -> str:
+        item = self.currentItem()
+        path = item.data(0, Qt.ItemDataRole.UserRole) if item else ""
+        return str(path or "")
+
+    def _selected_new_item_folder(self) -> str:
+        path = self._current_path()
+        if path and os.path.isdir(path):
+            return path
+        if path and os.path.isfile(path):
+            return str(Path(path).parent)
+        return self.root_path
+
+    def _open_selected(self):
+        path = self._current_path()
+        if os.path.isfile(path):
+            self.file_opened.emit(path)
+        elif os.path.isdir(path) and self.currentItem() is not None:
+            self.currentItem().setExpanded(not self.currentItem().isExpanded())
+
+    def _new_file_selected(self):
+        self._new_file_dialog(self._selected_new_item_folder())
+
+    def _new_folder_selected(self):
+        self._new_folder_dialog(self._selected_new_item_folder())
+
+    def _rename_selected(self):
+        path = self._current_path()
+        if path:
+            self._rename_path_dialog(path)
+
+    def _delete_selected(self):
+        path = self._current_path()
+        if path:
+            self._delete_path_dialog(path)
+
+    def _copy_selected_relative_path(self):
+        path = self._current_path()
+        rel_path = self._repo_relative_path(path) if path else ""
+        if rel_path:
+            QGuiApplication.clipboard().setText(rel_path)
+
+    def _copy_selected_absolute_path(self):
+        path = self._current_path()
+        if path:
+            QGuiApplication.clipboard().setText(str(Path(path).resolve(strict=False)))
+
+    def _open_selected_context_menu(self):
+        item = self.currentItem()
+        if item is None:
+            self._context_menu(self.viewport().rect().center())
+            return
+        self._context_menu(self.visualItemRect(item).center())
 
     def mimeData(self, items: list[QTreeWidgetItem]) -> QMimeData:
         refs = []
@@ -162,13 +464,20 @@ class FileTree(QTreeWidget):
         path = item.data(0, Qt.ItemDataRole.UserRole) if item else ""
         if path and os.path.isdir(path):
             new_file = QAction("New File...", self)
+            new_file.setShortcut(QKeySequence("Ctrl+Alt+N"))
             new_file.triggered.connect(lambda: self._new_file_dialog(path))
             menu.addAction(new_file)
             new_folder = QAction("New Folder...", self)
+            new_folder.setShortcut(QKeySequence("Ctrl+Shift+N"))
             new_folder.triggered.connect(lambda: self._new_folder_dialog(path))
             menu.addAction(new_folder)
+            rename_folder = QAction("Rename...", self)
+            rename_folder.setShortcut(QKeySequence("F2"))
+            rename_folder.triggered.connect(lambda: self._rename_path_dialog(path))
+            menu.addAction(rename_folder)
             menu.addSeparator()
             delete_folder = QAction("Delete...", self)
+            delete_folder.setShortcut(QKeySequence("Delete"))
             delete_folder.triggered.connect(lambda: self._delete_path_dialog(path))
             menu.addAction(delete_folder)
             menu.addSeparator()
@@ -177,12 +486,15 @@ class FileTree(QTreeWidget):
             attach.triggered.connect(lambda: self.file_attached.emit(path))
             menu.addAction(attach)
             open_file = QAction("Open", self)
+            open_file.setShortcut(QKeySequence(Qt.Key.Key_Return))
             open_file.triggered.connect(lambda: self.file_opened.emit(path))
             menu.addAction(open_file)
             rename = QAction("Rename...", self)
-            rename.triggered.connect(lambda: self._rename_file_dialog(path))
+            rename.setShortcut(QKeySequence("F2"))
+            rename.triggered.connect(lambda: self._rename_path_dialog(path))
             menu.addAction(rename)
             delete_file = QAction("Delete...", self)
+            delete_file.setShortcut(QKeySequence("Delete"))
             delete_file.triggered.connect(lambda: self._delete_path_dialog(path))
             menu.addAction(delete_file)
             if self._is_discardable_modified_file(path):
@@ -191,6 +503,7 @@ class FileTree(QTreeWidget):
                 menu.addAction(discard)
             menu.addSeparator()
         refresh = QAction("Refresh", self)
+        refresh.setShortcut(QKeySequence("F5"))
         refresh.triggered.connect(self.refresh)
         menu.addAction(refresh)
         menu.exec(self.viewport().mapToGlobal(pos))
@@ -220,18 +533,22 @@ class FileTree(QTreeWidget):
         self.refresh()
         self.mark_touched(str(path))
 
-    def _rename_file_dialog(self, path: str):
+    def _rename_path_dialog(self, path: str):
         current = os.path.basename(path)
-        name, ok = QInputDialog.getText(self, "Rename file", "New name:", text=current)
+        kind = "folder" if os.path.isdir(path) else "file"
+        name, ok = QInputDialog.getText(self, f"Rename {kind}", "New name:", text=current)
         if not ok or name.strip() == current:
             return
         try:
-            new_path = self.rename_file(path, name)
+            new_path = self.rename_path(path, name)
         except Exception as exc:
             QMessageBox.warning(self, "Rename failed", str(exc))
             return
         self.refresh()
         self.mark_touched(str(new_path))
+
+    def _rename_file_dialog(self, path: str):
+        self._rename_path_dialog(path)
 
     def _discard_file_dialog(self, path: str):
         rel_path = self._repo_relative_path(path)
@@ -302,13 +619,21 @@ class FileTree(QTreeWidget):
         source = Path(path)
         if not source.is_file():
             raise ValueError("Choose a file in the workspace.")
+        return self.rename_path(path, name)
+
+    def rename_path(self, path: str, name: str) -> Path:
+        source = Path(path)
+        if not source.is_file() and not source.is_dir():
+            raise ValueError("Choose a file or folder in the workspace.")
         self._ensure_in_workspace(source)
+        if source.resolve(strict=False) == Path(self.root_path).resolve():
+            raise ValueError("Cannot rename the workspace folder.")
         target = source.with_name(self._clean_leaf_name(name))
         self._ensure_in_workspace(target)
         if target == source:
             return source
         if target.exists():
-            raise FileExistsError(f"File already exists: {target.name}")
+            raise FileExistsError(f"Path already exists: {target.name}")
         source.rename(target)
         return target
 
@@ -364,7 +689,8 @@ class FileTree(QTreeWidget):
 
     def refresh(self):
         self._populate()
-        self.expandToDepth(1)
+        if not self._filter_text:
+            self.expandToDepth(1)
 
     def mark_touched(self, path: str):
         abs_path = os.path.abspath(
@@ -377,6 +703,13 @@ class FileTree(QTreeWidget):
         abs_path = os.path.abspath(
             path if os.path.isabs(path) else os.path.join(self.root_path, path)
         )
+        if self._filter_text:
+            child = self._find_child_for_path(self.invisibleRootItem(), abs_path)
+            if child is None:
+                return False
+            self.setCurrentItem(child)
+            self.scrollToItem(child, QAbstractItemView.ScrollHint.PositionAtCenter)
+            return True
         root = Path(self.root_path).resolve()
         try:
             rel_parts = Path(abs_path).resolve(strict=False).relative_to(root).parts
@@ -421,6 +754,7 @@ class FileTree(QTreeWidget):
     def _append_path_item(self, parent: QTreeWidgetItem, path: str) -> QTreeWidgetItem:
         item = QTreeWidgetItem([self._display_name(os.path.basename(path), path)])
         item.setData(0, Qt.ItemDataRole.UserRole, path)
+        self._apply_item_icon(item, path)
         parent.addChild(item)
         if os.path.isdir(path):
             item.addChild(QTreeWidgetItem([""]))
@@ -441,7 +775,10 @@ class FileTree(QTreeWidget):
     def _populate(self):
         self.clear()
         self._load_git_status()
-        self._fill(self.invisibleRootItem(), self.root_path)
+        if self._filter_text:
+            self._fill_filtered()
+        else:
+            self._fill(self.invisibleRootItem(), self.root_path)
         self._apply_decorations()
 
     def shutdown(self):
@@ -453,7 +790,7 @@ class FileTree(QTreeWidget):
         def walk(item: QTreeWidgetItem):
             path = item.data(0, Qt.ItemDataRole.UserRole)
             if path:
-                item.setText(0, self._display_name(os.path.basename(path), path))
+                item.setText(0, self._display_name(self._item_display_name(item, path), path))
             for i in range(item.childCount()):
                 walk(item.child(i))
 
@@ -468,10 +805,11 @@ class FileTree(QTreeWidget):
             self._apply_decorations()
 
     def _display_name(self, name: str, path: str) -> str:
-        git = self._git_by_path.get(_path_key(path))
-        if git and os.path.isfile(path):
-            return f"{git[1]} {name}"
-        return name
+        parts = []
+        if os.path.isfile(path) and _path_key(path) in self._dirty_paths:
+            parts.append("*")
+        parts.append(name)
+        return " ".join(parts)
 
     def _apply_decorations(self):
         accent = QColor(ACCENT)
@@ -483,22 +821,67 @@ class FileTree(QTreeWidget):
                 for i in range(item.childCount()):
                     walk(item.child(i))
                 return
+            item.setText(0, self._display_name(self._item_display_name(item, path), path))
+            self._apply_item_icon(item, path)
+            font = item.font(0)
+            font.setBold(os.path.isdir(path))
+            item.setFont(0, font)
             git = self._git_by_path.get(_path_key(path))
             if git:
                 code, label = git
                 item.setForeground(0, QColor(git_status_color(code)))
-                item.setToolTip(0, f"{label} — {os.path.relpath(path, self.root_path)}")
+                item.setToolTip(0, self._tooltip(path, git_code=code, git_label=label))
             elif _path_key(path) in self._highlighted:
                 item.setForeground(0, accent)
-                item.setToolTip(0, "")
+                item.setToolTip(0, self._tooltip(path))
             else:
                 item.setForeground(0, default)
-                item.setToolTip(0, "")
+                item.setToolTip(0, self._tooltip(path))
             for i in range(item.childCount()):
                 walk(item.child(i))
 
         for i in range(self.topLevelItemCount()):
             walk(self.topLevelItem(i))
+
+    def _fill_filtered(self):
+        root = Path(self.root_path)
+        terms = [term for term in self._filter_text.split(" ") if term]
+        if not terms:
+            return
+        parent = self.invisibleRootItem()
+        matches = 0
+
+        for dirpath, dirnames, filenames in os.walk(self.root_path, onerror=lambda _e: None):
+            dirnames[:] = sorted(
+                [
+                    name for name in dirnames
+                    if name not in IGNORED and not name.startswith(".")
+                ],
+                key=str.lower,
+            )
+            entries = [(name, True) for name in dirnames] + [(name, False) for name in filenames]
+            for name, is_dir in sorted(entries, key=lambda entry: (not entry[1], entry[0].lower())):
+                if name in IGNORED or name.startswith("."):
+                    continue
+                path = os.path.join(dirpath, name)
+                try:
+                    rel = Path(path).resolve(strict=False).relative_to(root.resolve()).as_posix()
+                except (OSError, ValueError):
+                    continue
+                folded = rel.casefold()
+                if not all(term in folded for term in terms):
+                    continue
+                item = QTreeWidgetItem([self._display_name(rel, path)])
+                item.setData(0, Qt.ItemDataRole.UserRole, path)
+                item.setData(0, _DISPLAY_NAME_ROLE, rel)
+                self._apply_item_icon(item, path)
+                parent.addChild(item)
+                matches += 1
+                if matches >= MAX_TREE_ENTRIES_PER_DIR:
+                    more = QTreeWidgetItem([f"... more matches"])
+                    more.setDisabled(True)
+                    parent.addChild(more)
+                    return
 
     def _fill(self, parent, path):
         try:
@@ -512,6 +895,7 @@ class FileTree(QTreeWidget):
         for e in visible[:MAX_TREE_ENTRIES_PER_DIR]:
             item = QTreeWidgetItem([self._display_name(e.name, e.path)])
             item.setData(0, Qt.ItemDataRole.UserRole, e.path)
+            self._apply_item_icon(item, e.path)
             parent.addChild(item)
             if e.is_dir():
                 item.addChild(QTreeWidgetItem([""]))
@@ -528,6 +912,55 @@ class FileTree(QTreeWidget):
             and not item.child(0).data(0, Qt.ItemDataRole.UserRole)
             and not item.child(0).text(0)
         )
+
+    def _apply_item_icon(self, item: QTreeWidgetItem, path: str):
+        key = _path_key(path)
+        git = self._git_by_path.get(key) if os.path.isfile(path) else None
+        git_code, git_label = git or ("", "")
+        item.setIcon(
+            0,
+            _tree_item_icon(
+                path,
+                dirty=key in self._dirty_paths,
+                dirty_descendant=key in self._dirty_dir_paths,
+                git_code=git_code,
+                git_label=git_label,
+            ),
+        )
+
+    @staticmethod
+    def _item_display_name(item: QTreeWidgetItem, path: str) -> str:
+        return str(item.data(0, _DISPLAY_NAME_ROLE) or os.path.basename(path))
+
+    def _tooltip(self, path: str, *, git_code: str = "", git_label: str = "") -> str:
+        key = _path_key(path)
+        notes = []
+        if os.path.isfile(path) and key in self._dirty_paths:
+            notes.append("Unsaved editor changes")
+        if os.path.isdir(path) and key in self._dirty_dir_paths:
+            notes.append("Contains unsaved editor changes")
+        if git_label:
+            notes.append(f"Git: {git_status_description(git_code, git_label)}")
+        if not notes:
+            return ""
+        rel = os.path.relpath(path, self.root_path)
+        return f"{' - '.join(notes)} - {rel}"
+
+    def _rebuild_dirty_dirs(self):
+        root = Path(self.root_path).resolve()
+        dirs: set[str] = set()
+        for dirty in self._dirty_paths:
+            path = Path(dirty)
+            try:
+                path.resolve(strict=False).relative_to(root)
+            except (OSError, ValueError):
+                continue
+            for parent in path.parents:
+                if parent == root or root in parent.parents:
+                    dirs.add(_path_key(str(parent)))
+                if parent == root:
+                    break
+        self._dirty_dir_paths = dirs
 
 
 class LeftPanel(QWidget):
@@ -594,8 +1027,9 @@ class LeftPanel(QWidget):
         files_layout.setContentsMargins(0, 0, 0, 0)
         files_layout.setSpacing(0)
 
-        self._files_header = _FilesHeader(root_path)
+        self._files_header = _FilesHeader(root_path, filter_enabled=True)
         self._files_header.refresh_clicked.connect(self._file_tree.refresh)
+        self._files_header.filter_changed.connect(self._file_tree.set_filter_text)
         files_layout.addWidget(self._files_header)
         files_layout.addWidget(self._file_tree, 1)
 
@@ -624,9 +1058,14 @@ class LeftPanel(QWidget):
         self._add_activity("files", "Files", files_wrap, rail_layout)
         self._add_activity("search", "Search", self._search_page, rail_layout)
         self._add_activity("git", "Git", git_wrap, rail_layout)
-        self._add_action_button("extensions", "Ext", "Extensions", self.extensions_requested, rail_layout)
 
         rail_layout.addStretch()
+
+        self._extensions_btn = QPushButton("Ext")
+        self._extensions_btn.setToolTip("Extensions")
+        self._extensions_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._extensions_btn.clicked.connect(self.extensions_requested.emit)
+        rail_layout.addWidget(self._extensions_btn)
 
         self._docs_btn = QPushButton("Docs")
         self._docs_btn.setToolTip("Documentation")
@@ -661,21 +1100,6 @@ class LeftPanel(QWidget):
             self.collapse_activity_panel()
             return
         self.set_active_activity(key)
-
-    def _add_action_button(
-        self,
-        key: str,
-        label: str,
-        tooltip: str,
-        signal,
-        rail_layout: QVBoxLayout,
-    ):
-        button = QPushButton(label)
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setToolTip(tooltip)
-        button.clicked.connect(signal.emit)
-        self._activity_buttons[key] = button
-        rail_layout.addWidget(button)
 
     def set_active_activity(self, key: str, *, expand: bool = True):
         widget = self._activity_widgets.get(key)
@@ -735,6 +1159,7 @@ class LeftPanel(QWidget):
             f"border-radius:7px; padding:6px 2px; font-size:{meta_font_pt()}px; }}"
             f"QPushButton:hover {{ background:{p['BG3']}; color:{p['TEXT']}; }}"
         )
+        self._extensions_btn.setStyleSheet(footer_style)
         self._docs_btn.setStyleSheet(footer_style)
         self._settings_btn.setStyleSheet(footer_style)
         self._search_page.apply_appearance()
@@ -776,10 +1201,19 @@ class LeftPanel(QWidget):
         QTimer.singleShot(250, self._file_tree.refresh)
         QTimer.singleShot(250, self._git.refresh)
 
+    def set_file_dirty(self, path: str, dirty: bool):
+        self._file_tree.set_file_dirty(path, dirty)
+
     def reveal_file(self, path: str, *, activate: bool = True) -> bool:
         if activate:
             self.set_active_activity("files")
         return self._file_tree.reveal_file(path)
+
+    def focus_file_browser(self):
+        self.set_active_activity("files")
+        if self._file_tree.currentItem() is None and self._file_tree.topLevelItemCount():
+            self._file_tree.setCurrentItem(self._file_tree.topLevelItem(0))
+        self._file_tree.setFocus(Qt.FocusReason.ShortcutFocusReason)
 
     def shutdown(self):
         self._file_tree.shutdown()

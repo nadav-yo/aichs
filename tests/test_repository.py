@@ -232,6 +232,7 @@ class TestHelpers:
         ]
         assert "hello" in _message_text(content)
         assert "[image]" in _message_text(content)
+        assert _message_text(None) == ""
 
     def test_summary_message_count(self):
         assert _summary(_sample_conv())["message_count"] == 1

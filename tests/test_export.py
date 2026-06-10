@@ -114,6 +114,23 @@ def test_export_skips_tool_only_user_messages():
     assert "Hello" in md
 
 
+def test_export_skips_tool_call_only_assistant_messages():
+    md = conversation_to_markdown({
+        "title": "T",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "call_1", "function": {"name": "read_file"}}],
+            },
+            {"role": "assistant", "content": "Done"},
+        ],
+    })
+    assert md.count("## Agent") == 1
+    assert "None" not in md
+    assert "Done" in md
+
+
 def test_export_uses_crew_speaker_name():
     md = conversation_to_markdown({
         "title": "T",

@@ -10,6 +10,7 @@ class ShortcutBinding:
 
 DEFAULT_SHORTCUTS: dict[str, ShortcutBinding] = {
     "command_palette": ShortcutBinding("command_palette", ("Ctrl+K", "Meta+K")),
+    "file_browser": ShortcutBinding("file_browser", ("Ctrl+Shift+E", "Meta+Shift+E")),
     "file_search": ShortcutBinding("file_search", ("Ctrl+P", "Meta+P")),
     "text_search": ShortcutBinding("text_search", ("Ctrl+Shift+F", "Meta+Shift+F")),
 }

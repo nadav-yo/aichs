@@ -142,7 +142,8 @@ def test_main_window_left_rail_search_and_extensions_actions(qapp, workspace):
         window._left.set_active_activity("search")
         window._left._search_page.file_search_requested.emit()
         window._left._search_page.text_search_requested.emit()
-        window._left.extensions_requested.emit()
+        assert "extensions" not in window._left._activity_buttons
+        window._left._extensions_btn.click()
 
         assert window._left.active_activity() == "search"
         assert calls == ["file", "text", "extensions"]
@@ -199,26 +200,39 @@ def test_main_window_activity_shelf_tracks_tool_activity(qapp, workspace):
     window = MainWindow(startup_workspace=str(workspace))
     try:
         assert window._is_context_collapsed()
-        assert window._context._tool_activity.item(0).text() == "No recent activity"
+        assert window._context._tool_activity.item(0).text() == "No run log yet"
         assert window._context._copy_btn.isEnabled() is False
+        assert window._context._copy_details_btn.isEnabled() is False
         assert window._context._clear_btn.isEnabled() is False
 
         window._chat.tool_activity.emit("Reading file 'src/main.py'")
 
         assert window._context._tool_activity.count() == 1
-        assert "Reading file" in window._context._tool_activity.item(0).text()
+        item = window._context._tool_activity.item(0)
+        assert item.text() == "Read file - src/main.py"
+        assert not item.icon().isNull()
+        assert "Original:\nReading file 'src/main.py'" in item.toolTip()
         assert window._context._copy_btn.isEnabled() is True
+        assert window._context._copy_details_btn.isEnabled() is True
         assert window._context._clear_btn.isEnabled() is True
 
         window._context._tool_activity.setCurrentRow(0)
         window._context.copy_selected_activity()
 
-        assert qapp.clipboard().text() == "Reading file 'src/main.py'"
+        assert qapp.clipboard().text() == "Read file - src/main.py"
+
+        window._context.copy_selected_activity_details()
+
+        details = qapp.clipboard().text()
+        assert "Type: Read file" in details
+        assert "Target: src/main.py" in details
+        assert "Original:\nReading file 'src/main.py'" in details
 
         window._context.clear_activity()
 
-        assert window._context._tool_activity.item(0).text() == "No recent activity"
+        assert window._context._tool_activity.item(0).text() == "No run log yet"
         assert window._context._copy_btn.isEnabled() is False
+        assert window._context._copy_details_btn.isEnabled() is False
     finally:
         window.close()
         os.chdir(cwd)
@@ -235,15 +249,18 @@ def test_main_window_context_panel_can_collapse_and_reopen(qapp, workspace):
         assert window._is_context_collapsed()
         assert window._context_shell.maximumWidth() == 30
         assert window._root_splitter.sizes()[2] <= 36
-        assert window._context_tab.text() == "A\nc\nt\ni\nv\ni\nt\ny"
+        assert window._context_tab.text() == "R\nu\nn\n\nL\no\ng"
 
         window._expand_context()
 
         assert not window._is_context_collapsed()
         assert window._context_shell.minimumWidth() >= 220
         assert window._root_splitter.sizes()[2] >= 200
+        assert window._context._collapse_btn.text() == ">"
+        assert window._context._collapse_btn.accessibleName() == "Collapse run log"
+        assert window._context._collapse_btn.toolTip() == "Collapse run log"
 
-        window._collapse_context()
+        window._context._collapse_btn.click()
 
         assert window._is_context_collapsed()
     finally:

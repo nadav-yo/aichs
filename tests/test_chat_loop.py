@@ -91,6 +91,34 @@ def test_loop_openai_text_only(workspace, qapp):
     assert request["extra_body"] == {"top_k": 20, "min_p": 0.05}
 
 
+def test_loop_openai_preserves_markdown_newline_chunks(workspace, qapp):
+    thread = ChatThread(
+        "gpt-5.4-nano",
+        [{"role": "user", "content": "summarize icons"}],
+        "sys",
+        str(workspace),
+    )
+    chunks = []
+    thread.chunk.connect(chunks.append)
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _openai_stream(
+        SimpleNamespace(content="Intro:", tool_calls=None),
+        SimpleNamespace(content="\n\n", tool_calls=None),
+        SimpleNamespace(content="## Heading", tool_calls=None),
+        SimpleNamespace(content="\n\n", tool_calls=None),
+        SimpleNamespace(content="- Item", tool_calls=None),
+    )
+
+    with patch("services.chat.OpenAI", return_value=mock_client), patch(
+        "services.chat.resolve_api_key", return_value="k"
+    ), patch("services.chat.run_extension_hooks"):
+        text = thread._loop_openai()
+
+    assert text == "Intro:\n\n## Heading\n\n- Item"
+    assert "".join(chunks) == text
+
+
 def _openai_stream(*deltas):
     stream = MagicMock()
     stream.__enter__ = lambda s: s

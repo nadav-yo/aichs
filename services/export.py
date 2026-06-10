@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import QFileDialog, QWidget
 
-from services.content import content_text
+from services.content import content_text, is_visible_message
 from services.crew import crew_name_from_metadata
 from services.usage import usage_summary
 
@@ -34,12 +34,12 @@ def conversation_to_markdown(data: dict) -> str:
     lines.extend(["---", ""])
 
     for msg in data.get("messages", []):
+        if not is_visible_message(msg):
+            continue
         role = msg.get("role")
         content = msg.get("content", "")
         ts = msg.get("created_at", "")
 
-        if role == "tool":
-            continue
         if role == "user":
             if _skip_user_message(content):
                 continue

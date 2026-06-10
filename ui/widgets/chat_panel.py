@@ -205,6 +205,38 @@ def _tool_call_notice(name: str, inputs: dict, cwd: str) -> str:
     return f"Using tool '{name}'"
 
 
+def _saved_tool_calls(msg: dict) -> list[tuple[str, dict]]:
+    calls: list[tuple[str, dict]] = []
+    for call in msg.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+        name = str(fn.get("name") or call.get("name") or "tool")
+        args = fn.get("arguments", call.get("arguments", call.get("args", {})))
+        calls.append((name, _tool_inputs_from_saved(args)))
+
+    content = msg.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = str(block.get("name") or "tool")
+            calls.append((name, _tool_inputs_from_saved(block.get("input", {}))))
+    return calls
+
+
+def _tool_inputs_from_saved(raw) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {"arguments": raw}
+        return parsed if isinstance(parsed, dict) else {"arguments": parsed}
+    return {}
+
+
 def _tool_notice_html(text: str) -> str:
     p = palette()
     raw = str(text or "")
@@ -2248,8 +2280,16 @@ class ChatPanel(QWidget):
         row.addStretch()
         return wrapper
 
-    def _add_tool_notice(self, text: str, debug_text: str = ""):
-        self.tool_activity.emit(text)
+    def _insert_tool_notice(
+        self,
+        text: str,
+        debug_text: str = "",
+        *,
+        at_top: bool = False,
+        emit_activity: bool = False,
+    ):
+        if emit_activity:
+            self.tool_activity.emit(text)
         wrapper = QWidget()
         row = QHBoxLayout(wrapper)
         row.setContentsMargins(60, 1, 24, 1)
@@ -2270,8 +2310,12 @@ class ChatPanel(QWidget):
         )
         row.addWidget(lbl, 1)
         row.addStretch()
-        self.msg_layout.insertWidget(self.msg_layout.count() - 1, wrapper)
+        insert_at = 1 if at_top and self._older_btn else 0 if at_top else self.msg_layout.count() - 1
+        self.msg_layout.insertWidget(insert_at, wrapper)
         self._bottom()
+
+    def _add_tool_notice(self, text: str, debug_text: str = ""):
+        self._insert_tool_notice(text, debug_text, emit_activity=True)
 
     def _show_tool_notice_menu(self, label: QLabel, pos):
         text = str(label.property("aichs-tool-text") or label.text() or "")
@@ -2528,6 +2572,15 @@ class ChatPanel(QWidget):
         msg = self.history[history_index]
         if msg.get("synthetic") == "terminal_result":
             return self._add_terminal_result_card(msg, at_top=at_top)
+        tool_calls = _saved_tool_calls(msg)
+        if tool_calls and not content_preview(msg.get("content")).strip():
+            for name, inputs in (reversed(tool_calls) if at_top else tool_calls):
+                self._insert_tool_notice(
+                    _tool_call_notice(name, inputs, self.cwd),
+                    _tool_debug_text(name, inputs, "", self.cwd),
+                    at_top=at_top,
+                )
+            return None
         if not is_visible_message(msg):
             return None
         bubble = self._make_bubble(

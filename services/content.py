@@ -66,10 +66,14 @@ def prepare_for_storage(messages: list[dict]) -> list[dict]:
 def is_visible_message(msg: dict) -> bool:
     if msg.get("role") == "tool":
         return False
+    if _is_tool_call_only_assistant(msg):
+        return False
     return str(msg.get("synthetic") or "") not in _HIDDEN_SYNTHETIC_MESSAGES
 
 
 def content_text(content) -> str:
+    if content is None:
+        return ""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -82,6 +86,8 @@ def content_text(content) -> str:
 
 
 def content_length(content) -> int:
+    if content is None:
+        return 0
     if isinstance(content, str):
         return len(content)
     if isinstance(content, list):
@@ -102,6 +108,8 @@ def content_length(content) -> int:
 
 
 def content_preview(content) -> str:
+    if content is None:
+        return ""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -160,6 +168,18 @@ def _is_internal_text_block(block: object) -> bool:
         return True
     text = str(block.get("text") or "")
     return text.startswith(_ACTIVE_TASK_PREFIX)
+
+
+def _is_tool_call_only_assistant(msg: dict) -> bool:
+    if msg.get("role") != "assistant":
+        return False
+    content = msg.get("content")
+    if msg.get("tool_calls"):
+        return not content_preview(content).strip()
+    if not isinstance(content, list):
+        return False
+    blocks = [block for block in content if isinstance(block, dict)]
+    return bool(blocks) and all(block.get("type") == "tool_use" for block in blocks)
 
 
 def image_blocks(content) -> list[dict]:

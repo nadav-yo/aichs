@@ -905,6 +905,8 @@ def _chat_search_terms(query: str) -> list[str]:
 
 
 def _message_text(content) -> str:
+    if content is None:
+        return ""
     if isinstance(content, str):
         return content
     if isinstance(content, list):

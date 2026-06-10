@@ -773,8 +773,11 @@ def _estimate_model_request_tokens(provider: str, system: str, history: list[dic
 
 def _sanitize_chatml_content(text: str) -> str:
     """Drop chat-template sentinels if a local provider leaks them as content."""
+    has_control_token = bool(_CHATML_CONTROL_TOKEN_RE.search(text))
     cleaned = _CHATML_CONTROL_TOKEN_RE.sub("", text)
-    return "" if not cleaned.strip() else cleaned
+    if has_control_token and not cleaned.strip():
+        return ""
+    return cleaned
 
 
 def _active_task_preview(history: list[dict]) -> str:

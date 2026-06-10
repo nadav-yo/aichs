@@ -216,6 +216,8 @@ def project_conversation_records(cwd: str) -> list[tuple[Path, dict]]:
 
 
 def _message_text(content) -> str:
+    if content is None:
+        return ""
     if isinstance(content, str):
         return content
     if isinstance(content, list):

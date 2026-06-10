@@ -394,11 +394,16 @@ def file_tree_sidebar_style() -> str:
 def files_header_style() -> str:
     p = palette()
     meta = meta_font_pt()
+    fs = max(11, chat_font_pt() - 2)
     return (
         f"QWidget#filesHeader {{ background:{p['BG2']};"
         f"border-bottom:1px solid {p['BORDER_SUBTLE']}; }}"
         f"QLabel#filesPath {{ color:{p['TEXT_DIM']}; font-size:{meta}px;"
         f"background:transparent; padding:0; }}"
+        f"QLineEdit#filesFilter {{ background:{p['BG3']}; color:{p['TEXT']};"
+        f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:7px;"
+        f"padding:4px 8px; font-size:{fs}px; }}"
+        f"QLineEdit#filesFilter:focus {{ border:1px solid {ACCENT_DIM}; }}"
     )
 
 

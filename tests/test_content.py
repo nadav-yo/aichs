@@ -42,6 +42,9 @@ def test_content_helpers():
     assert content_length(blocks) > 10
     assert len(image_blocks(blocks)) == 1
     assert len(file_blocks(blocks)) == 1
+    assert content_text(None) == ""
+    assert content_preview(None) == ""
+    assert content_length(None) == 0
 
 
 def test_content_length_nested():
@@ -175,6 +178,22 @@ def test_prepare_for_storage_removes_runtime_only_messages():
 def test_is_visible_message_hides_runtime_internals():
     assert is_visible_message({"role": "user", "content": "real"})
     assert not is_visible_message({"role": "tool", "content": "result"})
+    assert not is_visible_message({
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "call_1", "function": {"name": "read_file"}}],
+    })
+    assert not is_visible_message({
+        "role": "assistant",
+        "content": [{"type": "tool_use", "id": "tu_1", "name": "read_file"}],
+    })
+    assert is_visible_message({
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "I'll check."},
+            {"type": "tool_use", "id": "tu_1", "name": "read_file"},
+        ],
+    })
     assert not is_visible_message({"role": "user", "synthetic": "tool_results"})
     assert not is_visible_message({"role": "user", "synthetic": "extension"})
     assert not is_visible_message({"role": "user", "synthetic": "chat_refs"})

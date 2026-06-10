@@ -82,6 +82,7 @@ class MainWindow(QMainWindow):
         self._viewer.all_closed.connect(self._close_file)
         self._viewer.diagnostic_fix_requested.connect(self._chat_draft_diagnostic_fix)
         self._viewer.active_file_changed.connect(self._reveal_active_file)
+        self._viewer.dirty_file_changed.connect(self._left.set_file_dirty)
 
         self._chat = ChatPanel(store, cwd=repo, settings=self._settings)
 
@@ -90,8 +91,8 @@ class MainWindow(QMainWindow):
         self._context.setMaximumWidth(380)
         self._context.collapse_requested.connect(self._collapse_context)
 
-        self._context_tab = QPushButton("A\nc\nt\ni\nv\ni\nt\ny")
-        self._context_tab.setToolTip("Show activity")
+        self._context_tab = QPushButton("R\nu\nn\n\nL\no\ng")
+        self._context_tab.setToolTip("Show run log")
         self._context_tab.setFixedWidth(30)
         self._context_tab.setMinimumHeight(112)
         self._context_tab.clicked.connect(self._expand_context)
@@ -187,6 +188,7 @@ class MainWindow(QMainWindow):
         self._shortcut_handles.append(stop)
 
         self._bind_shortcut_action("command_palette", self._open_command_palette, saved)
+        self._bind_shortcut_action("file_browser", self._left.focus_file_browser, saved)
         self._bind_shortcut_action("file_search", self._open_file_search, saved)
         self._bind_shortcut_action("text_search", self._open_text_search, saved)
 
