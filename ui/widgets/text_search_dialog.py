@@ -1,7 +1,8 @@
 import html
 import os
+import threading
 
-from PyQt6.QtCore import QEvent, QSize, QTimer, Qt
+from PyQt6.QtCore import QEvent, QObject, QRunnable, QSize, QThreadPool, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import (
     QDialog,
@@ -14,8 +15,52 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from services.text_search import TextSearchMatch, search_file_contents
-from ui.theme import ACCENT, chat_font_pt, meta_font_pt, palette, separator_color
+from services.text_search import TextSearchMatch, search_file_contents_with_candidates
+from ui.theme import (
+    chat_font_pt,
+    hint_label_style,
+    overlay_dialog_style,
+    overlay_results_list_style,
+    overlay_search_input_style,
+    overlay_separator_style,
+    palette,
+    search_match_style,
+)
+
+
+class _TextSearchSignals(QObject):
+    done = pyqtSignal(int, str, object, object, str)
+
+
+class _TextSearchWorker(QRunnable):
+    def __init__(
+        self,
+        generation: int,
+        root: str,
+        query: str,
+        candidates: tuple[TextSearchMatch, ...] | None,
+        cancel_event: threading.Event,
+    ):
+        super().__init__()
+        self.signals = _TextSearchSignals()
+        self._generation = generation
+        self._root = root
+        self._query = query
+        self._candidates = candidates
+        self._cancel_event = cancel_event
+
+    def run(self) -> None:
+        try:
+            matches, candidates = search_file_contents_with_candidates(
+                self._root,
+                self._query,
+                candidates=self._candidates,
+                cancelled=self._cancel_event.is_set,
+            )
+        except Exception as exc:
+            self.signals.done.emit(self._generation, self._query, [], (), str(exc))
+            return
+        self.signals.done.emit(self._generation, self._query, matches, candidates, "")
 
 
 class _SearchInput(QLineEdit):
@@ -59,9 +104,7 @@ class _TextSearchRow(QWidget):
 
         snippet = QLabel(_highlight_line_html(match))
         snippet.setTextFormat(Qt.TextFormat.RichText)
-        snippet.setStyleSheet(
-            f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px; background:transparent;"
-        )
+        snippet.setStyleSheet(hint_label_style())
         layout.addWidget(snippet)
 
 
@@ -71,6 +114,11 @@ class TextSearchDialog(QDialog):
         self._root = os.path.abspath(root)
         self._on_open_file = on_open_file
         self._filtered: list[TextSearchMatch] = []
+        self._candidate_query = ""
+        self._candidate_matches: tuple[TextSearchMatch, ...] = ()
+        self._search_generation = 0
+        self._search_cancel: threading.Event | None = None
+        self._search_pool = QThreadPool.globalInstance()
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(160)
@@ -81,10 +129,7 @@ class TextSearchDialog(QDialog):
         self.setMinimumWidth(620)
         self.resize(680, 460)
 
-        p = palette()
-        self.setStyleSheet(
-            f"QDialog {{ background:{p['BG2']}; border:1px solid {p['BORDER']}; border-radius:12px; }}"
-        )
+        self.setStyleSheet(overlay_dialog_style())
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(12, 12, 12, 12)
@@ -94,31 +139,19 @@ class TextSearchDialog(QDialog):
         self._query.setObjectName("textSearchQuery")
         self._query.setPlaceholderText("Search text in files")
         self._query.setClearButtonEnabled(True)
-        self._query.setStyleSheet(
-            f"QLineEdit {{ background:{p['BG3']}; color:{p['TEXT']};"
-            f"border:1px solid {p['BORDER']}; border-radius:10px;"
-            f"padding:10px 14px; font-size:{chat_font_pt()}px; }}"
-            f"QLineEdit:focus {{ border:1px solid {ACCENT}; }}"
-        )
+        self._query.setStyleSheet(overlay_search_input_style())
         self._query.textChanged.connect(self._schedule_search)
         self._query.returnPressed.connect(self._activate_current)
         root_layout.addWidget(self._query)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep_color = separator_color()
-        sep.setStyleSheet(
-            f"background:{sep_color}; color:{sep_color}; border:none; max-height:1px;"
-        )
+        sep.setStyleSheet(overlay_separator_style())
         root_layout.addWidget(sep)
 
         self._list = QListWidget()
         self._list.setObjectName("textSearchResults")
-        self._list.setStyleSheet(
-            f"QListWidget {{ background:{p['BG2']}; border:none; outline:none; }}"
-            f"QListWidget::item {{ border:none; }}"
-            f"QListWidget::item:selected {{ background:{p['BG3']}; border-left:3px solid {ACCENT}; }}"
-        )
+        self._list.setStyleSheet(overlay_results_list_style())
         self._list.itemClicked.connect(self._on_activated)
         self._list.itemActivated.connect(self._on_activated)
         self._list.installEventFilter(self)
@@ -150,7 +183,63 @@ class TextSearchDialog(QDialog):
         self._timer.start()
 
     def _run_search(self):
-        self._filtered = search_file_contents(self._root, self._query.text())
+        query = self._query.text().strip()
+        self._start_search(query)
+
+    def reject(self) -> None:
+        self._cancel_search()
+        super().reject()
+
+    def closeEvent(self, event):
+        self._cancel_search()
+        super().closeEvent(event)
+
+    def _cancel_search(self):
+        self._search_generation += 1
+        self._timer.stop()
+        if self._search_cancel is not None:
+            self._search_cancel.set()
+            self._search_cancel = None
+
+    def _start_search(self, query: str):
+        self._search_generation += 1
+        generation = self._search_generation
+        if self._search_cancel is not None:
+            self._search_cancel.set()
+        source_matches = (
+            self._candidate_matches
+            if _is_query_refinement(self._candidate_query, query)
+            else None
+        )
+        cancel_event = threading.Event()
+        self._search_cancel = cancel_event
+        worker = _TextSearchWorker(generation, self._root, query, source_matches, cancel_event)
+        worker.signals.done.connect(self._on_search_ready)
+        self._search_pool.start(worker)
+
+    def _on_search_ready(
+        self,
+        generation: int,
+        query: str,
+        matches: object,
+        candidates: object,
+        error: str,
+    ):
+        if generation != self._search_generation:
+            return
+        self._search_cancel = None
+        if error:
+            self._filtered = []
+            self._candidate_matches = ()
+            self._candidate_query = query
+            self._render_matches()
+            return
+        self._filtered = list(matches or [])
+        self._candidate_matches = tuple(candidates or ())
+        self._candidate_query = query
+        self._render_matches()
+
+    def _render_matches(self):
         self._list.clear()
         for match in self._filtered:
             row = QListWidgetItem()
@@ -182,8 +271,14 @@ def _highlight_line_html(match: TextSearchMatch) -> str:
     end = max(start, min(match.end, len(line)))
     return (
         html.escape(line[:start])
-        + f"<span style=\"color:{ACCENT}; font-weight:700;\">"
+        + f"<span style=\"{search_match_style()}\">"
         + html.escape(line[start:end])
         + "</span>"
         + html.escape(line[end:])
     )
+
+
+def _is_query_refinement(previous: str, current: str) -> bool:
+    prev = previous.strip().casefold()
+    cur = current.strip().casefold()
+    return bool(prev) and len(cur) >= len(prev) and cur.startswith(prev)

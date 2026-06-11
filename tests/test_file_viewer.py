@@ -1,23 +1,35 @@
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 from PyQt6.QtCore import QPoint, QPointF, Qt, QUrl
-from PyQt6.QtGui import QColor, QGuiApplication, QTextCursor, QTextDocument
+from PyQt6.QtGui import QColor, QCloseEvent, QGuiApplication, QTextCursor, QTextDocument
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QMessageBox, QWidget
+from PyQt6.QtWidgets import QMessageBox, QPlainTextEdit, QWidget
+from pygments.token import Token
 
 from services.chat_drag import AICHS_FILE_DROP_MIME, parse_file_drop
+from services.code_completion import CompletionItem
 from services.file_editor_refs import AICHS_EDITOR_REF_MIME, parse_editor_refs
-from services.language_features import CodeActionResult
+from services.language_features import CodeAction, CodeActionResult, Diagnostic
 from storage.settings import FILE_EDITOR_AUTO_SAVE_KEY, FILE_EDITOR_TAB_SPACES_KEY
 from tests.conftest import write_extension
 from ui.theme import palette
+import ui.widgets.file_viewer as file_viewer_module
 from ui.widgets.file_viewer import (
     FileViewerPanel,
+    _ASYNC_FILE_READ_BYTES,
+    _COMPLETION_CONTEXT_CHARS,
+    _DiffWorker,
     _FileTextEdit,
+    _LOADING_FILE_TEXT,
+    _MarkdownPreviewWorker,
+    _PygmentsHighlighter,
+    _RETIRED_WORKER_POOLS,
     _TextFileTab,
     _diagnostic_details,
     _read_text_preview,
     _read_text_preview_details,
+    _retire_worker_pool,
 )
 from ui.widgets.markdown_browser import (
     RemoteImageTextBrowser,
@@ -33,6 +45,26 @@ class _Settings:
         return dict(self._data)
 
 
+class _RecordingCompletionProvider:
+    def __init__(self, items: list[CompletionItem] | None = None):
+        self.items = items or [CompletionItem("localRenderSymbol", "localRenderSymbol")]
+        self.calls: list[dict] = []
+
+    def complete(self, *, path: str, content: str, position: int, prefix: str):
+        self.calls.append({
+            "path": path,
+            "content": content,
+            "position": position,
+            "prefix": prefix,
+        })
+        return list(self.items)
+
+
+class _NoPlainTextFileTextEdit(_FileTextEdit):
+    def toPlainText(self):  # pragma: no cover - exercised by failing if called
+        raise AssertionError("completion hot path must not copy the full buffer")
+
+
 def _wait_until(qapp, predicate, timeout_ms: int = 1500):
     elapsed = 0
     while elapsed < timeout_ms:
@@ -43,6 +75,10 @@ def _wait_until(qapp, predicate, timeout_ms: int = 1500):
         elapsed += 25
     qapp.processEvents()
     assert predicate()
+
+
+def _wait_for_save(qapp, tab, timeout_ms: int = 1500):
+    _wait_until(qapp, lambda: not tab._saving, timeout_ms=timeout_ms)
 
 
 def test_read_text_preview_truncates(workspace):
@@ -98,50 +134,231 @@ def test_remote_markdown_preview_uses_cached_remote_images(qapp):
     browser.close()
 
 
-def test_file_viewer_saves_text_edits(workspace):
-    path = workspace / "src" / "main.py"
-    events = []
-    tab = SimpleNamespace(
-        _editable=True,
-        _auto_save_timer=SimpleNamespace(stop=lambda: events.append(("timer", "stop"))),
-        _path=str(path),
-        _repo_root=str(workspace),
-        _editor=SimpleNamespace(toPlainText=lambda: "print('bye')\n"),
-        _edit_mode=True,
-        _content="print('hi')\n",
-        _markdown=False,
-        _is_showing_diff=lambda: False,
-        _set_dirty=lambda dirty: events.append(("dirty", dirty)),
-        _set_status=lambda status: events.append(("status", status)),
-        _schedule_diff_refresh=lambda delay_ms=None: events.append(("diff", delay_ms)),
-        _render=lambda diagnostics_delay_ms=None: events.append(("render", diagnostics_delay_ms)),
-    )
+def test_markdown_preview_worker_records_operation(monkeypatch):
+    operations = []
 
-    _TextFileTab._save(tab)
+    @contextmanager
+    def fake_time_operation(operation, *, detail="", slow_ms=100.0):
+        operations.append((operation, detail))
+        yield
+
+    monkeypatch.setattr(file_viewer_module, "time_operation", fake_time_operation)
+    worker = _MarkdownPreviewWorker(3, "README.md", "# Preview", "dark", 12)
+    done = []
+    worker.signals.done.connect(lambda *args: done.append(args))
+
+    worker.run()
+
+    assert operations == [("markdown.preview", "path=README.md chars=9")]
+    assert done[0][0:2] == (3, "README.md")
+    assert "<h1" in done[0][2].lower()
+
+
+def test_pygments_highlighter_falls_back_for_unknown_token_style(qapp):
+    document = QTextDocument()
+    highlighter = _PygmentsHighlighter(document, path="demo.py", content="")
+
+    fmt = highlighter._format_for_token(Token.Name.Quoted)
+    color = highlighter._style_color_for_token(Token.Name.Quoted)
+
+    assert fmt is not None
+    assert color is None or color.isValid()
+
+
+def test_file_viewer_saves_text_edits(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    tab = _TextFileTab(str(path), "print('hi')\n", str(workspace), None)
+    tab._refresh_diagnostics = lambda delay_ms=None: None
+    tab._schedule_diff_refresh = lambda delay_ms=None: None
+    tab._edit_mode = True
+    tab._editor.setReadOnly(False)
+    tab._editor.setPlainText("print('bye')\n")
+
+    tab._save()
+    assert tab._saving is True
+    assert tab._dirty is True
+    _wait_for_save(qapp, tab)
 
     assert path.read_text(encoding="utf-8") == "print('bye')\n"
     assert tab._content == "print('bye')\n"
     assert tab._edit_mode is False
-    assert ("timer", "stop") in events
-    assert ("dirty", False) in events
-    assert ("status", "Saved") in events
-    assert ("diff", 0) in events
-    assert ("render", 0) in events
+    assert tab._dirty is False
+    assert tab._status.text() == "Saved"
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
 
 
-def test_text_file_tab_skips_diff_timer_outside_git_repo(workspace):
-    ready = []
+def test_text_file_tab_ignores_stale_save_result(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    tab = _TextFileTab(str(path), "print('hi')\n", str(workspace), None)
+    tab._set_dirty(True)
+    tab._saving = True
+    tab._save_generation = 2
+
+    tab._on_save_ready(1, str(path), "print('old')\n", True, "", False)
+
+    assert tab._saving is True
+    assert tab._dirty is True
+    assert tab._content == "print('hi')\n"
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
+def test_text_file_tab_failed_save_keeps_dirty(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    tab = _TextFileTab(str(path), "print('hi')\n", str(workspace), None)
+    tab._set_dirty(True)
+    tab._saving = True
+    tab._save_generation = 3
+
+    tab._on_save_ready(3, str(path), "print('new')\n", False, "disk full", False)
+
+    assert tab._saving is False
+    assert tab._dirty is True
+    assert tab._content == "print('hi')\n"
+    assert tab._status.text() == "Save failed: disk full"
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
+def test_text_file_tab_schedules_diff_timer_without_repo_check(workspace):
+    starts = []
     tab = SimpleNamespace(
         _file_backed=True,
         _repo_root=str(workspace),
         _diff_generation=4,
-        _on_diff_ready=lambda generation, diff_text: ready.append((generation, diff_text)),
+        _diff_timer=SimpleNamespace(start=lambda delay: starts.append(delay)),
+        _DIFF_DELAY_MS=250,
     )
 
     _TextFileTab._schedule_diff_refresh(tab, delay_ms=0)
 
-    assert tab._diff_generation == 5
-    assert ready == [(5, None)]
+    assert tab._diff_generation == 4
+    assert starts == [0]
+
+
+def test_diff_worker_delegates_diff_lookup_once(qapp, workspace, monkeypatch):
+    path = workspace / "src" / "main.py"
+    calls = []
+    done = []
+
+    monkeypatch.setattr(
+        "ui.widgets.file_viewer.build_git_snapshot",
+        lambda repo_root: f"snapshot:{repo_root}",
+    )
+
+    def fake_diff(repo_root, abs_path, *, git_snapshot=None):
+        calls.append((repo_root, abs_path, git_snapshot))
+        return "diff"
+
+    monkeypatch.setattr("ui.widgets.file_viewer.diff_against_head", fake_diff)
+    worker = _DiffWorker(6, str(workspace), str(path))
+    worker.signals.done.connect(lambda *args: done.append(args))
+    worker.run()
+
+    assert calls == [(str(workspace), str(path), f"snapshot:{workspace}")]
+    assert done == [(6, "diff")]
+
+
+def test_text_file_tab_noop_diff_result_preserves_status(qapp, workspace, monkeypatch):
+    monkeypatch.setattr(_TextFileTab, "_refresh_diagnostics", lambda self, delay_ms=None: None)
+    monkeypatch.setattr(_TextFileTab, "_schedule_diff_refresh", lambda self, delay_ms=None: None)
+    path = workspace / "src" / "main.py"
+    tab = _TextFileTab(str(path), "print('hi')\n", str(workspace), None)
+    tab._diff_generation = 2
+    tab._diff_text = None
+    tab._set_status("No safe fixes available")
+
+    tab._on_diff_ready(2, None)
+
+    assert tab._status.text() == "No safe fixes available"
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
+def test_text_file_tab_close_invalidates_workers_without_waiting(qapp, workspace, monkeypatch):
+    path = workspace / "src" / "main.py"
+    waits = []
+    monkeypatch.setattr(
+        "ui.widgets.file_viewer.QThreadPool.start",
+        lambda _pool, _worker: None,
+    )
+    monkeypatch.setattr(
+        "ui.widgets.file_viewer.QThreadPool.waitForDone",
+        lambda *_args: waits.append("wait"),
+    )
+    tab = _TextFileTab(str(path), "print('hi')\n", str(workspace), None)
+    tab._diagnostics_generation = 2
+    tab._code_action_generation = 3
+    tab._diff_generation = 4
+    tab._markdown_generation = 5
+    tab._save_generation = 6
+    tab._saving = True
+
+    tab.closeEvent(QCloseEvent())
+
+    assert (
+        tab._diagnostics_generation,
+        tab._code_action_generation,
+        tab._diff_generation,
+        tab._markdown_generation,
+        tab._save_generation,
+        tab._saving,
+    ) == (3, 4, 5, 6, 7, False)
+    assert waits == []
+    tab.deleteLater()
+    qapp.processEvents()
+
+
+def test_retired_worker_pool_cleanup_waits_until_inactive(monkeypatch):
+    callbacks = []
+
+    class Pool:
+        def __init__(self):
+            self.active = 1
+            self.cleared = False
+            self.parent = "tab"
+            self.waits = []
+
+        def clear(self):
+            self.cleared = True
+
+        def setParent(self, parent):
+            self.parent = parent
+
+        def activeThreadCount(self):
+            return self.active
+
+        def waitForDone(self, timeout):
+            self.waits.append(timeout)
+
+    pool = Pool()
+    monkeypatch.setattr(
+        "ui.widgets.file_viewer.QTimer.singleShot",
+        lambda _delay, callback: callbacks.append(callback),
+    )
+
+    _retire_worker_pool(pool)
+
+    assert pool.cleared is True
+    assert pool.parent is None
+    assert pool in _RETIRED_WORKER_POOLS
+    assert len(callbacks) == 1
+
+    callbacks.pop(0)()
+
+    assert pool in _RETIRED_WORKER_POOLS
+    assert len(callbacks) == 1
+
+    pool.active = 0
+    callbacks.pop(0)()
+
+    assert pool.waits == [0]
+    assert pool not in _RETIRED_WORKER_POOLS
 
 
 def test_file_viewer_marks_dirty_tabs_across_files(qapp, workspace, monkeypatch):
@@ -175,6 +392,7 @@ def test_file_viewer_emits_dirty_file_state(qapp, workspace):
     tab._editor.edit_requested.emit()
     tab._editor.setPlainText("print('dirty')\n")
     tab._save()
+    _wait_for_save(qapp, tab)
 
     assert changes == [(str(path), True), (str(path), False)]
     panel.close()
@@ -280,6 +498,7 @@ def test_file_viewer_auto_saves_when_enabled(qapp, workspace):
     assert tab._auto_save_timer.isActive()
     tab._auto_save_timer.stop()
     tab._save(auto=True)
+    _wait_for_save(qapp, tab)
     assert path.read_text(encoding="utf-8") == "print('auto')\n"
     assert tab._dirty is False
     assert tab._edit_mode is True
@@ -296,7 +515,14 @@ def test_file_viewer_opens_formatted_and_save_returns_to_view(qapp, workspace):
     tab = panel._tabs.widget(0)
 
     assert tab._editor.isReadOnly() is True
-    assert tab._status.text() == "Formatted view"
+    assert tab._toolbar.objectName() == "fileEditorToolbar"
+    assert tab._save_btn.maximumHeight() == 24
+    assert tab._revert_btn.maximumHeight() == 24
+    assert tab._minimap.minimumWidth() == 64
+    assert tab._minimap.maximumWidth() == 64
+    assert "max-width:220px" in panel._tabs.styleSheet()
+    assert tab._status.text() == ""
+    assert tab._status.isHidden()
     assert "print" in tab._editor.toPlainText()
     assert tab._editor._syntax_highlighter is not None
     assert hasattr(tab, "_edit_btn") is False
@@ -306,6 +532,7 @@ def test_file_viewer_opens_formatted_and_save_returns_to_view(qapp, workspace):
     assert tab._editor._syntax_highlighter is not None
     tab._editor.setPlainText("print('formatted save')\n")
     tab._save()
+    _wait_for_save(qapp, tab)
 
     assert path.read_text(encoding="utf-8") == "print('formatted save')\n"
     assert panel._tabs.tabText(0) == "main.py"
@@ -378,6 +605,42 @@ def test_file_viewer_refresh_file_updates_open_editor(qapp, workspace):
     panel.close()
 
 
+def test_file_viewer_opens_large_text_file_async(qapp, workspace, monkeypatch):
+    monkeypatch.setattr(_TextFileTab, "_refresh_diagnostics", lambda self, delay_ms=None: None)
+    path = workspace / "large.py"
+    content = "print('start')\n" + ("value = 1\n" * ((_ASYNC_FILE_READ_BYTES // 10) + 20))
+    path.write_text(content, encoding="utf-8")
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace), line_no=2)
+    tab = panel._tabs.widget(0)
+
+    assert tab._content == _LOADING_FILE_TEXT
+    assert tab._editable is False
+    _wait_until(qapp, lambda: not panel._pending_file_reads, timeout_ms=5000)
+    assert tab._content.replace("\r\n", "\n").startswith("print('start')\nvalue = 1\n")
+    assert tab._editable is True
+    assert tab._editor.textCursor().blockNumber() == 1
+    panel.close()
+
+
+def test_file_viewer_ignores_large_file_read_after_tab_closes(qapp, workspace, monkeypatch):
+    monkeypatch.setattr(_TextFileTab, "_refresh_diagnostics", lambda self, delay_ms=None: None)
+    path = workspace / "large.py"
+    path.write_text(
+        "first\n" + ("value = 1\n" * ((_ASYNC_FILE_READ_BYTES // 10) + 20)),
+        encoding="utf-8",
+    )
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace))
+    assert panel.close_current_tab() is True
+    _wait_until(qapp, lambda: not panel._pending_file_reads)
+
+    assert panel._tabs.count() == 0
+    panel.close()
+
+
 def test_text_file_tab_local_find_selects_match(qapp):
     tab = _TextFileTab("demo.py", "one\nneedle\ntwo needle\n", "", None)
 
@@ -415,6 +678,86 @@ def test_text_file_tab_local_find_keeps_focus_while_typing(qapp):
     qapp.processEvents()
 
 
+def test_text_file_tab_find_uses_content_without_copying_editor(qapp, monkeypatch):
+    tab = _TextFileTab("demo.py", "one\nneedle\ntwo needle\n", "", None)
+
+    def fail_to_plain_text():
+        raise AssertionError("view-mode find should use cached tab content")
+
+    monkeypatch.setattr(tab._editor, "toPlainText", fail_to_plain_text)
+
+    tab._find_query.setText("needle")
+
+    assert tab._editor.textCursor().selectedText() == "needle"
+    assert tab._find_status.text() == "1 of 2"
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
+def test_text_file_tab_find_reuses_editor_text_until_revision_changes(qapp, monkeypatch):
+    tab = _TextFileTab("demo.py", "one\nneedle\ntwo needle\n", "", None)
+    tab._edit_mode = True
+    tab._editor.setReadOnly(False)
+    calls = []
+
+    def tracked_to_plain_text():
+        calls.append("copy")
+        return QPlainTextEdit.toPlainText(tab._editor)
+
+    monkeypatch.setattr(tab._editor, "toPlainText", tracked_to_plain_text)
+
+    tab._find_query.setText("needle")
+    tab._find_next()
+    tab._find_previous()
+
+    assert len(calls) == 1
+
+    cursor = tab._editor.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    tab._editor.setTextCursor(cursor)
+    tab._editor.insertPlainText("\nneedle")
+    tab._find_next()
+
+    assert len(calls) == 2
+    assert tab._find_status.text() in {"1 of 3", "2 of 3", "3 of 3"}
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
+def test_text_file_tab_reuses_editor_snapshot_until_revision_changes(qapp, monkeypatch):
+    tab = _TextFileTab("demo.py", "one\nneedle\ntwo needle\n", "", None)
+    tab._edit_mode = True
+    tab._editor.setReadOnly(False)
+    calls = []
+
+    def tracked_to_plain_text():
+        calls.append("copy")
+        return QPlainTextEdit.toPlainText(tab._editor)
+
+    monkeypatch.setattr(tab._editor, "toPlainText", tracked_to_plain_text)
+
+    assert tab._current_editor_content() == "one\nneedle\ntwo needle\n"
+    assert tab._current_editor_content() == "one\nneedle\ntwo needle\n"
+    tab._find_query.setText("needle")
+
+    assert len(calls) == 1
+    assert tab._find_status.text() == "1 of 2"
+
+    cursor = tab._editor.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    tab._editor.setTextCursor(cursor)
+    tab._editor.insertPlainText("three\n")
+
+    assert tab._current_editor_content().endswith("three\n")
+    assert tab._current_editor_content().endswith("three\n")
+    assert len(calls) == 2
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
 def test_file_text_edit_populates_local_completions(qapp):
     editor = _FileTextEdit()
     editor.configure_completion("demo.js")
@@ -446,6 +789,55 @@ def test_file_text_edit_inserts_completion_over_prefix(qapp):
     editor._insert_completion("return")
 
     assert editor.toPlainText().endswith("    return")
+    assert editor._completion_model.stringList() == []
+    editor.close()
+    editor.deleteLater()
+    qapp.processEvents()
+
+
+def test_file_text_edit_completion_uses_bounded_context(qapp):
+    provider = _RecordingCompletionProvider()
+    editor = _FileTextEdit()
+    editor.configure_completion("demo.py", provider=provider)
+    padding = "padding_value = 1\n" * 12_000
+    editor.setPlainText(
+        "farRenderSymbol = 1\n"
+        + padding
+        + "localRenderSymbol = 1\nloc"
+    )
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    editor.setTextCursor(cursor)
+
+    editor._show_completion(manual=False)
+
+    assert provider.calls
+    call = provider.calls[0]
+    assert len(call["content"]) <= _COMPLETION_CONTEXT_CHARS
+    assert call["prefix"] == "loc"
+    assert call["position"] == len(call["content"])
+    assert "localRenderSymbol" in call["content"]
+    assert "farRenderSymbol" not in call["content"]
+    editor.close()
+    editor.deleteLater()
+    qapp.processEvents()
+
+
+def test_file_text_edit_completion_hot_path_does_not_copy_whole_buffer(qapp):
+    provider = _RecordingCompletionProvider([
+        CompletionItem("renderRemote", "renderRemote"),
+    ])
+    editor = _NoPlainTextFileTextEdit()
+    editor.configure_completion("demo.py", provider=provider)
+    editor.setPlainText("def render_scene():\n    ren")
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    editor.setTextCursor(cursor)
+
+    editor._show_completion(manual=False)
+    editor._insert_completion("renderRemote")
+
+    assert editor.document().toPlainText().endswith("    renderRemote")
     assert editor._completion_model.stringList() == []
     editor.close()
     editor.deleteLater()
@@ -508,6 +900,8 @@ def test_file_viewer_uses_tab_spaces_setting(qapp, workspace):
     panel.open_file(str(path), repo_root=str(workspace))
     tab = panel._tabs.widget(0)
 
+    assert tab._editor._tab_spaces == 2
+    tab._editor.apply_appearance()
     assert tab._editor.tabStopDistance() == tab._editor.fontMetrics().horizontalAdvance(" ") * 2
     panel.close()
 
@@ -705,6 +1099,7 @@ def test_text_file_tab_right_click_diagnostic_marker_drafts_fix_request(qapp, wo
     tab._editor.line_number_area_mouse_press_event(event)
 
     assert event.accepted is True
+    _wait_until(qapp, lambda: bool(drafted))
     assert drafted
     assert "Please fix this diagnostic in @src/main.py:2." in drafted[0][0]
     assert "Diagnostic tool: ruff F841" in drafted[0][0]
@@ -811,9 +1206,79 @@ def test_text_file_tab_code_action_no_content_keeps_buffer(qapp, workspace):
     qapp.processEvents()
 
 
-def test_diagnostic_details_limits_output():
-    from services.language_features import Diagnostic
+def test_text_file_tab_safe_code_actions_are_discovered_on_worker(qapp, workspace, monkeypatch):
+    monkeypatch.setattr(_TextFileTab, "_refresh_diagnostics", lambda self, delay_ms=None: None)
+    path = workspace / "src" / "main.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("bad\n", encoding="utf-8")
+    tab = _TextFileTab(str(path), "bad\n", str(workspace), None)
+    diagnostic = Diagnostic(path=str(path), line=1, column=0, severity="warning", message="bad")
+    action = CodeAction(id="safe.fix", title="Apply safe fix", safe=True)
+    calls = []
+    selected = []
 
+    def code_actions(repo_root, action_path, content, diagnostics):
+        calls.append((repo_root, action_path, content, list(diagnostics)))
+        return [action], ["provider warning"]
+
+    def run_code_action(selected_action, diagnostics):
+        selected.append((selected_action, list(diagnostics)))
+
+    monkeypatch.setattr("ui.widgets.file_viewer.language_code_actions", code_actions)
+    monkeypatch.setattr(tab, "_run_code_action", run_code_action)
+
+    tab._set_diagnostics([diagnostic])
+    tab._show_safe_code_actions()
+
+    assert tab._status.text() == "Finding safe fixes..."
+    assert selected == []
+    _wait_until(qapp, lambda: bool(selected))
+    assert calls == [(str(workspace), str(path), "bad\n", [diagnostic])]
+    assert selected == [(action, [diagnostic])]
+    assert tab._language_errors == ["provider warning"]
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
+def test_text_file_tab_stale_code_action_discovery_is_ignored(qapp, workspace):
+    path = workspace / "src" / "main.py"
+    tab = _TextFileTab(str(path), "bad\n", str(workspace), None)
+    diagnostic = Diagnostic(path=str(path), line=1, column=0, severity="warning", message="bad")
+    drafted = []
+    tab.diagnostic_fix_requested.connect(lambda prompt, files: drafted.append((prompt, files)))
+
+    tab._code_action_generation = 2
+    tab._on_code_actions_ready(1, [], ["stale error"], [diagnostic], safe_only=False)
+
+    assert drafted == []
+    assert tab._language_errors == []
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
+def test_text_file_tab_code_action_discovery_errors_are_reported(qapp, workspace, monkeypatch):
+    monkeypatch.setattr(_TextFileTab, "_refresh_diagnostics", lambda self, delay_ms=None: None)
+    path = workspace / "src" / "main.py"
+    tab = _TextFileTab(str(path), "bad\n", str(workspace), None)
+    diagnostic = Diagnostic(path=str(path), line=1, column=0, severity="warning", message="bad")
+
+    def code_actions(*_args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("ui.widgets.file_viewer.language_code_actions", code_actions)
+    tab._set_diagnostics([diagnostic])
+    tab._show_safe_code_actions()
+
+    _wait_until(qapp, lambda: tab._status.text() == "No safe fixes available")
+    assert tab._language_errors == ["language code actions failed: boom"]
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
+def test_diagnostic_details_limits_output():
     details = _diagnostic_details([
         Diagnostic(
             path="demo.py",
@@ -910,11 +1375,13 @@ def test_file_viewer_diff_mode_marks_changed_lines(qapp, workspace):
     assert tab._editor.isReadOnly() is True
     assert tab._editor.toPlainText() == content
     assert tab._editor._changed_lines == {2}
-    assert tab._status.text() == "Diff preview"
+    assert tab._diff_toggle.isChecked() is True
+    assert tab._status.text() == ""
+    assert tab._status.isHidden()
     panel.close()
 
 
-def test_file_viewer_markdown_uses_preview_until_edit(qapp, workspace, monkeypatch):
+def test_file_viewer_markdown_uses_live_split_preview(qapp, workspace, monkeypatch):
     monkeypatch.setattr(_TextFileTab, "_refresh_diagnostics", lambda self, delay_ms=None: None)
     path = workspace / "README.md"
     path.write_text("# Hello\n\n| A | B |\n|---|---|\n| 1 | 2 |\n", encoding="utf-8")
@@ -923,30 +1390,54 @@ def test_file_viewer_markdown_uses_preview_until_edit(qapp, workspace, monkeypat
     panel.open_file(str(path), repo_root=str(workspace))
     tab = panel._tabs.widget(0)
     tab._apply_markdown_preview()
+    _wait_until(qapp, lambda: "<h1" in tab._preview.toHtml().lower())
 
-    assert tab._status.text() == "Markdown preview"
+    assert tab._status.text() == ""
+    assert tab._status.isHidden()
     assert tab._preview.isVisibleTo(tab)
-    assert tab._editor.isHidden()
+    assert tab._editor.isVisibleTo(tab)
+    assert tab._editor.isReadOnly() is False
+    assert tab._edit_mode is True
     assert tab._preview_toggle.isChecked() is True
     assert "<h1" in tab._preview.toHtml().lower()
     assert "<table" in tab._preview.toHtml().lower()
 
     tab._preview.edit_requested.emit()
     assert tab._editor.isVisibleTo(tab)
-    assert tab._preview.isHidden()
+    assert tab._preview.isVisibleTo(tab)
     assert tab._editor.isReadOnly() is False
-    assert tab._preview_toggle.isChecked() is False
+    assert tab._preview_toggle.isChecked() is True
 
     tab._editor.setPlainText("# Saved\n")
+    _wait_until(qapp, lambda: "Saved" in tab._preview.toPlainText())
+    assert tab._dirty is True
+    assert "Saved" in tab._preview.toPlainText()
     tab._save()
+    _wait_for_save(qapp, tab)
     tab._apply_markdown_preview()
+    _wait_until(qapp, lambda: "Saved" in tab._preview.toPlainText())
 
     assert path.read_text(encoding="utf-8") == "# Saved\n"
-    assert tab._status.text() == "Markdown preview"
+    assert tab._status.text() == "Saved"
     assert tab._preview.isVisibleTo(tab)
-    assert tab._editor.isHidden()
+    assert tab._editor.isVisibleTo(tab)
     assert tab._preview_toggle.isChecked() is True
     assert "Saved" in tab._preview.toPlainText()
+    panel.close()
+
+
+def test_file_viewer_markdown_preview_ignores_stale_worker_result(qapp, workspace, monkeypatch):
+    monkeypatch.setattr(_TextFileTab, "_refresh_diagnostics", lambda self, delay_ms=None: None)
+    path = workspace / "README.md"
+    path.write_text("# Current\n", encoding="utf-8")
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace))
+    tab = panel._tabs.widget(0)
+    tab._markdown_generation = 2
+    tab._on_markdown_preview_ready(1, str(path), "<html><body>Old</body></html>")
+
+    assert "Old" not in tab._preview.toPlainText()
     panel.close()
 
 
@@ -957,6 +1448,8 @@ def test_file_viewer_preview_checkbox_toggles_markdown_source(qapp, workspace):
 
     panel.open_file(str(path), repo_root=str(workspace))
     tab = panel._tabs.widget(0)
+    assert tab._preview_toggle.text() == "Show preview"
+    assert "beside the source editor" in tab._preview_toggle.toolTip()
     tab._preview_toggle.setChecked(False)
 
     assert tab._editor.isVisibleTo(tab)
@@ -966,11 +1459,41 @@ def test_file_viewer_preview_checkbox_toggles_markdown_source(qapp, workspace):
     tab._preview_toggle.setChecked(True)
 
     assert tab._preview.isVisibleTo(tab)
-    assert tab._editor.isHidden()
+    assert tab._editor.isVisibleTo(tab)
+    assert tab._edit_mode is True
     panel.close()
 
 
-def test_file_viewer_escape_key_returns_clean_markdown_edit_to_preview(qapp, workspace):
+def test_file_viewer_markdown_preview_and_changes_switch_directly(qapp, workspace):
+    path = workspace / "README.md"
+    path.write_text("# Preview\n", encoding="utf-8")
+    diff_text = "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-# Old\n+# Preview\n"
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace), diff_text=diff_text)
+    tab = panel._tabs.widget(0)
+
+    assert tab._diff_toggle.isChecked() is True
+    assert tab._preview_toggle.isChecked() is False
+    assert tab._preview_toggle.isEnabled() is True
+    assert tab._status.text() == ""
+
+    tab._preview_toggle.setChecked(True)
+
+    assert tab._diff_toggle.isChecked() is False
+    assert tab._preview_toggle.isChecked() is True
+    assert tab._preview.isVisibleTo(tab)
+    assert tab._editor.isVisibleTo(tab)
+
+    tab._diff_toggle.setChecked(True)
+
+    assert tab._diff_toggle.isChecked() is True
+    assert tab._preview_toggle.isChecked() is False
+    assert tab._preview.isHidden()
+    panel.close()
+
+
+def test_file_viewer_escape_key_keeps_clean_markdown_live_split(qapp, workspace):
     path = workspace / "README.md"
     path.write_text("# Original\n", encoding="utf-8")
     panel = FileViewerPanel(str(workspace))
@@ -984,10 +1507,10 @@ def test_file_viewer_escape_key_returns_clean_markdown_edit_to_preview(qapp, wor
     QTest.keyClick(tab._editor, Qt.Key.Key_Escape)
 
     assert tab._dirty is False
-    assert tab._edit_mode is False
+    assert tab._edit_mode is True
     assert tab._preview_toggle.isChecked() is True
     assert tab._preview.isVisibleTo(tab)
-    assert tab._editor.isHidden()
+    assert tab._editor.isVisibleTo(tab)
     panel.close()
 
 
@@ -1010,11 +1533,11 @@ def test_file_viewer_escape_discards_markdown_edit_and_returns_to_preview(qapp, 
     assert path.read_text(encoding="utf-8") == original
     assert tab._dirty is False
     assert panel._tabs.tabText(0) == "README.md"
-    assert tab._edit_mode is False
+    assert tab._edit_mode is True
     assert tab._status.text() == "Reverted"
     assert tab._preview_toggle.isChecked() is True
     assert tab._preview.isVisibleTo(tab)
-    assert tab._editor.isHidden()
+    assert tab._editor.isVisibleTo(tab)
     _wait_until(qapp, lambda: "Original" in tab._preview.toPlainText())
     assert "Original" in tab._preview.toPlainText()
     panel.close()
@@ -1035,6 +1558,7 @@ def test_file_viewer_revert_only_enabled_for_unsaved_changes(qapp, workspace):
     assert tab._revert_btn.isEnabled() is True
 
     tab._save()
+    _wait_for_save(qapp, tab)
 
     assert tab._revert_btn.isEnabled() is False
     panel.close()
@@ -1075,7 +1599,7 @@ def test_text_file_tab_minimap_scrolls_editor(qapp):
     tab._minimap.resize(86, 240)
     qapp.processEvents()
 
-    assert tab._minimap.width() == 86
+    assert tab._minimap.width() == 64
     assert tab._editor.toPlainText().startswith("line 0")
 
     scroll = tab._editor.verticalScrollBar()
@@ -1100,10 +1624,10 @@ def test_text_file_tab_minimap_uses_syntax_colors(qapp):
     changed_color = tab._minimap._line_color("def hello():", p, 1)
 
     assert syntax_color.name() != QColor(p["TEXT_DIM"]).name()
-    assert syntax_color.alpha() == 130
-    assert fallback_color.alpha() == 130
+    assert syntax_color.alpha() == 105
+    assert fallback_color.alpha() == 105
     assert changed_color.name() == QColor(p["SUCCESS"]).name()
-    assert changed_color.alpha() == 150
+    assert changed_color.alpha() == 125
     tab.close()
     tab.deleteLater()
     qapp.processEvents()

@@ -1,6 +1,9 @@
 # Configuration
 
-Settings are stored in `~/.aichs/settings.json` (written by **Settings** in the app).
+By default, settings are stored in `~/.aichs/settings.json` (written by
+**Settings** in the app). Set `AICHS_HOME` before launch to move all app-owned
+user data, including settings, models, skills, conversations, extensions, and
+recent workspaces, to another directory.
 
 | Key | Description |
 |---|---|
@@ -10,6 +13,7 @@ Settings are stored in `~/.aichs/settings.json` (written by **Settings** in the 
 | `system_prompt` | Overrides the default system prompt |
 | `file_review_prompt_template` | Replaces the first line of **Ask File** drafts. Supports `{mention}` and `{path}` |
 | `diagnostic_fix_prompt_template` | Replaces only the first line of diagnostic fix drafts. Supports `{mention}`, `{path}`, and `{line}` |
+| `git_fix_prompt_template` | Replaces only the first line of git pull/push failure drafts. Supports `{action}`, `{label}`, `{repo}`, `{command}`, `{exit_code}`, and `{output}` |
 | `compact_resume_prompt` | Default resume message used after compact-and-resume when no extension prompt is supplied |
 | `auto_title_prompt_instructions` | Replaces the title-writing instructions; the first user message is attached automatically |
 | `compaction_summary_guidance` | Optional additive guidance appended to the fixed compaction summary prompt |

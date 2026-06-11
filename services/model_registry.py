@@ -1,4 +1,4 @@
-"""Model registry - loads built-in providers and merges ~/.aichs/models.json on top.
+"""Model registry - loads built-in providers and merges AICHS_HOME/models.json on top.
 
 Public API
 ----------
@@ -20,13 +20,16 @@ import json
 import os
 import re
 import subprocess
+import threading
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
 from services.subprocess_utils import no_window_creationflags, no_window_startupinfo
 
-_MODELS_PATH = Path.home() / ".aichs" / "models.json"
+_MODELS_PATH = Path(
+    os.environ.get("AICHS_HOME", str(Path.home() / ".aichs"))
+).expanduser() / "models.json"
 _MODEL_ID_CONTEXT_SUFFIX = re.compile(r"\s@\s*\d+\s*$")
 
 _BUILTIN: dict = {
@@ -54,6 +57,8 @@ _BUILTIN: dict = {
 _VALID_APIS = {"anthropic", "openai-compatible"}
 _BUILTIN_PROVIDER_IDS = frozenset({"claude", "openai"})
 _ANTHROPIC_CONTEXT: dict[str, int] = {}
+_CONTEXT_REFRESH_LOCK = threading.Lock()
+_CONTEXT_REFRESH_GENERATION = 0
 
 
 def api_default_context_window(api: str) -> int:
@@ -224,17 +229,17 @@ def _load_user_providers() -> dict:
         data = json.loads(_MODELS_PATH.read_text(errors="replace"))
         return data.get("providers", {})
     except Exception as exc:
-        warnings.warn(f"aichs: could not parse ~/.aichs/models.json: {exc}")
+        warnings.warn(f"aichs: could not parse {_MODELS_PATH}: {exc}")
         return {}
 
 
 def load_user_providers() -> dict:
-    """Return provider definitions from ~/.aichs/models.json."""
+    """Return provider definitions from the configured AICHS_HOME models file."""
     return copy.deepcopy(_load_user_providers())
 
 
 def save_user_providers(providers: dict) -> None:
-    """Persist provider definitions to ~/.aichs/models.json."""
+    """Persist provider definitions to the configured AICHS_HOME models file."""
     _MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)
     if providers:
         _MODELS_PATH.write_text(json.dumps({"providers": providers}, indent=2))
@@ -433,14 +438,38 @@ def _fetch_anthropic_context_window(cfg: ModelConfig, model_id: str) -> int | No
     return None
 
 
-def _refresh_anthropic_context_cache() -> None:
-    _ANTHROPIC_CONTEXT.clear()
-    for model_id, cfg in _MODEL_CONFIG.items():
+def _refresh_anthropic_context_cache(
+    model_config: dict[str, ModelConfig] | None = None,
+    generation: int | None = None,
+) -> None:
+    refreshed: dict[str, int] = {}
+    for model_id, cfg in dict(model_config or _MODEL_CONFIG).items():
         if cfg.api != "anthropic":
             continue
         window = _fetch_anthropic_context_window(cfg, model_id)
         if window:
-            _ANTHROPIC_CONTEXT[model_id] = window
+            refreshed[model_id] = window
+    with _CONTEXT_REFRESH_LOCK:
+        if generation is not None and generation != _CONTEXT_REFRESH_GENERATION:
+            return
+        _ANTHROPIC_CONTEXT.clear()
+        _ANTHROPIC_CONTEXT.update(refreshed)
+
+
+def refresh_anthropic_context_async() -> threading.Thread:
+    """Refresh remote Anthropic context sizes without blocking the caller."""
+    global _CONTEXT_REFRESH_GENERATION
+    model_config = dict(_MODEL_CONFIG)
+    with _CONTEXT_REFRESH_LOCK:
+        _CONTEXT_REFRESH_GENERATION += 1
+        generation = _CONTEXT_REFRESH_GENERATION
+    thread = threading.Thread(
+        target=_refresh_anthropic_context_cache,
+        args=(model_config, generation),
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 def context_window_tokens(model_id: str) -> int:
@@ -455,9 +484,9 @@ def context_window_tokens(model_id: str) -> int:
     return api_default_context_window(cfg.api)
 
 
-def reload() -> None:
-    """Reload built-ins plus ~/.aichs/models.json, preserving public dict objects."""
-    global _providers
+def reload(*, refresh_anthropic: bool = True) -> None:
+    """Reload built-ins plus configured user models, preserving public dict objects."""
+    global _providers, _CONTEXT_REFRESH_GENERATION
     _providers = _merge(_BUILTIN, _load_user_providers())
     models, model_provider, model_config, provider_config = _build(_providers)
     MODELS.clear()
@@ -468,7 +497,12 @@ def reload() -> None:
     _MODEL_CONFIG.update(model_config)
     PROVIDERS.clear()
     PROVIDERS.update(provider_config)
-    _refresh_anthropic_context_cache()
+    with _CONTEXT_REFRESH_LOCK:
+        _CONTEXT_REFRESH_GENERATION += 1
+    if refresh_anthropic:
+        _refresh_anthropic_context_cache()
+    else:
+        _ANTHROPIC_CONTEXT.clear()
 
 
 _refresh_anthropic_context_cache()

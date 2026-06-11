@@ -1,7 +1,9 @@
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
+import services.export as export
 from services.export import (
     _fmt_ts,
     _skip_user_message,
@@ -9,6 +11,9 @@ from services.export import (
     default_export_name,
     export_conversation_dialog,
     export_conversation_file,
+    export_conversation_file_to_path,
+    normalized_export_path,
+    write_conversation_markdown,
 )
 
 
@@ -100,6 +105,51 @@ def test_export_dialog_writes_markdown(qapp, tmp_path):
         )
     assert ok is True
     assert dest.with_suffix(".md").read_text(encoding="utf-8").startswith("# Export me")
+
+
+def test_write_conversation_markdown_normalizes_suffix(tmp_path):
+    written = write_conversation_markdown(
+        {"title": "Suffix", "messages": []},
+        str(tmp_path / "export"),
+    )
+
+    assert written == tmp_path / "export.md"
+    assert written.read_text(encoding="utf-8").startswith("# Suffix")
+    assert normalized_export_path(str(tmp_path / "ready.md")) == tmp_path / "ready.md"
+
+
+def test_export_records_render_and_write_operations(tmp_path, monkeypatch):
+    operations = []
+
+    @contextmanager
+    def fake_time_operation(operation, *, detail="", slow_ms=100.0):
+        operations.append((operation, detail))
+        yield
+
+    monkeypatch.setattr(export, "time_operation", fake_time_operation)
+
+    write_conversation_markdown(
+        {"title": "Timed", "messages": [{"role": "user", "content": "hi"}]},
+        str(tmp_path / "timed"),
+    )
+
+    assert [operation for operation, _detail in operations] == [
+        "conversation.export.write",
+        "conversation.export.render",
+    ]
+
+
+def test_export_conversation_file_to_path_reads_and_writes(tmp_path):
+    conv = tmp_path / "c.json"
+    conv.write_text(
+        json.dumps({"title": "From file", "messages": []}),
+        encoding="utf-8",
+    )
+
+    written = export_conversation_file_to_path(str(conv), str(tmp_path / "saved"))
+
+    assert written == tmp_path / "saved.md"
+    assert written.read_text(encoding="utf-8").startswith("# From file")
 
 
 def test_export_skips_tool_only_user_messages():

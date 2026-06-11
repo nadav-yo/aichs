@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Callable
 
-from PyQt6.QtCore import QMimeData, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QMimeData, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -32,15 +32,16 @@ from services.git_status import (
     GitFileChange,
     commit_staged,
     discard_files,
-    is_git_repo,
-    list_file_changes,
     stage_files,
     stash_files,
     unstage_files,
 )
+from services.git_snapshot import GitSnapshot, build_git_snapshot, clear_git_snapshot_cache
 from storage.settings import SettingsStore
 from ui.theme import (
     ACCENT,
+    compact_field_style,
+    git_change_button_style,
     git_changes_list_style,
     git_status_color,
     mono_font,
@@ -54,6 +55,18 @@ _ROLE_ABS_PATH = Qt.ItemDataRole.UserRole
 _ROLE_REL_PATH = Qt.ItemDataRole.UserRole + 1
 _GIT_CHANGE_MIME = "application/x-aichs-git-change-paths"
 _GENERATING_FRAME_COUNT = 4
+
+
+class _GitChangesRefreshThread(QThread):
+    done = pyqtSignal(int, object)
+
+    def __init__(self, generation: int, repo_path: str, parent=None):
+        super().__init__(parent)
+        self._generation = generation
+        self._repo_path = repo_path
+
+    def run(self):
+        self.done.emit(self._generation, build_git_snapshot(self._repo_path))
 
 
 class _GitChangeList(QListWidget):
@@ -131,9 +144,11 @@ class GitChangesList(QWidget):
         self._generate_icon = _commit_message_action_icon(self)
         self._generate_frame = 0
         self._auto_refresh_started = False
+        self._refresh_generation = 0
+        self._refresh_threads: list[_GitChangesRefreshThread] = []
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(6, 0, 6, 0)
         layout.setSpacing(4)
 
         self.summary = QLineEdit()
@@ -165,6 +180,7 @@ class GitChangesList(QWidget):
         self._commit_btn.clicked.connect(self._commit)
         commit_actions.addWidget(self._commit_btn)
         layout.addLayout(commit_actions)
+        layout.addSpacing(2)
 
         self._staged_label = QLabel("Staged")
         layout.addWidget(self._staged_label)
@@ -181,13 +197,12 @@ class GitChangesList(QWidget):
         layout.addWidget(self.unstaged_list)
 
         self.apply_appearance()
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self.refresh)
         if defer_refresh:
             self._set_loading()
         else:
             self.refresh()
-
-        self._refresh_timer = QTimer(self)
-        self._refresh_timer.timeout.connect(self.refresh)
         if not defer_refresh:
             self.start_auto_refresh()
 
@@ -217,19 +232,41 @@ class GitChangesList(QWidget):
             self.file_open.emit(path)
 
     def refresh(self):
-        self.set_changes(list_file_changes(self.repo_path))
+        self._refresh_generation += 1
+        thread = _GitChangesRefreshThread(self._refresh_generation, self.repo_path, self)
+        self._refresh_threads.append(thread)
+        thread.done.connect(self._apply_snapshot)
+        thread.finished.connect(lambda t=thread: self._release_refresh_thread(t))
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
 
-    def set_changes(self, changes: list[GitFileChange]):
-        self.staged_list.clear()
-        self.unstaged_list.clear()
-        self._staged_count = 0
+    def _apply_snapshot(self, generation: int, snapshot: GitSnapshot):
+        if generation != self._refresh_generation:
+            return
+        if snapshot.repo_path != self.repo_path:
+            return
+        self.set_repo_state(snapshot.is_repo, list(snapshot.changes))
 
-        if not is_git_repo(self.repo_path):
+    def _release_refresh_thread(self, thread: _GitChangesRefreshThread):
+        if thread in self._refresh_threads:
+            self._refresh_threads.remove(thread)
+
+    def set_repo_state(self, is_repo: bool, changes: list[GitFileChange]):
+        if not is_repo:
+            self.staged_list.clear()
+            self.unstaged_list.clear()
+            self._staged_count = 0
             self._staged_label.setText("Staged")
             self._unstaged_label.setText("Unstaged")
             self._add_disabled(self.unstaged_list, "(not a git repository)")
             self._update_action_state()
             return
+        self.set_changes(changes)
+
+    def set_changes(self, changes: list[GitFileChange]):
+        self.staged_list.clear()
+        self.unstaged_list.clear()
+        self._staged_count = 0
 
         for ch in changes:
             if ch.staged:
@@ -425,6 +462,7 @@ class GitChangesList(QWidget):
         refresh_history: bool = False,
     ):
         if result.ok:
+            clear_git_snapshot_cache(self.repo_path)
             self.refresh()
             if refresh_history:
                 self.git_changed.emit()
@@ -443,13 +481,45 @@ class GitChangesList(QWidget):
         QMessageBox.warning(self, f"{label} failed", detail)
 
     def set_repo_path(self, path: str):
+        clear_git_snapshot_cache(self.repo_path)
         self.repo_path = path
+        clear_git_snapshot_cache(self.repo_path)
         self.refresh()
         self.start_auto_refresh()
 
     def shutdown(self):
+        self._refresh_generation += 1
         self._refresh_timer.stop()
         self._generate_timer.stop()
+        if self._message_thread is not None:
+            try:
+                self._message_thread.disconnect()
+            except (AttributeError, RuntimeError, TypeError):
+                pass
+            is_running = getattr(self._message_thread, "isRunning", lambda: False)
+            if is_running():
+                self._message_thread.wait(3000)
+            delete_later = getattr(self._message_thread, "deleteLater", None)
+            if delete_later is not None:
+                delete_later()
+            self._message_thread = None
+        for thread in list(self._refresh_threads):
+            try:
+                thread.done.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                thread.finished.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            if thread.isRunning():
+                thread.wait(3000)
+            thread.deleteLater()
+        self._refresh_threads.clear()
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
 
 
 def _default_stash_message(paths: list[str]) -> str:
@@ -501,23 +571,15 @@ def _commit_message_busy_icon(frame: int, theme: str | None = None) -> QIcon:
 
 
 def _git_change_button_style(theme: str | None = None) -> str:
-    p = palette(theme)
-    return (
-        f"QPushButton {{ background:{p['BG2']}; color:{p['TEXT']};"
-        f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:6px;"
-        "padding:3px 8px; min-height:22px; }"
-        f"QPushButton:hover {{ background:{p['BG3']}; border-color:{p['BORDER']}; }}"
-        f"QPushButton:pressed {{ background:{p['BORDER']}; }}"
-        f"QPushButton:disabled {{ background:{p['BG2']}; color:{p['TEXT_DIM']};"
-        f"border-color:{p['BORDER_SUBTLE']}; }}"
-    )
+    return git_change_button_style(theme)
 
 
 def _git_change_field_style(theme: str | None = None) -> str:
     p = palette(theme)
-    return (
-        f"QLineEdit, QTextEdit {{ background:{p['BG3']}; color:{p['TEXT']};"
-        f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:6px;"
-        "padding:4px 6px; }"
-        f"QLineEdit:focus, QTextEdit:focus {{ border-color:{ACCENT}; }}"
+    return compact_field_style(
+        selector="QLineEdit, QTextEdit",
+        padding="4px 6px",
+        border_radius=6,
+        border_color=p["BORDER_SUBTLE"],
+        theme=theme,
     )

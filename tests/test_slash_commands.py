@@ -33,6 +33,16 @@ def test_parse_builtin_command(text, expected):
     assert parse_builtin_command(text) == expected
 
 
+def test_parse_executable_builtin_command_does_not_load_settings(monkeypatch):
+    monkeypatch.setattr(
+        "services.slash_commands.SettingsStore.load",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("settings should not load")),
+    )
+
+    assert parse_builtin_command("/compact") == "compact"
+    assert parse_builtin_command("/reload") == "reload"
+
+
 def test_parse_builtin_prompt_command():
     cmd = parse_builtin_prompt_command("/archivist what did we decide?")
     assert cmd is not None

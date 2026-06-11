@@ -7,8 +7,8 @@ and lifecycle hooks from local Python files.
 
 | Path | Scope |
 |---|---|
-| `~/.aichs/extensions/*.py` | User-global |
-| `~/.aichs/extensions/*/extension.py` | User-global folder extension |
+| `AICHS_HOME/extensions/*.py` | User-global |
+| `AICHS_HOME/extensions/*/extension.py` | User-global folder extension |
 | `.aichs/extensions/*.py` | Project-local |
 | `.aichs/extensions/*/extension.py` | Project-local folder extension |
 
@@ -22,7 +22,7 @@ You can also open the Extensions dialog, use the reload button next to the
 title, or toggle an extension file between Loaded and Disabled. Disabled
 extensions stay visible in the dialog but do not register tools, commands,
 hooks, context, badges, or panels. Disabled-extension state is stored with user
-app data under `~/.aichs/project/`, outside the workspace tree.
+app data under `AICHS_HOME/project/`, outside the workspace tree.
 
 ## Installing From Git
 
@@ -32,7 +32,7 @@ the discovered extensions, then install them into either:
 | Choice | Target |
 |---|---|
 | Local project | `.aichs/extensions/` in the current workspace |
-| Global user | `~/.aichs/extensions/` |
+| Global user | `AICHS_HOME/extensions/` |
 
 For now the installer supports git sources only. The source pipeline is kept
 resolver-based so a future registry can add HTTP/catalog sources without
@@ -115,7 +115,7 @@ AICHS process, and workspace/network declarations are shown as risk disclosures.
 Imported, new, or changed extensions are disabled until reviewed.
 
 Disabled-extension state and review acknowledgements are app-owned user state
-stored under `~/.aichs/project/`, not in the workspace `.aichs/` folder. The
+stored under `AICHS_HOME/project/`, not in the workspace `.aichs/` folder. The
 review record is for visibility and prompting only; it is not a cryptographic
 trust root or a tamper-proof security boundary.
 

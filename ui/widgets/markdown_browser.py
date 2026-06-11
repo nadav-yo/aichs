@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QSize, Qt, QUrl
-from PyQt6.QtGui import QImage, QPainter, QTextDocument
+from PyQt6.QtGui import QGuiApplication, QImage, QPainter, QTextDocument
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import QTextBrowser
+
+from ui.markdown_html import code_from_copy_url
 
 
 class RemoteImageTextBrowser(QTextBrowser):
@@ -15,6 +17,15 @@ class RemoteImageTextBrowser(QTextBrowser):
         self._image_manager = QNetworkAccessManager(self)
         self._remote_images: dict[str, QImage] = {}
         self._pending_images: set[str] = set()
+
+    def setSource(
+        self,
+        name: QUrl,
+        resource_type=QTextDocument.ResourceType.UnknownResource,
+    ) -> None:
+        if copy_code_url_to_clipboard(name):
+            return
+        super().setSource(name, resource_type)
 
     def loadResource(self, resource_type: int, name: QUrl):
         image_type = QTextDocument.ResourceType.ImageResource
@@ -56,6 +67,15 @@ class RemoteImageTextBrowser(QTextBrowser):
             self.viewport().update()
         finally:
             reply.deleteLater()
+
+
+def copy_code_url_to_clipboard(url: QUrl | str) -> bool:
+    raw = url.toString() if isinstance(url, QUrl) else str(url)
+    code = code_from_copy_url(raw)
+    if code is None:
+        return False
+    QGuiApplication.clipboard().setText(code)
+    return True
 
 
 def image_from_markdown_image_data(data: bytes) -> QImage:

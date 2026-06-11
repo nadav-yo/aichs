@@ -21,8 +21,10 @@ from storage.settings import (
     DEFAULT_COMPACT_RESUME_PROMPT,
     DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE,
     DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
+    DEFAULT_GIT_FIX_PROMPT_TEMPLATE,
     DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY,
     FILE_REVIEW_PROMPT_TEMPLATE_KEY,
+    GIT_FIX_PROMPT_TEMPLATE_KEY,
     SettingsStore,
 )
 from services.tool_registry import (
@@ -38,6 +40,7 @@ _PROMPT_SETTING_KEYS = [
     "system_prompt",
     FILE_REVIEW_PROMPT_TEMPLATE_KEY,
     DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY,
+    GIT_FIX_PROMPT_TEMPLATE_KEY,
     COMPACT_RESUME_PROMPT_KEY,
     AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY,
     COMPACTION_SUMMARY_GUIDANCE_KEY,
@@ -48,6 +51,7 @@ _PROMPT_SETTING_DEFAULTS = {
     "system_prompt": config.SYSTEM_PROMPT,
     FILE_REVIEW_PROMPT_TEMPLATE_KEY: DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
     DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY: DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE,
+    GIT_FIX_PROMPT_TEMPLATE_KEY: DEFAULT_GIT_FIX_PROMPT_TEMPLATE,
     COMPACT_RESUME_PROMPT_KEY: DEFAULT_COMPACT_RESUME_PROMPT,
     AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY: DEFAULT_AUTO_TITLE_PROMPT_INSTRUCTIONS,
     COMPACTION_SUMMARY_GUIDANCE_KEY: "",
@@ -408,14 +412,14 @@ def _avatar_setting_path(item_id: str) -> str:
 
 
 def _skill_roots(cwd: str | None) -> list[tuple[str, Path]]:
-    roots = [("global", Path.home() / ".aichs" / "skills")]
+    roots = [("global", config.AICHS_HOME / "skills")]
     if cwd:
         roots.append(("project", Path(cwd) / ".aichs" / "skills"))
     return roots
 
 
 def _extension_roots(cwd: str | None) -> list[tuple[str, Path]]:
-    roots = [("global", Path.home() / ".aichs" / "extensions")]
+    roots = [("global", config.AICHS_HOME / "extensions")]
     if cwd:
         roots.append(("project", Path(cwd) / ".aichs" / "extensions"))
     return roots
@@ -532,10 +536,10 @@ def _target_for_entry(entry: dict, cwd: str | None) -> Path:
     scope = str(entry.get("scope") or "global")
     name = _safe_name(str(entry.get("name") or Path(str(entry.get("archive_path") or "")).name))
     if kind == "skill":
-        root = Path.home() / ".aichs" / "skills" if scope == "global" else Path(cwd or os.getcwd()) / ".aichs" / "skills"
+        root = config.AICHS_HOME / "skills" if scope == "global" else Path(cwd or os.getcwd()) / ".aichs" / "skills"
         return root / name
     if kind in ("extension_file", "extension_folder"):
-        root = Path.home() / ".aichs" / "extensions" if scope == "global" else Path(cwd or os.getcwd()) / ".aichs" / "extensions"
+        root = config.AICHS_HOME / "extensions" if scope == "global" else Path(cwd or os.getcwd()) / ".aichs" / "extensions"
         return root / name
     raise ValueError(f"unsupported YUK item kind: {kind}")
 

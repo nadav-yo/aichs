@@ -11,6 +11,7 @@ from storage.settings import (
     FILE_EDITOR_AUTO_SAVE_KEY,
     FILE_EDITOR_TAB_SPACES_KEY,
     FILE_REVIEW_PROMPT_TEMPLATE_KEY,
+    GIT_FIX_PROMPT_TEMPLATE_KEY,
     TRASH_RETENTION_DAYS_KEY,
     SettingsStore,
 )
@@ -21,6 +22,7 @@ from PyQt6.QtWidgets import QAbstractItemView
 @pytest.fixture(autouse=True)
 def skip_anthropic_context_refresh(monkeypatch):
     monkeypatch.setattr(reg, "_refresh_anthropic_context_cache", lambda: None)
+    monkeypatch.setattr(reg, "refresh_anthropic_context_async", lambda: None)
 
 
 def _model_ids(models: list[dict]) -> list[str]:
@@ -145,6 +147,15 @@ def test_settings_pages_are_lazy_built(qapp):
     assert hasattr(dialog, "providers_table")
 
 
+def test_settings_combo_fields_style_dropdown_popup_surface(qapp):
+    dialog = SettingsDialog(SettingsStore())
+    style = dialog._field_style
+
+    assert "QComboBoxPrivateContainer" in style
+    assert "QComboBox QAbstractItemView::item" in style
+    assert "QComboBox::indicator" not in style
+
+
 def test_settings_save_writes_generation_params_to_models_json(qapp, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -177,6 +188,34 @@ def test_settings_save_writes_generation_params_to_models_json(qapp, monkeypatch
     finally:
         reg.save_user_providers({})
         reg.reload()
+
+
+def test_settings_save_refreshes_anthropic_context_asynchronously(qapp, monkeypatch):
+    reload_calls = []
+    async_calls = []
+    saved_providers = []
+    store = SettingsStore()
+    dialog = SettingsDialog(store)
+    _ensure_models_page(dialog)
+
+    monkeypatch.setattr(
+        "ui.widgets.settings_dialog.save_user_providers",
+        lambda providers: saved_providers.append(providers),
+    )
+    monkeypatch.setattr(
+        "ui.widgets.settings_dialog.model_registry.reload",
+        lambda **kwargs: reload_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        "ui.widgets.settings_dialog.model_registry.refresh_anthropic_context_async",
+        lambda: async_calls.append("refresh"),
+    )
+
+    dialog._save()
+
+    assert saved_providers == [{}]
+    assert reload_calls == [{"refresh_anthropic": False}]
+    assert async_calls == ["refresh"]
 
 
 def test_model_order_drag_updates_provider_order_without_default_column(qapp, monkeypatch):
@@ -307,6 +346,7 @@ def test_basic_settings_are_saved_and_reloaded(qapp):
     assert dialog._nav.item(2).text() == "Prompts"
     assert "{mention}" in dialog.file_review_prompt_template.text()
     assert "{mention}" in dialog.diagnostic_fix_prompt_template.text()
+    assert "{action}" in dialog.git_fix_prompt_template.text()
     assert dialog.commit_message_guidance.parent() is not None
     assert dialog.commit_message_guidance.toPlainText() == ""
 
@@ -315,6 +355,7 @@ def test_basic_settings_are_saved_and_reloaded(qapp):
     dialog.trash_retention_spin.setValue(30)
     dialog.file_review_prompt_template.setText("Inspect {mention}.")
     dialog.diagnostic_fix_prompt_template.setText("Resolve {mention}.")
+    dialog.git_fix_prompt_template.setText("Resolve git {action}: {command}.")
     dialog.compact_resume_prompt.setText("Continue with the compacted notes.")
     dialog.auto_title_prompt_instructions.setPlainText("Title this briefly.")
     dialog.compaction_summary_guidance.setPlainText("Keep commands exact.")
@@ -328,6 +369,7 @@ def test_basic_settings_are_saved_and_reloaded(qapp):
     assert saved[TRASH_RETENTION_DAYS_KEY] == 30
     assert saved[FILE_REVIEW_PROMPT_TEMPLATE_KEY] == "Inspect {mention}."
     assert saved[DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY] == "Resolve {mention}."
+    assert saved[GIT_FIX_PROMPT_TEMPLATE_KEY] == "Resolve git {action}: {command}."
     assert saved[COMPACT_RESUME_PROMPT_KEY] == "Continue with the compacted notes."
     assert saved[AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY] == "Title this briefly."
     assert saved[COMPACTION_SUMMARY_GUIDANCE_KEY] == "Keep commands exact."
@@ -342,6 +384,7 @@ def test_basic_settings_are_saved_and_reloaded(qapp):
     assert reloaded.trash_retention_spin.value() == 30
     assert reloaded.file_review_prompt_template.text() == "Inspect {mention}."
     assert reloaded.diagnostic_fix_prompt_template.text() == "Resolve {mention}."
+    assert reloaded.git_fix_prompt_template.text() == "Resolve git {action}: {command}."
     assert reloaded.compact_resume_prompt.text() == "Continue with the compacted notes."
     assert reloaded.auto_title_prompt_instructions.toPlainText() == "Title this briefly."
     assert reloaded.compaction_summary_guidance.toPlainText() == "Keep commands exact."

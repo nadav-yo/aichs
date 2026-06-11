@@ -13,6 +13,7 @@ def test_skill_picker_current_command(qapp):
 
     current = picker.current()
 
+    assert "QListWidget::item:selected:focus" in picker._list.styleSheet()
     assert current is not None
     kind, data = current
     assert kind == "command"

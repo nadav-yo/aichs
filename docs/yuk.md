@@ -1,4 +1,4 @@
-# YUK User Kits
+# Your User Kits  (YUKs)
 
 YUK files (`.yuk`) are portable AICHS personalization packages. They are meant
 for sharing or moving a profile, not for full backups.
@@ -13,7 +13,7 @@ The export dialog lets you choose whole sections or individual items:
 | Crew | Crew prompts, enabled flags, colors, portraits, and crew model choices |
 | Skills | Global and project `.aichs/skills/*.md` files |
 | Extensions | Global and project extensions with enabled/disabled state |
-| Avatars | Custom avatar files copied into `~/.aichs/avatars/` |
+| Avatars | Custom avatar files copied into `AICHS_HOME/avatars/` |
 
 Models, provider configuration, API keys, conversations, runtime approvals,
 extension state, and workspace history are not exported.

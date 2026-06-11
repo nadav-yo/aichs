@@ -12,7 +12,7 @@ import pytest
 from config import MAX_TOOL_OUTPUT_CHARS, MAX_TOOL_OUTPUT_LINES, MAX_TOOL_READ_BYTES
 from services.tool_registry import ToolContext
 from services.shell_tool import shell_tool_name
-from storage.repository import ConversationStore
+from storage.repository import ConversationStore, _CONVERSATION_INDEX_NAME, _load_json
 from services.tools import (
     _shell_tool_description,
     _display_path,
@@ -247,6 +247,29 @@ class TestSearchFiles:
         out = _list_files(workspace, "*.txt", recursive=False, limit=2, cwd=cwd)
         assert "[truncated: showing first 2 entries; 1 omitted]" in out
 
+    def test_list_files_can_cancel_before_walk(self, cwd, workspace):
+        cancel = Event()
+        cancel.set()
+
+        assert execute("list_files", {"recursive": True}, cwd, cancel=cancel) == "[cancelled]"
+        assert _list_files(workspace, "*", recursive=True, limit=10, cwd=cwd, cancel=cancel) == "[cancelled]"
+
+    def test_iter_list_paths_can_cancel_during_walk(self, workspace):
+        for idx in range(3):
+            (workspace / f"walk{idx}.py").write_text("x", encoding="utf-8")
+
+        class CancelAfterFirstCheck:
+            def __init__(self):
+                self.calls = 0
+
+            def is_set(self):
+                self.calls += 1
+                return self.calls > 1
+
+        paths = list(_iter_list_paths(workspace, "*.py", recursive=True, cancel=CancelAfterFirstCheck()))
+
+        assert len(paths) <= 1
+
     def test_not_a_directory(self, cwd, workspace):
         out = execute(
             "search_files",
@@ -328,6 +351,40 @@ class TestSearchFiles:
         assert "visible.py" in names
         assert "junk.py" not in names
 
+    def test_search_files_can_cancel_before_scan(self, cwd, workspace):
+        cancel = Event()
+        cancel.set()
+
+        assert execute("search_files", {"pattern": "needle"}, cwd, cancel=cancel) == "[cancelled]"
+        assert _search_files(workspace, "*.py", "needle", cwd, cancel=cancel) == "[cancelled]"
+
+    def test_search_files_can_cancel_fallback_walk(self, cwd, workspace, monkeypatch):
+        monkeypatch.setattr("services.tools.shutil.which", lambda _: None)
+        for idx in range(3):
+            (workspace / f"search{idx}.py").write_text("needle\n", encoding="utf-8")
+
+        class CancelAfterFirstCheck:
+            def __init__(self):
+                self.calls = 0
+
+            def is_set(self):
+                self.calls += 1
+                return self.calls > 1
+
+        out = _search_files(workspace, "*.py", "needle", cwd, cancel=CancelAfterFirstCheck())
+
+        assert out == "[cancelled]"
+
+    def test_rg_search_respects_pre_cancel(self, cwd, workspace, monkeypatch):
+        cancel = Event()
+        cancel.set()
+        run = MagicMock()
+        monkeypatch.setattr("services.tools.shutil.which", lambda cmd: "rg")
+        monkeypatch.setattr("services.tools.run_no_window", run)
+
+        assert _search_files_with_rg(workspace, "*", "x", cwd, cancel=cancel) == "[cancelled]"
+        run.assert_not_called()
+
 
 class TestSearchProjectChats:
     def _write_chat(self, conv_dir: Path, conv_id: str, **overrides):
@@ -366,6 +423,33 @@ class TestSearchProjectChats:
         assert "Other project" not in out
         assert "Unscoped note" not in out
         assert "current workspace" in out
+
+    def test_search_project_chats_uses_summary_index_without_loading_bodies(self, cwd, monkeypatch):
+        store = ConversationStore(cwd)
+        store.save("project", {
+            "id": "project",
+            "title": "Indexed snippets",
+            "created_at": "2026-01-01T10:00:00",
+            "updated_at": "2026-01-01T11:00:00",
+            "messages": [{"role": "user", "content": "we discussed playwright testing"}],
+        })
+        assert store.list_all()
+        body_loads = []
+
+        def spy_load_json(path):
+            current = Path(path)
+            if current.parent.name == "conversations" and current.name != _CONVERSATION_INDEX_NAME:
+                body_loads.append(current.name)
+                raise AssertionError("search_project_chats should use indexed snippets")
+            return _load_json(path)
+
+        monkeypatch.setattr("storage.repository._load_json", spy_load_json)
+
+        out = _search_project_chats("playwright", cwd)
+
+        assert "Indexed snippets" in out
+        assert "user: we discussed playwright testing" in out
+        assert body_loads == []
 
     def test_search_project_chats_ignores_trashed_chat(self, cwd, workspace):
         store = ConversationStore(cwd)
@@ -424,6 +508,35 @@ class TestSearchProjectChats:
         assert "old setup" not in out
         assert "user: first decision" in out
         assert "assistant: second answer" in out
+
+    def test_read_project_chat_exact_reference_loads_only_target_body(self, cwd, monkeypatch):
+        store = ConversationStore(cwd)
+        store.save("other", {
+            "id": "other",
+            "title": "Other notes",
+            "messages": [{"role": "user", "content": "do not load"}],
+        })
+        store.save("exact", {
+            "id": "exact",
+            "title": "Exact notes",
+            "messages": [{"role": "user", "content": "load me"}],
+        })
+        assert store.list_all()
+        loaded = []
+        original_load = ConversationStore.load
+
+        def spy_load(self, path):
+            loaded.append(Path(path).name)
+            if Path(path).name != "exact.json":
+                raise AssertionError("read_project_chat should not scan every chat body")
+            return original_load(self, path)
+
+        monkeypatch.setattr(ConversationStore, "load", spy_load)
+
+        out = _read_project_chat("exact", cwd)
+
+        assert "Conversation: Exact notes" in out
+        assert loaded == ["exact.json"]
 
     def test_read_project_chat_guards_missing_and_global_other_workspace(self, cwd, workspace, tmp_path, monkeypatch):
         conv_dir = tmp_path / "conversations"

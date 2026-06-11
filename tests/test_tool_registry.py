@@ -1,8 +1,11 @@
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
+import config
+from services import tool_registry
 from services.tool_registry import (
     CommandContext,
     ExtensionStorage,
@@ -14,9 +17,11 @@ from services.tool_registry import (
     ToolRegistry,
     extension_context_snippets,
     disable_unreviewed_extensions,
+    clear_extension_cache,
     extension_errors,
     extension_languages,
     extension_overview,
+    extension_panel_data,
     extension_static_summary,
     is_extension_seen,
     is_extension_disabled,
@@ -100,6 +105,55 @@ def test_extension_context_exposes_extension_storage(workspace):
 
     assert errors == []
     assert ("Stored note", "stored") in snippets
+
+
+def test_extension_callback_surfaces_are_timed(workspace, monkeypatch):
+    calls = []
+
+    @contextmanager
+    def fake_time_operation(operation, *, detail="", slow_ms=100.0):
+        calls.append((operation, detail, slow_ms))
+        yield
+
+    monkeypatch.setattr("services.tool_registry.time_operation", fake_time_operation)
+    write_extension(
+        workspace,
+        "timed.py",
+        """
+        def register(registry):
+            registry.context("Timed context", lambda ctx: "ctx")
+            registry.hook("turn_start", lambda ctx: None)
+            registry.status_badge(name="timed_badge", provider=lambda ctx: {"label": "ok"})
+            registry.panel(name="timed_panel", title="Timed Panel", provider=panel)
+            registry.command(name="timed_cmd", description="Timed", execute=lambda ctx, args: "cmd")
+
+        def panel(ctx):
+            return {"title": "Timed Panel", "body": "ok"}
+        """,
+    )
+    cwd = str(workspace)
+
+    snippets, errors = extension_context_snippets(cwd)
+    assert errors == []
+    assert ("Timed context", "ctx") in snippets
+    assert run_extension_hooks(cwd, "turn_start", HookContext(event="turn_start", cwd=cwd)) == []
+    result, errors = run_extension_command(cwd, "timed_cmd", "go")
+    assert errors == []
+    assert result == "cmd"
+    title, data, errors = extension_panel_data(cwd, "timed_panel")
+    assert errors == []
+    assert title == "Timed Panel"
+    assert data["body"] == "ok"
+    registry = ToolRegistry()
+    load_extensions(registry, cwd)
+    assert registry.status_badges(ExtensionContext(cwd=cwd))[0][0].name == "timed_badge"
+
+    timed = {(operation, detail) for operation, detail, _slow_ms in calls}
+    assert ("extension.context", "extension=timed name=Timed context") in timed
+    assert ("extension.hook", "extension=timed event=turn_start") in timed
+    assert ("extension.command", "extension=timed name=timed_cmd") in timed
+    assert ("extension.panel", "name=timed_panel") in timed
+    assert ("extension.status_badge", "name=timed_badge") in timed
 
 
 def test_registry_validation_errors():
@@ -347,8 +401,8 @@ def test_unreviewed_extension_scan_disables_new_and_changed_once(workspace):
     assert is_extension_seen(ext, cwd)
     assert not (workspace / ".aichs" / "extensions.disabled.json").exists()
     assert not (workspace / ".aichs" / "extensions.reviewed.json").exists()
-    assert (Path.home() / ".aichs" / "project" / "extensions.disabled.json").exists()
-    assert (Path.home() / ".aichs" / "project" / "extensions.reviewed.json").exists()
+    assert (config.AICHS_HOME / "project" / "extensions.disabled.json").exists()
+    assert (config.AICHS_HOME / "project" / "extensions.reviewed.json").exists()
 
     ext.write_text("def register(registry):\n    registry.command(name='x', description='x')\n", encoding="utf-8")
     changed = disable_unreviewed_extensions(cwd)
@@ -634,6 +688,28 @@ def test_disabled_extension_is_visible_but_not_loaded(workspace):
     assert registry.get("disabled_ping") is not None
 
 
+def test_extension_load_catches_base_exception(workspace):
+    write_extension(
+        workspace,
+        "exits.py",
+        """
+        import sys
+
+        def register(registry):
+            sys.exit("extension stopped")
+        """,
+    )
+    cwd = str(workspace)
+
+    registry = ToolRegistry()
+    load_extensions(registry, cwd)
+    overview = extension_overview(cwd)
+
+    assert any("SystemExit: extension stopped" in error for error in registry.errors)
+    assert overview.files[0].status == "Failed"
+    assert any("SystemExit: extension stopped" in error for error in overview.files[0].errors)
+
+
 def test_disabled_extension_static_contributions_are_visible(workspace):
     ext_dir = workspace / ".aichs" / "extensions" / "static-preview"
     ext_dir.mkdir(parents=True)
@@ -874,3 +950,188 @@ def test_extension_overview_marks_executable_command_capabilities(workspace):
     command = overview.files[0].commands[0]
     assert command.executable is True
     assert command.capabilities == ["runtime_control"]
+
+
+def test_load_extensions_uses_cached_registry_snapshot(workspace):
+    write_extension(
+        workspace,
+        "cached.py",
+        """
+        from pathlib import Path
+
+        COUNT = Path(__file__).with_name("cached-count.txt")
+        COUNT.write_text(str(int(COUNT.read_text() or "0") + 1) if COUNT.exists() else "1")
+
+        def register(registry):
+            registry.command(name="cached", description="Cached command")
+        """,
+    )
+    cwd = str(workspace)
+    first = ToolRegistry()
+    second = ToolRegistry()
+
+    load_extensions(first, cwd)
+    load_extensions(second, cwd)
+
+    assert first.command_by_name("cached") is not None
+    assert second.command_by_name("cached") is not None
+    assert (workspace / ".aichs" / "extensions" / "cached-count.txt").read_text(encoding="utf-8") == "1"
+
+
+def test_load_extensions_reuses_discovered_extension_files(workspace, monkeypatch):
+    write_extension(
+        workspace,
+        "single_discovery.py",
+        """
+        def register(registry):
+            registry.command(name="single_discovery", description="Single discovery")
+        """,
+    )
+    calls = 0
+    original = tool_registry._extension_files
+
+    def counted_extension_files(cwd):
+        nonlocal calls
+        calls += 1
+        return original(cwd)
+
+    monkeypatch.setattr(tool_registry, "_extension_files", counted_extension_files)
+
+    registry = ToolRegistry()
+    load_extensions(registry, str(workspace))
+
+    assert registry.command_by_name("single_discovery") is not None
+    assert calls == 1
+
+
+def test_extension_overview_reuses_discovered_extension_files(workspace, monkeypatch):
+    write_extension(
+        workspace,
+        "single_overview_discovery.py",
+        """
+        def register(registry):
+            registry.command(name="single_overview_discovery", description="Single discovery")
+        """,
+    )
+    calls = 0
+    original = tool_registry._extension_files
+
+    def counted_extension_files(cwd):
+        nonlocal calls
+        calls += 1
+        return original(cwd)
+
+    monkeypatch.setattr(tool_registry, "_extension_files", counted_extension_files)
+
+    overview = extension_overview(str(workspace))
+
+    assert Path(overview.files[0].path).name == "single_overview_discovery.py"
+    assert calls == 1
+
+
+def test_extension_summary_reuses_content_hash_for_review_state(workspace, monkeypatch):
+    ext_dir = workspace / ".aichs" / "extensions" / "hash-once"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "aichs-extension.json").write_text('{"name": "Hash Once"}\n', encoding="utf-8")
+    entrypoint = ext_dir / "extension.py"
+    entrypoint.write_text("def register(registry):\n    pass\n", encoding="utf-8")
+    calls = []
+    original = tool_registry.extension_content_hash
+
+    def counted_content_hash(path):
+        calls.append(Path(path))
+        return original(path)
+
+    monkeypatch.setattr(tool_registry, "extension_content_hash", counted_content_hash)
+
+    summary = tool_registry._extension_file_summary(entrypoint, str(workspace), load_code=False)
+
+    assert summary.display_name == "Hash Once"
+    assert calls == [entrypoint]
+
+
+def test_extension_cache_invalidates_when_file_changes(workspace):
+    ext = write_extension(
+        workspace,
+        "invalidate.py",
+        """
+        from pathlib import Path
+
+        COUNT = Path(__file__).with_name("invalidate-count.txt")
+        COUNT.write_text(str(int(COUNT.read_text() or "0") + 1) if COUNT.exists() else "1")
+
+        def register(registry):
+            registry.command(name="before_change", description="Before")
+        """,
+    )
+    cwd = str(workspace)
+    first = ToolRegistry()
+    load_extensions(first, cwd)
+
+    ext.write_text(
+        """
+from pathlib import Path
+
+COUNT = Path(__file__).with_name("invalidate-count.txt")
+COUNT.write_text(str(int(COUNT.read_text() or "0") + 1) if COUNT.exists() else "1")
+
+def register(registry):
+    registry.command(name="after_change", description="After")
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    second = ToolRegistry()
+    load_extensions(second, cwd)
+
+    assert first.command_by_name("before_change") is not None
+    assert second.command_by_name("after_change") is not None
+    assert second.command_by_name("before_change") is None
+    assert (workspace / ".aichs" / "extensions" / "invalidate-count.txt").read_text(encoding="utf-8") == "2"
+
+
+def test_extension_overview_uses_cached_summary(workspace):
+    write_extension(
+        workspace,
+        "cached_overview.py",
+        """
+        from pathlib import Path
+
+        COUNT = Path(__file__).with_name("overview-count.txt")
+        COUNT.write_text(str(int(COUNT.read_text() or "0") + 1) if COUNT.exists() else "1")
+
+        def register(registry):
+            registry.language(name="cached_lang", file_patterns=["*.cached"], diagnostics=lambda ctx: [])
+        """,
+    )
+    cwd = str(workspace)
+
+    first = extension_overview(cwd)
+    second = extension_overview(cwd)
+
+    assert first.files[0].languages[0].name == "cached_lang"
+    assert second.files[0].languages[0].name == "cached_lang"
+    assert (workspace / ".aichs" / "extensions" / "overview-count.txt").read_text(encoding="utf-8") == "1"
+
+
+def test_clear_extension_cache_forces_reload(workspace):
+    write_extension(
+        workspace,
+        "clearable.py",
+        """
+        from pathlib import Path
+
+        COUNT = Path(__file__).with_name("clearable-count.txt")
+        COUNT.write_text(str(int(COUNT.read_text() or "0") + 1) if COUNT.exists() else "1")
+
+        def register(registry):
+            registry.command(name="clearable", description="Clearable")
+        """,
+    )
+    cwd = str(workspace)
+
+    load_extensions(ToolRegistry(), cwd)
+    clear_extension_cache(cwd)
+    load_extensions(ToolRegistry(), cwd)
+
+    assert (workspace / ".aichs" / "extensions" / "clearable-count.txt").read_text(encoding="utf-8") == "2"

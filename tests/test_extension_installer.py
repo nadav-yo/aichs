@@ -3,6 +3,7 @@ import shutil
 
 import pytest
 
+import config
 import services.extension_installer as extension_installer
 from services.extension_installer import (
     cleanup_extension_install_source,
@@ -70,7 +71,7 @@ def test_install_extension_candidates_supports_local_and_global(workspace):
     assert local_results[0].path == workspace / ".aichs" / "extensions" / "local-tool"
     assert (local_results[0].path / "extension.py").exists()
     assert is_extension_disabled(local_results[0].path, str(workspace))
-    assert global_results[0].path == Path.home() / ".aichs" / "extensions" / "global-tool"
+    assert global_results[0].path == config.AICHS_HOME / "extensions" / "global-tool"
     assert (global_results[0].path / "extension.py").exists()
     assert is_extension_disabled(global_results[0].path, str(workspace))
 

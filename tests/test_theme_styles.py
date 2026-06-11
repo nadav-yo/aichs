@@ -1,42 +1,53 @@
-import pytest
+from pathlib import Path
 
+from tests.qss_helpers import (
+    assert_all_app_stylesheets_parse,
+    assert_stylesheets_parse,
+    collect_theme_branching_stylesheet_cases,
+    collect_theme_stylesheet_cases,
+    collect_widget_module_stylesheet_cases,
+    find_new_ad_hoc_qss_offenders,
+    iter_double_close_brace_literals,
+    iter_inline_dim_label_stylesheet_offenders,
+    run_offscreen_window_probe,
+)
 from ui import theme
 
 
-@pytest.mark.parametrize(
-    "func,args",
-    [
-        (theme.card_frame_style, ()),
-        (theme.tool_notice_style, ()),
-        (theme.center_notice_style, ()),
-        (theme.input_bar_style, ()),
-        (theme.separator_color, ()),
-        (theme.send_button_style, ()),
-        (theme.stop_button_style, ()),
-        (theme.floating_button_style, ()),
-        (theme.primary_button_style, ()),
-        (theme.new_chat_button_style, ()),
-        (theme.icon_button_style, (28,)),
-        (theme.sidebar_section_label_style, ()),
-        (theme.git_changes_list_style, ()),
-        (theme.file_tree_sidebar_style, ()),
-        (theme.files_header_style, ()),
-        (theme.search_field_style, ()),
-        (theme.conversation_list_style, ()),
-        (theme.sidebar_tab_style, ()),
-        (theme.sidebar_settings_button_style, ()),
-        (theme.timestamp_style, ()),
-        (theme.list_selection_bg, ("light",)),
-        (theme.markdown_file_link_style, ("dark",)),
-        (theme.composer_style, (14,)),
-        (theme.composer_shell_style, ()),
-        (theme.edit_bubble_style, (14,)),
-    ],
-)
-def test_theme_style_helpers_return_css(func, args, qapp):
-    css = func(*args)
-    assert isinstance(css, str)
-    assert len(css) >= 4
+def test_theme_stylesheets_parse_without_qt_warnings(qapp):
+    assert_stylesheets_parse(qapp, collect_theme_stylesheet_cases())
+    assert_stylesheets_parse(qapp, collect_theme_branching_stylesheet_cases())
+    assert_all_app_stylesheets_parse(qapp)
+
+
+def test_widget_module_stylesheets_parse_without_qt_warnings(qapp):
+    assert_stylesheets_parse(qapp, collect_widget_module_stylesheet_cases())
+
+
+def test_ui_modules_have_no_literal_double_close_brace_fragments():
+    ui_dir = Path(theme.__file__).resolve().parent
+    paths = [ui_dir / "theme.py", *sorted((ui_dir / "widgets").glob("*.py"))]
+    offenders = list(iter_double_close_brace_literals(*paths))
+    assert offenders == []
+
+
+def test_widget_modules_avoid_inline_text_dim_stylesheets():
+    offenders = iter_inline_dim_label_stylesheet_offenders()
+    assert offenders == []
+
+
+def test_widget_modules_avoid_new_ad_hoc_qss_stylesheets():
+    new_offenders = find_new_ad_hoc_qss_offenders()
+    assert new_offenders == [], (
+        "New inline QSS in ui/widgets setStyleSheet calls. "
+        "Use ui.theme helpers or update tests/qss_ad_hoc_baseline.txt:\n"
+        + "\n".join(new_offenders)
+    )
+
+
+def test_window_stylesheets_parse_without_qt_warnings(workspace):
+    result = run_offscreen_window_probe(str(workspace))
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 def test_app_and_mono_font(qapp):

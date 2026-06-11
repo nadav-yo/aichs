@@ -13,6 +13,8 @@ FILE_REVIEW_PROMPT_TEMPLATE_KEY = "file_review_prompt_template"
 DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE = "Please review {mention}."
 DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY = "diagnostic_fix_prompt_template"
 DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE = "Please fix this diagnostic in {mention}."
+GIT_FIX_PROMPT_TEMPLATE_KEY = "git_fix_prompt_template"
+DEFAULT_GIT_FIX_PROMPT_TEMPLATE = "Help me diagnose this git {action} failure."
 AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY = "auto_title_prompt_instructions"
 DEFAULT_AUTO_TITLE_PROMPT_INSTRUCTIONS = """\
 Write a short conversation title (5-7 words). No quotes, no punctuation at the end.
@@ -73,6 +75,14 @@ def diagnostic_fix_prompt_template(data: dict | None) -> str:
         data,
         DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY,
         DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE,
+    )
+
+
+def git_fix_prompt_template(data: dict | None) -> str:
+    return _text_setting(
+        data,
+        GIT_FIX_PROMPT_TEMPLATE_KEY,
+        DEFAULT_GIT_FIX_PROMPT_TEMPLATE,
     )
 
 

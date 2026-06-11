@@ -2,11 +2,10 @@ import os
 from pathlib import Path
 import re
 
-import markdown as _md
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPlainTextEdit, QFrame, QTabWidget,
     QScrollArea, QLabel, QSizePolicy, QCheckBox, QPushButton, QLineEdit,
-    QCompleter, QApplication, QToolTip, QMenu, QTabBar, QMessageBox,
+    QCompleter, QApplication, QToolTip, QMenu, QTabBar, QMessageBox, QSplitter,
 )
 from PyQt6.QtCore import (
     QObject, QRunnable, QThreadPool, QTimer, pyqtSignal, pyqtSlot,
@@ -24,8 +23,9 @@ from config import MAX_FILE_PREVIEW_BYTES
 from services.chat_drag import AICHS_FILE_DROP_MIME, file_drop_payload, file_drop_text
 from services.diff_html import changed_new_line_numbers
 from services.file_editor_refs import AICHS_EDITOR_REF_MIME, editor_ref_payload, editor_ref_text
-from services.git_diff import can_diff_against_head, diff_against_head
-from services.git_status import is_git_repo
+from services.git_diff import diff_against_head
+from services.git_snapshot import build_git_snapshot
+from services.performance import time_operation
 from services.tool_policy import path_in_repo
 from services.language_features import (
     CodeAction, CodeActionResult, Diagnostic, LanguageCompletionProvider,
@@ -50,10 +50,13 @@ from storage.settings import (
     file_review_prompt_template,
 )
 from ui.theme import (
-    ACCENT, current_theme, palette, mono_font, meta_font_pt,
-    markdown_css, apply_flat_tab_style, primary_button_style,
+    ACCENT, current_theme, palette, mono_font, chat_font_pt, meta_font_pt,
+    markdown_css, checkbox_style, compact_field_style, hint_label_style,
+    editor_text_area_style, file_tab_style, primary_button_style, secondary_button_style,
+    transparent_scroll_area_style,
 )
-from ui.widgets.markdown_browser import RemoteImageTextBrowser
+from ui.markdown_html import markdown_body
+from ui.widgets.markdown_browser import RemoteImageTextBrowser, copy_code_url_to_clipboard
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"}
 _MARKDOWN_EXTS = {".md", ".markdown", ".mdown", ".mkdn"}
@@ -78,6 +81,26 @@ _BINARY_PREVIEW_EXTS = {
     ".xz",
     ".zip",
 }
+_COMPLETION_CONTEXT_CHARS = 160_000
+_ASYNC_FILE_READ_BYTES = 128_000
+_LOADING_FILE_TEXT = "Loading file..."
+_RETIRED_WORKER_POOLS: list[QThreadPool] = []
+
+
+def _retire_worker_pool(pool: QThreadPool) -> None:
+    pool.clear()
+    pool.setParent(None)
+    _RETIRED_WORKER_POOLS.append(pool)
+
+    def cleanup() -> None:
+        if pool.activeThreadCount() > 0:
+            QTimer.singleShot(50, cleanup)
+            return
+        pool.waitForDone(0)
+        if pool in _RETIRED_WORKER_POOLS:
+            _RETIRED_WORKER_POOLS.remove(pool)
+
+    QTimer.singleShot(0, cleanup)
 
 
 class _DiagnosticsSignals(QObject):
@@ -108,6 +131,37 @@ class _DiagnosticsWorker(QRunnable):
 
 class _CodeActionSignals(QObject):
     done = pyqtSignal(int, object, object)
+
+
+class _CodeActionListWorker(QRunnable):
+    def __init__(
+        self,
+        generation: int,
+        repo_root: str,
+        path: str,
+        content: str,
+        diagnostics: list[Diagnostic],
+    ):
+        super().__init__()
+        self.signals = _CodeActionSignals()
+        self._generation = generation
+        self._repo_root = repo_root
+        self._path = path
+        self._content = content
+        self._diagnostics = list(diagnostics)
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            actions, errors = language_code_actions(
+                self._repo_root,
+                self._path,
+                self._content,
+                self._diagnostics,
+            )
+        except Exception as e:
+            actions, errors = [], [f"language code actions failed: {e}"]
+        self.signals.done.emit(self._generation, actions, errors)
 
 
 class _CodeActionWorker(QRunnable):
@@ -192,20 +246,111 @@ class _DiffWorker(QRunnable):
     def run(self):
         diff_text = None
         try:
-            if (
-                is_git_repo(self._repo_root)
-                and can_diff_against_head(self._repo_root, self._path)
-            ):
-                diff_text = diff_against_head(self._repo_root, self._path)
+            snapshot = build_git_snapshot(self._repo_root)
+            diff_text = diff_against_head(
+                self._repo_root,
+                self._path,
+                git_snapshot=snapshot,
+            )
         except Exception:
             diff_text = None
         self.signals.done.emit(self._generation, diff_text)
 
 
+class _MarkdownSignals(QObject):
+    done = pyqtSignal(int, str, str)
+
+
+class _MarkdownPreviewWorker(QRunnable):
+    def __init__(self, generation: int, path: str, text: str, theme: str, font_pt: int):
+        super().__init__()
+        self.signals = _MarkdownSignals()
+        self._generation = generation
+        self._path = path
+        self._text = text
+        self._theme = theme
+        self._font_pt = font_pt
+
+    @pyqtSlot()
+    def run(self):
+        with time_operation(
+            "markdown.preview",
+            detail=f"path={self._path} chars={len(self._text)}",
+        ):
+            html = _markdown_preview_html(self._text, theme=self._theme, font_pt=self._font_pt)
+        self.signals.done.emit(self._generation, self._path, html)
+
+
+class _FileReadSignals(QObject):
+    done = pyqtSignal(int, str, str, object, bool, str, object)
+
+
+class _FileReadWorker(QRunnable):
+    def __init__(
+        self,
+        generation: int,
+        path: str,
+        diff_text: str | None,
+        line_no: int | None,
+    ):
+        super().__init__()
+        self.signals = _FileReadSignals()
+        self._generation = generation
+        self._path = path
+        self._diff_text = diff_text
+        self._line_no = line_no
+
+    @pyqtSlot()
+    def run(self):
+        content, diff_text, editable, read_only_reason = _read_text_file_state(
+            self._path,
+            self._diff_text,
+        )
+        self.signals.done.emit(
+            self._generation,
+            self._path,
+            content,
+            diff_text,
+            editable,
+            read_only_reason,
+            self._line_no,
+        )
+
+
+class _FileSaveSignals(QObject):
+    done = pyqtSignal(int, str, str, bool, str, bool)
+
+
+class _FileSaveWorker(QRunnable):
+    def __init__(self, generation: int, path: str, text: str, auto: bool):
+        super().__init__()
+        self.signals = _FileSaveSignals()
+        self._generation = generation
+        self._path = path
+        self._text = text
+        self._auto = auto
+
+    @pyqtSlot()
+    def run(self):
+        error = ""
+        try:
+            Path(self._path).write_text(self._text, encoding="utf-8")
+        except OSError as e:
+            error = str(e)
+        self.signals.done.emit(
+            self._generation,
+            self._path,
+            self._text,
+            not error,
+            error,
+            self._auto,
+        )
+
+
 class _TextMinimap(QWidget):
     """Tiny overview strip that mirrors and controls a plain text editor."""
 
-    _WIDTH = 86
+    _WIDTH = 64
     _MIN_THUMB_HEIGHT = 28
     _MAX_PAINTED_LINES = 1200
 
@@ -233,7 +378,7 @@ class _TextMinimap(QWidget):
     def apply_appearance(self):
         p = palette()
         self.setStyleSheet(
-            f"QWidget {{ background:{p['BG3']}; border-left:1px solid {p['BORDER_SUBTLE']}; }}"
+            f"QWidget {{ background:{p['BG2']}; border-left:1px solid {p['BORDER_SUBTLE']}; }}"
         )
         self.update()
 
@@ -241,7 +386,7 @@ class _TextMinimap(QWidget):
         super().paintEvent(event)
         p = palette()
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(p["BG3"]))
+        painter.fillRect(self.rect(), QColor(p["BG2"]))
         self._paint_lines(painter, p)
         self._paint_viewport(painter, p)
 
@@ -291,28 +436,28 @@ class _TextMinimap(QWidget):
         changed_lines = getattr(self._editor, "_changed_lines", set())
         if line_number in changed_lines:
             color = QColor(p["SUCCESS"])
-            color.setAlpha(150)
+            color.setAlpha(125)
             return color
         color_for_line = getattr(self._editor, "minimap_color_for_line", None)
         if color_for_line is not None:
             color = color_for_line(text)
             if color is not None:
-                color.setAlpha(130)
+                color.setAlpha(105)
                 return color
         if text.startswith("+"):
             color = QColor(p["SUCCESS"])
-            color.setAlpha(130)
+            color.setAlpha(105)
             return color
         if text.startswith("-"):
             color = QColor("#f87171")
-            color.setAlpha(130)
+            color.setAlpha(105)
             return color
         if text.startswith("@@"):
             color = QColor(p["LINK"])
-            color.setAlpha(120)
+            color.setAlpha(100)
             return color
         color = QColor(p["TEXT_DIM"])
-        color.setAlpha(85)
+        color.setAlpha(62)
         return color
 
     def _paint_viewport(self, painter: QPainter, p: dict):
@@ -320,9 +465,9 @@ class _TextMinimap(QWidget):
         if thumb_h >= self.height():
             return
         fill = QColor(p["SELECTION"])
-        fill.setAlpha(120)
+        fill.setAlpha(78)
         border = QColor(p["LINK"])
-        border.setAlpha(160)
+        border.setAlpha(120)
         rect = self.rect().adjusted(2, top, -3, -(self.height() - top - thumb_h))
         painter.fillRect(rect, fill)
         painter.setPen(border)
@@ -387,11 +532,9 @@ class _ImageViewer(QScrollArea):
 
     def apply_appearance(self):
         p = palette()
-        self.setStyleSheet(f"QScrollArea {{ background:{p['BG']}; border:none; }}")
+        self.setStyleSheet(transparent_scroll_area_style(bg=p["BG"], include_viewport=False))
         if self._original is None:
-            self._label.setStyleSheet(
-                f"color:{p['TEXT_DIM']}; padding:24px; background:transparent;"
-            )
+            self._label.setStyleSheet(hint_label_style(padding="24px"))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -467,8 +610,8 @@ class _PygmentsHighlighter(QSyntaxHighlighter):
         if cached is not None:
             return cached
         fmt = QTextCharFormat()
-        if self._style is not None:
-            style = self._style.style_for_token(token)
+        style = self._style_for_token(token)
+        if style:
             color = style.get("color")
             if color:
                 fmt.setForeground(QColor(f"#{color}"))
@@ -500,11 +643,20 @@ class _PygmentsHighlighter(QSyntaxHighlighter):
         return self._style_color_for_token(Token.Text)
 
     def _style_color_for_token(self, token) -> QColor | None:
-        if self._style is None:
-            return None
-        style = self._style.style_for_token(token)
+        style = self._style_for_token(token)
         color = style.get("color")
         return QColor(f"#{color}") if color else None
+
+    def _style_for_token(self, token) -> dict:
+        if self._style is None:
+            return {}
+        current = token
+        while current is not None:
+            try:
+                return self._style.style_for_token(current)
+            except KeyError:
+                current = getattr(current, "parent", None)
+        return {}
 
 
 class _LineNumberArea(QWidget):
@@ -595,12 +747,8 @@ class _FileTextEdit(QPlainTextEdit):
         )
 
     def apply_appearance(self):
-        p = palette()
         self.setFont(mono_font())
-        self.setStyleSheet(
-            f"QPlainTextEdit {{ background:{p['BG3']}; color:{p['TEXT']};"
-            f"border:none; selection-background-color:{ACCENT}; }}"
-        )
+        self.setStyleSheet(editor_text_area_style())
         self._apply_tab_stop()
         self._syntax_highlighter.apply_appearance()
         self._update_line_number_area_width(0)
@@ -914,9 +1062,7 @@ class _FileTextEdit(QPlainTextEdit):
         if self.isReadOnly():
             self._hide_completion()
             return
-        cursor = self.textCursor()
-        content = self.toPlainText()
-        prefix = prefix_at(content, cursor.position())
+        content, position, prefix = self._completion_context()
         minimum = 1 if manual else 2
         if len(prefix) < minimum:
             self._hide_completion()
@@ -924,7 +1070,7 @@ class _FileTextEdit(QPlainTextEdit):
         items = self._completion_provider.complete(
             path=self._completion_path,
             content=content,
-            position=cursor.position(),
+            position=position,
             prefix=prefix,
         )
         if not items:
@@ -956,8 +1102,7 @@ class _FileTextEdit(QPlainTextEdit):
         if item is None:
             return
         cursor = self.textCursor()
-        content = self.toPlainText()
-        prefix = prefix_at(content, cursor.position())
+        prefix = self._completion_prefix_at_cursor(cursor)
         if prefix:
             cursor.movePosition(
                 QTextCursor.MoveOperation.Left,
@@ -967,6 +1112,36 @@ class _FileTextEdit(QPlainTextEdit):
         cursor.insertText(item.insert_text)
         self.setTextCursor(cursor)
         self._hide_completion()
+
+    def _completion_context(self) -> tuple[str, int, str]:
+        cursor = self.textCursor()
+        content, position = self._document_text_window(
+            cursor.position(),
+            _COMPLETION_CONTEXT_CHARS,
+        )
+        return content, position, self._completion_prefix_at_cursor(cursor)
+
+    def _document_text_window(self, position: int, max_chars: int) -> tuple[str, int]:
+        document = self.document()
+        text_length = max(0, document.characterCount() - 1)
+        position = max(0, min(position, text_length))
+        if text_length <= max_chars:
+            start = 0
+            end = text_length
+        else:
+            before = max_chars // 2
+            start = max(0, position - before)
+            end = min(text_length, start + max_chars)
+            start = max(0, end - max_chars)
+
+        cursor = QTextCursor(document)
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        text = cursor.selectedText().replace("\u2029", "\n").replace("\u2028", "\n")
+        return text, position - start
+
+    def _completion_prefix_at_cursor(self, cursor: QTextCursor) -> str:
+        return prefix_at(cursor.block().text(), cursor.positionInBlock())
 
     def _completion_popup_visible(self) -> bool:
         return self._completer is not None and self._completer.popup().isVisible()
@@ -1128,12 +1303,18 @@ class _MarkdownPreview(RemoteImageTextBrowser):
             f"border:none; padding:14px 18px; }}"
         )
 
-    def set_markdown(self, text: str, base_path: str):
+    def set_html(self, html: str, base_path: str):
         parent = str(Path(base_path).parent)
         self.document().setBaseUrl(QUrl.fromLocalFile(parent + os.sep))
-        self.setHtml(_markdown_preview_html(text))
+        self.setHtml(html)
+
+    def set_markdown(self, text: str, base_path: str):
+        self.set_html(_markdown_preview_html(text), base_path)
 
     def mousePressEvent(self, event):
+        if copy_code_url_to_clipboard(self.anchorAt(_event_pos(event))):
+            event.accept()
+            return
         self.edit_requested.emit()
         super().mousePressEvent(event)
 
@@ -1145,15 +1326,22 @@ class _MarkdownPreview(RemoteImageTextBrowser):
         super().keyPressEvent(event)
 
 
-def _markdown_preview_html(text: str) -> str:
-    body = _md.markdown(text, extensions=["fenced_code", "nl2br", "tables", "toc"])
-    p = palette()
+def _markdown_preview_html(
+    text: str,
+    *,
+    theme: str | None = None,
+    font_pt: int | None = None,
+) -> str:
+    body = markdown_body(
+        text,
+        extensions=["fenced_code", "nl2br", "tables", "toc"],
+        theme=theme,
+        font_pt=font_pt,
+    )
+    p = palette(theme)
     css = (
-        markdown_css()
-        + f"body {{ background:{p['BG3']}; padding:0; }}"
-        + "table { border-collapse:collapse; margin:8px 0; }"
-        + f"th,td {{ border:1px solid {p['BORDER']}; padding:5px 8px; }}"
-        + f"th {{ background:{p['BG2']}; }}"
+        markdown_css(font_pt=font_pt, theme=theme)
+        + f"body {{ background:{p['BG3']}; padding:8px 10px 14px 10px; }}"
     )
     return f"<style>{css}</style>{body}"
 
@@ -1211,10 +1399,20 @@ class _TextFileTab(QWidget):
         self._rendering = False
         self._edit_mode = False
         self._force_text_view = False
+        self._content_generation = 0
+        self._editor_content_cache_revision: int | None = None
+        self._editor_content_cache_text = ""
+        self._find_cache_key: tuple[str, int] | None = None
+        self._find_cache_text = ""
+        self._find_cache_folded_text = ""
+        self._find_match_cache: dict[str, list[int]] = {}
         self._diagnostics_generation = 0
         self._code_action_generation = 0
         self._diff_generation = 0
-        self._worker_pool = QThreadPool.globalInstance()
+        self._markdown_generation = 0
+        self._save_generation = 0
+        self._saving = False
+        self._worker_pool = QThreadPool(self)
         self._auto_save_timer = QTimer(self)
         self._auto_save_timer.setSingleShot(True)
         self._auto_save_timer.timeout.connect(lambda: self._save(auto=True))
@@ -1233,15 +1431,21 @@ class _TextFileTab(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        bar = QHBoxLayout()
-        bar.setContentsMargins(8, 4, 8, 4)
+        self._toolbar = QFrame()
+        self._toolbar.setObjectName("fileEditorToolbar")
+        bar = QHBoxLayout(self._toolbar)
+        bar.setContentsMargins(8, 3, 8, 3)
+        bar.setSpacing(8)
         self._diff_toggle = QCheckBox("Show changes")
         self._diff_toggle.setChecked(bool(diff_text))
         self._diff_toggle.setVisible(diff_text is not None)
         self._diff_toggle.toggled.connect(self._on_diff_toggled)
         bar.addWidget(self._diff_toggle)
-        self._preview_toggle = QCheckBox("Preview")
-        self._preview_toggle.setChecked(self._markdown)
+        self._preview_toggle = QCheckBox("Show preview")
+        self._preview_toggle.setToolTip(
+            "Show the rendered Markdown preview beside the source editor"
+        )
+        self._preview_toggle.setChecked(self._markdown and not bool(diff_text))
         self._preview_toggle.setVisible(self._markdown)
         self._preview_toggle.toggled.connect(self._on_preview_toggled)
         bar.addWidget(self._preview_toggle)
@@ -1251,13 +1455,15 @@ class _TextFileTab(QWidget):
         bar.addStretch(1)
         self._revert_btn = QPushButton("Revert")
         self._revert_btn.setToolTip("Reload this file from disk")
+        self._revert_btn.setFixedHeight(24)
         self._revert_btn.clicked.connect(self._revert)
         bar.addWidget(self._revert_btn)
         self._save_btn = QPushButton("Save")
         self._save_btn.setToolTip("Save changes")
+        self._save_btn.setFixedHeight(24)
         self._save_btn.clicked.connect(self._save)
         bar.addWidget(self._save_btn)
-        root.addLayout(bar)
+        root.addWidget(self._toolbar)
 
         self._find_bar = QFrame()
         find_layout = QHBoxLayout(self._find_bar)
@@ -1295,13 +1501,14 @@ class _TextFileTab(QWidget):
         self._preview.cancel_requested.connect(self._cancel_edit)
         self._minimap = _TextMinimap(self._editor)
 
-        view = QHBoxLayout()
-        view.setContentsMargins(0, 0, 0, 0)
-        view.setSpacing(0)
-        view.addWidget(self._preview, 1)
-        view.addWidget(self._editor, 1)
+        view = QSplitter(Qt.Orientation.Horizontal)
+        view.setChildrenCollapsible(False)
+        view.addWidget(self._editor)
         view.addWidget(self._minimap)
-        root.addLayout(view, 1)
+        view.addWidget(self._preview)
+        view.setStretchFactor(0, 1)
+        view.setStretchFactor(2, 1)
+        root.addWidget(view, 1)
 
         self._save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         self._save_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -1343,36 +1550,29 @@ class _TextFileTab(QWidget):
     def apply_appearance(self):
         p = palette()
         meta = meta_font_pt()
-        self._diff_toggle.setStyleSheet(
-            f"QCheckBox {{ color:{p['TEXT_DIM']}; font-size:{meta}px; spacing:6px; }}"
-            f"QCheckBox::indicator {{ width:14px; height:14px; }}"
+        self._toolbar.setStyleSheet(
+            f"QFrame#fileEditorToolbar {{ background:{p['BG2']};"
+            f"border-bottom:1px solid {p['BORDER_SUBTLE']}; }}"
         )
-        self._preview_toggle.setStyleSheet(
-            f"QCheckBox {{ color:{p['TEXT_DIM']}; font-size:{meta}px; spacing:6px; }}"
-            f"QCheckBox::indicator {{ width:14px; height:14px; }}"
+        toggle_style = checkbox_style(
+            font_pt=meta,
+            indicator_px=14,
+            spacing_px=6,
+            text_color=p["TEXT_DIM"],
         )
-        self._status.setStyleSheet(
-            f"QLabel {{ color:{p['TEXT_DIM']}; font-size:{meta}px; background:transparent; }}"
-        )
+        self._diff_toggle.setStyleSheet(toggle_style)
+        self._preview_toggle.setStyleSheet(toggle_style)
+        self._status.setStyleSheet(hint_label_style(selector="QLabel"))
         self._find_bar.setStyleSheet(
             f"QFrame {{ background:{p['BG2']}; border-top:1px solid {p['BORDER_SUBTLE']};"
             f"border-bottom:1px solid {p['BORDER_SUBTLE']}; }}"
         )
-        self._find_query.setStyleSheet(
-            f"QLineEdit {{ background:{p['BG3']}; color:{p['TEXT']};"
-            f"border:1px solid {p['BORDER']}; border-radius:6px;"
-            f"padding:4px 8px; font-size:{meta}px; }}"
-            f"QLineEdit:focus {{ border:1px solid {ACCENT}; }}"
-        )
-        self._find_status.setStyleSheet(
-            f"QLabel {{ color:{p['TEXT_DIM']}; font-size:{meta}px; background:transparent; }}"
-        )
-        secondary = (
-            f"QPushButton {{ background:{p['BG3']}; color:{p['TEXT']};"
-            f"border:1px solid {p['BORDER']}; border-radius:4px;"
-            f"padding:2px 10px; font-size:{meta}px; }}"
-            f"QPushButton:hover {{ background:{p['BORDER']}; }}"
-            f"QPushButton:disabled {{ color:{p['TEXT_DIM']}; background:{p['BG2']}; }}"
+        self._find_query.setStyleSheet(compact_field_style(font_pt=meta))
+        self._find_status.setStyleSheet(hint_label_style(selector="QLabel"))
+        secondary = secondary_button_style(
+            border_radius=4,
+            padding="2px 10px",
+            font_size=meta,
         )
         primary = primary_button_style(
             border_radius=4,
@@ -1402,6 +1602,9 @@ class _TextFileTab(QWidget):
             self._set_status("Unsaved changes")
             return
         self._content = content
+        self._content_generation += 1
+        self._invalidate_editor_content_cache()
+        self._invalidate_find_cache()
         self._diff_text = diff_text
         self._editable = self._file_backed and editable
         self._read_only_reason = read_only_reason
@@ -1410,13 +1613,18 @@ class _TextFileTab(QWidget):
         self._force_text_view = False
         self._diff_toggle.setChecked(bool(diff_text))
         self._diff_toggle.setVisible(diff_text is not None)
-        self._preview_toggle.setChecked(self._markdown)
+        self._preview_toggle.setChecked(self._markdown and not bool(diff_text))
         self._preview_toggle.setVisible(self._markdown)
         self._render(diagnostics_delay_ms=0)
         if diff_text is None:
             self._schedule_diff_refresh(delay_ms=0)
 
     def _on_diff_toggled(self, checked: bool):
+        if checked and self._markdown and self._preview_toggle.isChecked():
+            self._preview_toggle.blockSignals(True)
+            self._preview_toggle.setChecked(False)
+            self._preview_toggle.blockSignals(False)
+            self._invalidate_markdown_preview()
         if not checked and self._editable and self._edit_mode:
             self._editor.setFocus()
         self._render(diagnostics_delay_ms=0 if not checked else None)
@@ -1425,7 +1633,15 @@ class _TextFileTab(QWidget):
         if not self._markdown:
             return
         self._force_text_view = False
+        if not checked:
+            self._invalidate_markdown_preview()
+        elif self._is_showing_diff():
+            self._diff_toggle.blockSignals(True)
+            self._diff_toggle.setChecked(False)
+            self._diff_toggle.blockSignals(False)
         if not checked and self._editable and not self._is_showing_diff():
+            self._edit_mode = True
+        elif checked and self._editable and not self._is_showing_diff():
             self._edit_mode = True
         elif checked and not self._dirty:
             self._edit_mode = False
@@ -1439,7 +1655,8 @@ class _TextFileTab(QWidget):
         self._edit_mode = True
         self._force_text_view = False
         if self._markdown and self._preview_toggle.isChecked():
-            self._preview_toggle.setChecked(False)
+            self._render()
+            self._editor.setFocus()
             return
         self._render()
         self._editor.setFocus()
@@ -1463,13 +1680,19 @@ class _TextFileTab(QWidget):
                 self._preview_toggle.setChecked(True)
             self._revert()
             return
-        self._edit_mode = False
         if self._markdown:
-            self._preview_toggle.setChecked(True)
+            self._edit_mode = True
+            if not self._preview_toggle.isChecked():
+                self._preview_toggle.setChecked(True)
+                return
+            self._render()
             return
+        self._edit_mode = False
         self._render()
 
     def _on_text_changed(self):
+        self._invalidate_editor_content_cache()
+        self._invalidate_find_cache()
         if (
             self._rendering
             or not self._editable
@@ -1478,6 +1701,8 @@ class _TextFileTab(QWidget):
         ):
             return
         self._set_dirty(True)
+        if self._markdown and self._preview_toggle.isChecked():
+            self._schedule_markdown_preview()
         if self._auto_save:
             self._schedule_auto_save()
             return
@@ -1504,12 +1729,19 @@ class _TextFileTab(QWidget):
         self._editor.configure_reference(self._path, self._repo_root)
         if not (self._dirty or self._edit_mode) and self._editor.toPlainText() != self._content:
             self._editor.setPlainText(self._content)
+            self._invalidate_editor_content_cache()
         if self._is_markdown_preview():
             self._schedule_markdown_preview()
             self._preview.show()
-            self._editor.hide()
-            self._minimap.hide()
-            self._editor.setReadOnly(True)
+            if self._editable:
+                self._edit_mode = True
+                self._editor.show()
+                self._minimap.show()
+                self._editor.setReadOnly(False)
+            else:
+                self._editor.hide()
+                self._minimap.hide()
+                self._editor.setReadOnly(True)
             self._editor.set_changed_lines(set())
             self._set_diagnostics([])
         elif self._is_showing_diff():
@@ -1558,7 +1790,10 @@ class _TextFileTab(QWidget):
         if self._is_showing_diff():
             self._diff_toggle.setChecked(False)
         if self._is_markdown_preview():
-            self._force_text_view = True
+            if self._editable:
+                self._edit_mode = True
+            else:
+                self._force_text_view = True
             self._render()
 
     def _on_find_query_changed(self, _text: str):
@@ -1575,8 +1810,7 @@ class _TextFileTab(QWidget):
         if not query:
             self._find_status.clear()
             return
-        text = self._editor.toPlainText()
-        folded_text = text.casefold()
+        _text, folded_text = self._find_text()
         folded_query = query.casefold()
         cursor = self._editor.textCursor()
         if forward:
@@ -1597,7 +1831,57 @@ class _TextFileTab(QWidget):
             return
         self._editor.select_range(pos, len(query), focus=False)
         self._find_query.setFocus()
-        self._find_status.setText(_find_match_status(folded_text, folded_query, pos))
+        self._find_status.setText(self._find_match_status(folded_query, pos))
+
+    def _find_text(self) -> tuple[str, str]:
+        if self._edit_mode:
+            key = ("editor", self._editor.document().revision())
+        else:
+            key = ("content", self._content_generation)
+        if key != self._find_cache_key:
+            text = self._editor_content_snapshot() if self._edit_mode else self._content
+            self._find_cache_key = key
+            self._find_cache_text = text
+            self._find_cache_folded_text = text.casefold()
+            self._find_match_cache = {}
+        return self._find_cache_text, self._find_cache_folded_text
+
+    def _find_positions(self, folded_query: str) -> list[int]:
+        positions = self._find_match_cache.get(folded_query)
+        if positions is not None:
+            return positions
+        _text, folded_text = self._find_text()
+        positions = []
+        start = folded_text.find(folded_query)
+        while start >= 0:
+            positions.append(start)
+            start = folded_text.find(folded_query, start + max(1, len(folded_query)))
+        self._find_match_cache[folded_query] = positions
+        return positions
+
+    def _find_match_status(self, folded_query: str, pos: int) -> str:
+        positions = self._find_positions(folded_query)
+        if not positions:
+            return "No matches"
+        current = positions.index(pos) + 1 if pos in positions else 1
+        return f"{current} of {len(positions)}"
+
+    def _invalidate_find_cache(self):
+        self._find_cache_key = None
+        self._find_cache_text = ""
+        self._find_cache_folded_text = ""
+        self._find_match_cache = {}
+
+    def _invalidate_editor_content_cache(self):
+        self._editor_content_cache_revision = None
+        self._editor_content_cache_text = ""
+
+    def _editor_content_snapshot(self) -> str:
+        revision = self._editor.document().revision()
+        if self._editor_content_cache_revision != revision:
+            self._editor_content_cache_text = self._editor.toPlainText()
+            self._editor_content_cache_revision = revision
+        return self._editor_content_cache_text
 
     def _save(self, *, auto: bool = False):
         if not self._editable or self._is_showing_diff():
@@ -1609,14 +1893,37 @@ class _TextFileTab(QWidget):
             self._set_dirty(True)
             self._set_status("Save blocked: outside workspace")
             return
-        text = self._editor.toPlainText() if self._edit_mode else self._content
-        try:
-            path.write_text(text, encoding="utf-8")
-        except OSError as e:
+        text = self._current_editor_content() if self._edit_mode or self._dirty else self._content
+        self._save_generation += 1
+        generation = self._save_generation
+        self._saving = True
+        self._set_status("Auto-saving..." if auto else "Saving...")
+        self._sync_actions()
+        worker = _FileSaveWorker(generation, str(path), text, auto)
+        worker.signals.done.connect(self._on_save_ready)
+        self._worker_pool.start(worker)
+
+    def _on_save_ready(
+        self,
+        generation: int,
+        path: str,
+        text: str,
+        ok: bool,
+        error: str,
+        auto: bool,
+    ):
+        if generation != self._save_generation or path != self._path:
+            return
+        self._saving = False
+        if not ok:
             self._set_dirty(True)
-            self._set_status(f"Save failed: {e}")
+            self._set_status(f"Save failed: {error}")
+            self._sync_actions()
             return
         self._content = text
+        self._content_generation += 1
+        self._invalidate_editor_content_cache()
+        self._invalidate_find_cache()
         self._set_dirty(False)
         if not auto:
             self._edit_mode = False
@@ -1637,10 +1944,16 @@ class _TextFileTab(QWidget):
             content, truncated, decode_error, blocked_preview = _read_text_preview_details(self._path)
         except OSError as e:
             self._content = f"[Could not read file: {e}]"
+            self._content_generation += 1
+            self._invalidate_editor_content_cache()
+            self._invalidate_find_cache()
             self._editable = False
             self._read_only_reason = f"Could not read file: {e}"
         else:
             self._content = content
+            self._content_generation += 1
+            self._invalidate_editor_content_cache()
+            self._invalidate_find_cache()
             self._editable = not truncated and not decode_error and not blocked_preview
             self._read_only_reason = _read_only_reason(truncated, decode_error, blocked_preview)
         self._edit_mode = False
@@ -1657,20 +1970,25 @@ class _TextFileTab(QWidget):
         self._revert_btn.setVisible(show_file_actions)
         self._save_btn.setVisible(show_file_actions)
         self._preview_toggle.setVisible(self._markdown)
-        self._preview_toggle.setEnabled(self._markdown and not showing_diff)
-        self._revert_btn.setEnabled(show_file_actions and self._dirty and not showing_diff)
+        self._preview_toggle.setEnabled(self._markdown and not self._saving)
+        self._revert_btn.setEnabled(show_file_actions and self._dirty and not showing_diff and not self._saving)
         self._save_btn.setEnabled(
-            self._editable and self._dirty and not showing_diff and not self._auto_save
+            self._editable and self._dirty and not showing_diff and not self._auto_save and not self._saving
         )
         if not self._editable and self._read_only_reason:
             self._set_status(self._read_only_reason)
+        elif self._saving:
+            if self._status.text() not in ("Saving...", "Auto-saving..."):
+                self._set_status("Saving...")
         elif showing_diff:
-            self._set_status("Diff preview")
+            if self._status.text() not in ("Saved", "Auto-saved"):
+                self._set_status("")
         elif self._dirty:
             if self._status.text() in ("", "Markdown preview", "Formatted view", "Saved", "Auto-saved"):
                 self._set_status("Unsaved changes")
         elif self._is_markdown_preview():
-            self._set_status("Markdown preview")
+            if self._status.text() not in ("Saved", "Auto-saved"):
+                self._set_status("")
         elif (
             self._diagnostics
             and not self._dirty
@@ -1683,7 +2001,7 @@ class _TextFileTab(QWidget):
             and not self._dirty
             and self._status.text() not in ("Saved", "Auto-saved")
         ):
-            self._set_status("Formatted view")
+            self._set_status("")
         elif not self._dirty and self._status.text() not in ("Saved", "Auto-saved"):
             self._set_status("")
 
@@ -1705,7 +2023,29 @@ class _TextFileTab(QWidget):
             return
         text, path = self._pending_markdown
         self._pending_markdown = None
-        self._preview.set_markdown(text, path)
+        self._markdown_generation += 1
+        generation = self._markdown_generation
+        worker = _MarkdownPreviewWorker(
+            generation,
+            path,
+            text,
+            current_theme(),
+            chat_font_pt(),
+        )
+        worker.signals.done.connect(self._on_markdown_preview_ready)
+        self._worker_pool.start(worker)
+
+    def _on_markdown_preview_ready(self, generation: int, path: str, html: str):
+        if generation != self._markdown_generation:
+            return
+        if path != self._path or not self._is_markdown_preview():
+            return
+        self._preview.set_html(html, path)
+
+    def _invalidate_markdown_preview(self):
+        self._markdown_timer.stop()
+        self._pending_markdown = None
+        self._markdown_generation += 1
 
     def _refresh_diagnostics(self, delay_ms: int | None = None):
         if not self._file_backed or self._is_showing_diff():
@@ -1739,10 +2079,6 @@ class _TextFileTab(QWidget):
     def _schedule_diff_refresh(self, delay_ms: int | None = None):
         if not self._file_backed:
             return
-        if not is_git_repo(self._repo_root):
-            self._diff_generation += 1
-            self._on_diff_ready(self._diff_generation, None)
-            return
         self._diff_timer.start(
             self._DIFF_DELAY_MS if delay_ms is None else max(0, delay_ms)
         )
@@ -1760,6 +2096,7 @@ class _TextFileTab(QWidget):
         if generation != self._diff_generation or not self._file_backed:
             return
         was_showing = self._is_showing_diff()
+        had_diff = self._diff_text is not None
         self._diff_text = diff_text
         has_diff = self._diff_text is not None
         self._diff_toggle.setVisible(has_diff)
@@ -1767,7 +2104,8 @@ class _TextFileTab(QWidget):
             self._diff_toggle.setChecked(False)
         elif was_showing and has_diff:
             self._render()
-        self._sync_actions()
+        if has_diff != had_diff or was_showing:
+            self._sync_actions()
 
     def _set_diagnostics(self, diagnostics: list[Diagnostic]):
         self._diagnostics = list(diagnostics)
@@ -1775,18 +2113,57 @@ class _TextFileTab(QWidget):
         self.language_context_changed.emit()
 
     def _current_editor_content(self) -> str:
-        return self._editor.toPlainText() if self._edit_mode else self._content
+        return self._editor_content_snapshot() if self._edit_mode or self._dirty else self._content
 
     def _show_diagnostic_actions(self, diagnostics: list[Diagnostic]):
         if not diagnostics:
             return
-        actions, errors = language_code_actions(
+        self._request_code_actions(diagnostics, safe_only=False)
+
+    def _request_code_actions(self, diagnostics: list[Diagnostic], *, safe_only: bool):
+        if not self._editable or self._is_showing_diff():
+            self._set_status("Code action unavailable")
+            return
+        self._code_action_generation += 1
+        generation = self._code_action_generation
+        self._set_status("Finding safe fixes..." if safe_only else "Finding fixes...")
+        worker = _CodeActionListWorker(
+            generation,
             self._repo_root,
             self._path,
             self._current_editor_content(),
             diagnostics,
         )
+        worker.signals.done.connect(
+            lambda gen, actions, errors, captured=list(diagnostics): (
+                self._on_code_actions_ready(gen, actions, errors, captured, safe_only=safe_only)
+            )
+        )
+        self._worker_pool.start(worker)
+
+    def _on_code_actions_ready(
+        self,
+        generation: int,
+        actions,
+        errors,
+        diagnostics: list[Diagnostic],
+        *,
+        safe_only: bool,
+    ):
+        if generation != self._code_action_generation:
+            return
         self._language_errors = list(errors or [])
+        action_list = list(actions or [])
+        if safe_only:
+            self._show_safe_code_action_choices(action_list, diagnostics)
+        else:
+            self._show_diagnostic_action_choices(action_list, diagnostics)
+
+    def _show_diagnostic_action_choices(
+        self,
+        actions: list[CodeAction],
+        diagnostics: list[Diagnostic],
+    ):
         if not actions:
             self._draft_diagnostic_fix(diagnostics)
             return
@@ -1812,13 +2189,13 @@ class _TextFileTab(QWidget):
         if not diagnostics:
             self._set_status("No problems to fix")
             return
-        actions, errors = language_code_actions(
-            self._repo_root,
-            self._path,
-            self._current_editor_content(),
-            diagnostics,
-        )
-        self._language_errors = list(errors or [])
+        self._request_code_actions(diagnostics, safe_only=True)
+
+    def _show_safe_code_action_choices(
+        self,
+        actions: list[CodeAction],
+        diagnostics: list[Diagnostic],
+    ):
         safe_actions = [action for action in actions if action.safe]
         if not safe_actions:
             self._set_status("No safe fixes available")
@@ -1901,6 +2278,9 @@ class _TextFileTab(QWidget):
         self._edit_mode = True
         self._force_text_view = False
         self._content = content
+        self._content_generation += 1
+        self._invalidate_editor_content_cache()
+        self._invalidate_find_cache()
         self._preview.hide()
         self._editor.show()
         self._minimap.show()
@@ -1984,6 +2364,11 @@ class _TextFileTab(QWidget):
         self._diagnostics_generation += 1
         self._code_action_generation += 1
         self._diff_generation += 1
+        self._markdown_generation += 1
+        self._save_generation += 1
+        self._saving = False
+        _retire_worker_pool(self._worker_pool)
+        self._worker_pool = QThreadPool(self)
         self._editor.release_resources()
 
     def closeEvent(self, event):
@@ -2063,6 +2448,9 @@ class FileViewerPanel(QWidget):
         self._tab_spaces = self._load_tab_spaces()
         self._file_review_prompt = self._load_file_review_prompt_template()
         self._diagnostic_fix_prompt = self._load_diagnostic_fix_prompt_template()
+        self._file_read_generation = 0
+        self._pending_file_reads: dict[str, int] = {}
+        self._worker_pool = QThreadPool.globalInstance()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -2210,7 +2598,10 @@ class FileViewerPanel(QWidget):
                 widget.apply_appearance()
 
     def _apply_tab_style(self):
-        apply_flat_tab_style(self._tabs, "fileViewerTabs")
+        self._tabs.setObjectName("fileViewerTabs")
+        self._tabs.setDocumentMode(True)
+        self._tabs.tabBar().setDrawBase(False)
+        self._tabs.setStyleSheet(file_tab_style())
 
     def _find_tab(self, key: str) -> int:
         tab_bar = self._tabs.tabBar()
@@ -2284,12 +2675,35 @@ class FileViewerPanel(QWidget):
             self._add_tab_widget(path, os.path.basename(path), _ImageViewer(path))
             return
 
+        idx = self._find_tab(path)
+        if self._should_read_text_async(path):
+            if idx >= 0:
+                widget = self._tabs.widget(idx)
+                if isinstance(widget, _TextFileTab):
+                    widget.update_content(
+                        _LOADING_FILE_TEXT,
+                        None,
+                        editable=False,
+                        read_only_reason=_LOADING_FILE_TEXT,
+                    )
+                self._tabs.setCurrentIndex(idx)
+            else:
+                tab = self._create_text_file_tab(
+                    path,
+                    _LOADING_FILE_TEXT,
+                    diff_text=None,
+                    editable=False,
+                    read_only_reason=_LOADING_FILE_TEXT,
+                )
+                self._add_tab_widget(path, os.path.basename(path), tab)
+            self._start_file_read(path, diff_text=diff_text, line_no=line_no)
+            return
+
         content, diff_text, editable, read_only_reason = self._read_text_file_state(
             path,
             diff_text,
         )
 
-        idx = self._find_tab(path)
         if idx >= 0:
             widget = self._tabs.widget(idx)
             if isinstance(widget, _TextFileTab):
@@ -2300,17 +2714,12 @@ class FileViewerPanel(QWidget):
             self._emit_language_context_changed()
             return
 
-        tab = _TextFileTab(
+        tab = self._create_text_file_tab(
             path,
             content,
-            self._repo_root,
             diff_text=diff_text,
             editable=editable,
             read_only_reason=read_only_reason,
-            auto_save=self._auto_save,
-            tab_spaces=self._tab_spaces,
-            file_review_prompt=self._file_review_prompt,
-            diagnostic_fix_prompt=self._diagnostic_fix_prompt,
         )
         self._add_tab_widget(path, os.path.basename(path), tab)
         if line_no is not None:
@@ -2329,28 +2738,96 @@ class FileViewerPanel(QWidget):
         if not isinstance(widget, _TextFileTab):
             return False
 
+        if self._should_read_text_async(path):
+            if not widget._dirty:
+                widget.update_content(
+                    _LOADING_FILE_TEXT,
+                    None,
+                    editable=False,
+                    read_only_reason=_LOADING_FILE_TEXT,
+                )
+            self._start_file_read(path, diff_text=None, line_no=None)
+            return True
+
         content, diff_text, editable, read_only_reason = self._read_text_file_state(path)
         widget.update_content(content, diff_text, editable, read_only_reason)
         self._sync_tab_title(widget)
         self._emit_language_context_for(widget)
         return True
 
+    def _create_text_file_tab(
+        self,
+        path: str,
+        content: str,
+        *,
+        diff_text: str | None,
+        editable: bool,
+        read_only_reason: str,
+    ) -> _TextFileTab:
+        return _TextFileTab(
+            path,
+            content,
+            self._repo_root,
+            diff_text=diff_text,
+            editable=editable,
+            read_only_reason=read_only_reason,
+            auto_save=self._auto_save,
+            tab_spaces=self._tab_spaces,
+            file_review_prompt=self._file_review_prompt,
+            diagnostic_fix_prompt=self._diagnostic_fix_prompt,
+        )
+
+    def _should_read_text_async(self, path: str) -> bool:
+        try:
+            return os.path.getsize(path) > _ASYNC_FILE_READ_BYTES
+        except OSError:
+            return False
+
+    def _start_file_read(
+        self,
+        path: str,
+        *,
+        diff_text: str | None,
+        line_no: int | None,
+    ):
+        self._file_read_generation += 1
+        generation = self._file_read_generation
+        self._pending_file_reads[path] = generation
+        worker = _FileReadWorker(generation, path, diff_text, line_no)
+        worker.signals.done.connect(self._on_file_read_ready)
+        self._worker_pool.start(worker)
+
+    def _on_file_read_ready(
+        self,
+        generation: int,
+        path: str,
+        content: str,
+        diff_text,
+        editable: bool,
+        read_only_reason: str,
+        line_no,
+    ):
+        if self._pending_file_reads.get(path) != generation:
+            return
+        self._pending_file_reads.pop(path, None)
+        idx = self._find_tab(path)
+        if idx < 0:
+            return
+        widget = self._tabs.widget(idx)
+        if not isinstance(widget, _TextFileTab):
+            return
+        widget.update_content(content, diff_text, editable, read_only_reason)
+        if isinstance(line_no, int):
+            widget.goto_line(line_no)
+        self._sync_tab_title(widget)
+        self._emit_language_context_for(widget)
+
     def _read_text_file_state(
         self,
         path: str,
         diff_text: str | None = None,
     ) -> tuple[str, str | None, bool, str]:
-        try:
-            content, truncated, decode_error, blocked_preview = _read_text_preview_details(path)
-        except OSError as e:
-            content = f"[Could not read file: {e}]"
-            editable = False
-            read_only_reason = f"Could not read file: {e}"
-        else:
-            editable = not truncated and not decode_error and not blocked_preview
-            read_only_reason = _read_only_reason(truncated, decode_error, blocked_preview)
-
-        return content, diff_text, editable, read_only_reason
+        return _read_text_file_state(path, diff_text)
 
     def open_content(self, content: str, title: str):
         key = f"\0{title}"
@@ -2450,6 +2927,8 @@ class FileViewerPanel(QWidget):
         super().closeEvent(event)
 
     def shutdown(self):
+        self._file_read_generation += 1
+        self._pending_file_reads.clear()
         for i in range(self._tabs.count()):
             self._release_tab_widget(self._tabs.widget(i))
 
@@ -2525,18 +3004,6 @@ class FileViewerPanel(QWidget):
             return ""
         path = str(widget._path or "")
         return "" if not path or path.startswith("\0") else path
-
-
-def _find_match_status(folded_text: str, folded_query: str, pos: int) -> str:
-    starts = []
-    start = folded_text.find(folded_query)
-    while start >= 0:
-        starts.append(start)
-        start = folded_text.find(folded_query, start + max(1, len(folded_query)))
-    if not starts:
-        return "No matches"
-    current = starts.index(pos) + 1 if pos in starts else 1
-    return f"{current} of {len(starts)}"
 
 
 def _event_pos(event):
@@ -2654,6 +3121,22 @@ def _file_drop_ref(path: str, repo_root: str) -> str:
 def _read_text_preview(path: str) -> str:
     text, _truncated, _decode_error, _blocked_preview = _read_text_preview_details(path)
     return text
+
+
+def _read_text_file_state(
+    path: str,
+    diff_text: str | None = None,
+) -> tuple[str, str | None, bool, str]:
+    try:
+        content, truncated, decode_error, blocked_preview = _read_text_preview_details(path)
+    except OSError as e:
+        content = f"[Could not read file: {e}]"
+        editable = False
+        read_only_reason = f"Could not read file: {e}"
+    else:
+        editable = not truncated and not decode_error and not blocked_preview
+        read_only_reason = _read_only_reason(truncated, decode_error, blocked_preview)
+    return content, diff_text, editable, read_only_reason
 
 
 def _read_text_preview_details(path: str) -> tuple[str, bool, bool, bool]:

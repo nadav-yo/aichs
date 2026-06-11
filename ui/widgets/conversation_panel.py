@@ -4,18 +4,21 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QApplication,
     QListWidget, QListWidgetItem, QLabel, QLineEdit, QMenu, QSizePolicy,
-    QAbstractItemView,
+    QAbstractItemView, QFileDialog, QMessageBox,
 )
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QEvent, QMimeData
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, Qt, QSize, pyqtSignal, QEvent, QMimeData, QTimer
 from PyQt6.QtGui import QAction, QDrag, QFontMetrics, QPainter, QPalette
 
 from storage.repository import ConversationStore
 from storage.settings import SettingsStore, trash_retention_days
 from services.chat_drag import AICHS_CHAT_DROP_MIME, chat_drop_payload, chat_drop_text
-from services.export import export_conversation_file
+from services.export import default_export_name, export_conversation_file_to_path
 from ui.theme import (
-    palette, meta_font_pt, chat_font_pt, app_font,
+    palette, meta_font_pt, chat_font_pt, app_font, hint_label_style,
     new_chat_button_style, search_field_style, conversation_list_style,
+    conversation_row_title_style, conversation_row_inline_edit_style,
+    conversation_row_icon_label_style, conversation_row_restore_button_style,
+    conversation_trash_header_style, title_label_style,
 )
 
 _ROLE_PATH = Qt.ItemDataRole.UserRole
@@ -23,6 +26,75 @@ _ROLE_CONV_ID = Qt.ItemDataRole.UserRole + 1
 _ROLE_TITLE = Qt.ItemDataRole.UserRole + 2
 _ROLE_TRASH_HEADER = Qt.ItemDataRole.UserRole + 3
 _TRASH_HEADER_HEIGHT = 48
+_SEARCH_DEBOUNCE_MS = 150
+
+
+class _ConversationExportSignals(QObject):
+    done = pyqtSignal(int, str, str)
+
+
+class _ConversationExportWorker(QRunnable):
+    def __init__(self, generation: int, conv_path: str, out_path: str):
+        super().__init__()
+        self.signals = _ConversationExportSignals()
+        self._generation = generation
+        self._conv_path = conv_path
+        self._out_path = out_path
+
+    def run(self) -> None:
+        try:
+            written = export_conversation_file_to_path(self._conv_path, self._out_path)
+        except Exception as exc:
+            self.signals.done.emit(self._generation, "", str(exc))
+            return
+        self.signals.done.emit(self._generation, str(written), "")
+
+
+class _ConversationActionSignals(QObject):
+    done = pyqtSignal(str, str, str, str)
+
+
+class _ConversationActionWorker(QRunnable):
+    def __init__(
+        self,
+        store: ConversationStore,
+        action: str,
+        path: str,
+        title: str = "",
+    ):
+        super().__init__()
+        self.signals = _ConversationActionSignals()
+        self._store = store
+        self._action = action
+        self._path = path
+        self._title = title
+
+    def run(self) -> None:
+        try:
+            if self._action == "delete":
+                try:
+                    conv_id = str(self._store.load(self._path).get("id") or Path(self._path).stem)
+                except Exception:
+                    conv_id = Path(self._path).stem
+                self._store.delete(self._path)
+                detail = ""
+            elif self._action == "restore":
+                restored = self._store.restore(self._path)
+                conv_id = restored.stem
+                detail = str(restored)
+            elif self._action == "rename":
+                conv_id = self._store.rename(self._path, self._title)
+                detail = self._title
+            elif self._action == "pin":
+                conv_id = Path(self._path).stem
+                pinned = self._store.toggle_pin(self._path)
+                detail = "true" if pinned else "false"
+            else:
+                raise ValueError(f"unsupported conversation action: {self._action}")
+        except Exception as exc:
+            self.signals.done.emit(self._action, "", "", str(exc))
+            return
+        self.signals.done.emit(self._action, conv_id, detail, "")
 
 
 class TitleLabel(QLabel):
@@ -116,6 +188,8 @@ class ConversationItem(QWidget):
         self._title = title
         self._pinned = pinned
         self._trashed = trashed
+        self._active = False
+        self._hovered = False
         self._drag_start = None
         self._drag_data: dict | None = None
 
@@ -177,6 +251,20 @@ class ConversationItem(QWidget):
         super().resizeEvent(event)
         self.title_lbl.update()
 
+    def enterEvent(self, event):
+        self._hovered = True
+        self._sync_action_visibility()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._sync_action_visibility()
+        super().leaveEvent(event)
+
+    def set_active(self, active: bool):
+        self._active = bool(active)
+        self._sync_action_visibility()
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_start = event.position().toPoint()
@@ -201,43 +289,31 @@ class ConversationItem(QWidget):
         drag.exec(Qt.DropAction.CopyAction)
 
     def apply_appearance(self):
-        p = palette()
-        fs = chat_font_pt()
-        meta = meta_font_pt()
-        pin_color = "#f5c518" if self._pinned else p["TEXT_DIM"]
-        self.title_lbl.setStyleSheet(
-            f"font-size:{max(12, fs - 1)}px; color:{p['TEXT']};"
-            "background:transparent; font-weight:500;"
-        )
+        pin_color = "#f5c518" if self._pinned else None
+        self.title_lbl.setStyleSheet(conversation_row_title_style())
         self.title_lbl.apply_font()
-        self.title_edit.setStyleSheet(
-            f"font-size:{fs}px; color:{p['TEXT']}; background:{p['BG3']};"
-            f"border:1px solid {p['BORDER']}; padding:1px 4px;"
-        )
-        self.date_lbl.setStyleSheet(
-            f"font-size:{meta}px; color:{p['TEXT_DIM']}; background:transparent;"
-        )
-        icon_fs = max(10, meta)
+        self.title_edit.setStyleSheet(conversation_row_inline_edit_style())
+        self.date_lbl.setStyleSheet(hint_label_style())
         self.pin_btn.setStyleSheet(
-            f"QLabel {{ color:{pin_color}; background:transparent; font-size:{icon_fs}px; }}"
-            "QLabel:hover { color:#f5c518; }"
+            conversation_row_icon_label_style(
+                color=pin_color,
+                hover_color="#f5c518",
+            )
         )
         self.del_btn.setStyleSheet(
-            f"QLabel {{ color:{p['TEXT_DIM']}; background:transparent; font-size:{icon_fs}px; }}"
-            "QLabel:hover { color:#ff5555; }"
+            conversation_row_icon_label_style(hover_color="#ff5555")
         )
-        self.restore_btn.setStyleSheet(
-            f"QPushButton {{ background:{p['BG3']}; color:{p['TEXT']};"
-            f"border:1px solid {p['BORDER']}; border-radius:6px; padding:2px 8px;"
-            f"font-size:{max(10, meta)}px; }}"
-            f"QPushButton:hover {{ background:{p['BORDER']}; }}"
-        )
+        self.restore_btn.setStyleSheet(conversation_row_restore_button_style())
         self.title_lbl.update()
-        self._sync_delete_visibility()
+        self._sync_action_visibility()
 
     def _sync_delete_visibility(self):
-        self.pin_btn.setVisible(not self._trashed)
-        self.del_btn.setVisible(not self._pinned and not self._trashed)
+        self._sync_action_visibility()
+
+    def _sync_action_visibility(self):
+        reveal = self._hovered or self._active or self.title_edit.isVisible()
+        self.pin_btn.setVisible(not self._trashed and (self._pinned or reveal))
+        self.del_btn.setVisible(not self._pinned and not self._trashed and reveal)
         self.restore_btn.setVisible(self._trashed)
 
     def _start_edit(self):
@@ -253,6 +329,7 @@ class ConversationItem(QWidget):
         self.title_edit.hide()
         self.title_lbl.setText(new_title)
         self.title_lbl.show()
+        self._sync_action_visibility()
         if new_title != self._title:
             self._title = new_title
             self.rename_requested.emit(new_title)
@@ -260,6 +337,7 @@ class ConversationItem(QWidget):
     def _cancel_edit(self):
         self.title_edit.hide()
         self.title_lbl.show()
+        self._sync_action_visibility()
 
     def cancel_edit(self):
         try:
@@ -357,24 +435,17 @@ class TrashHeader(QWidget):
         super().mousePressEvent(event)
 
     def apply_appearance(self):
-        p = palette()
         fs = max(12, chat_font_pt() - 1)
-        meta = meta_font_pt()
-        self.setStyleSheet(
-            f"TrashHeader {{ background:{p['BG2']}; border-top:1px solid {p['BORDER']}; }}"
-            f"TrashHeader:hover {{ background:{p['BG3']}; }}"
-        )
+        self.setStyleSheet(conversation_trash_header_style())
         self.arrow_lbl.setText("v" if self._expanded else ">")
         self.arrow_lbl.setStyleSheet(
-            f"color:{p['TEXT_DIM']}; background:transparent; font-size:{fs}px; font-weight:700;"
+            hint_label_style(font_pt=fs, font_weight="700")
         )
         self.title_lbl.setStyleSheet(
-            f"color:{p['TEXT']}; background:transparent; font-size:{fs}px; font-weight:600;"
+            title_label_style(font_pt=fs, font_weight="600", text_color=palette()["TEXT"])
         )
         self.count_lbl.setText(str(self._count))
-        self.count_lbl.setStyleSheet(
-            f"color:{p['TEXT_DIM']}; background:transparent; font-size:{meta}px;"
-        )
+        self.count_lbl.setStyleSheet(hint_label_style())
 
 
 class ConversationPanel(QWidget):
@@ -389,6 +460,16 @@ class ConversationPanel(QWidget):
         self._settings = settings or SettingsStore()
         self._editing_item = None
         self._trash_expanded = False
+        self._export_generation = 0
+        self._export_active = False
+        self._export_pool = QThreadPool(self)
+        self._export_pool.setMaxThreadCount(1)
+        self._action_pool = QThreadPool(self)
+        self._action_pool.setMaxThreadCount(1)
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(_SEARCH_DEBOUNCE_MS)
+        self._filter_timer.timeout.connect(lambda: self.refresh())
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -410,6 +491,7 @@ class ConversationPanel(QWidget):
 
         self.list = _ConversationList()
         self.list.itemClicked.connect(self._on_item_clicked)
+        self.list.currentItemChanged.connect(self._sync_current_row_actions)
         self.list.viewport().installEventFilter(self)
         root.addWidget(self.list)
         root.addWidget(self.no_results)
@@ -423,7 +505,7 @@ class ConversationPanel(QWidget):
         self._new_btn.setStyleSheet(new_chat_button_style())
         self.search.setStyleSheet(search_field_style())
         self.no_results.setStyleSheet(
-            f"color:{p['TEXT_DIM']}; font-size:{fs}px; padding:24px; background:{p['BG2']};"
+            hint_label_style(font_pt=fs, padding="24px", background=p["BG2"])
         )
         self.list.setStyleSheet(conversation_list_style())
 
@@ -450,11 +532,19 @@ class ConversationPanel(QWidget):
             widget = self.list.itemWidget(item)
             if isinstance(widget, ConversationItem):
                 widget.apply_appearance()
+                widget.set_active(item is self.list.currentItem())
             elif isinstance(widget, TrashHeader):
                 widget.apply_appearance()
 
+    def _sync_current_row_actions(self, *_args):
+        current = self.list.currentItem()
+        for i in range(self.list.count()):
+            widget = self.list.itemWidget(self.list.item(i))
+            if isinstance(widget, ConversationItem):
+                widget.set_active(self.list.item(i) is current)
+
     def _apply_filter(self):
-        self.refresh()
+        self._filter_timer.start()
 
     def _trash_retention_days(self) -> int:
         return trash_retention_days(self._settings.load())
@@ -508,7 +598,7 @@ class ConversationPanel(QWidget):
             widget.delete_requested.connect(lambda p=str(path): self._delete(p))
             widget.rename_requested.connect(lambda t, p=str(path): self._rename(p, t))
             widget.pin_requested.connect(lambda p=str(path): self._toggle_pin(p))
-            widget.export_requested.connect(lambda p=str(path): self._export(p))
+            widget.export_requested.connect(lambda p=str(path), t=title: self._export(p, t))
         else:
             widget.restore_requested.connect(lambda p=str(path): self._restore(p))
         widget.edit_started.connect(self._on_edit_started)
@@ -527,6 +617,7 @@ class ConversationPanel(QWidget):
             self.selected.emit(str(path))
 
     def refresh(self, selected_id: str | None = None):
+        self._filter_timer.stop()
         self._editing_item = None
         current_path = None
         current_id = None
@@ -591,17 +682,10 @@ class ConversationPanel(QWidget):
         self.list.setCurrentRow(-1)
 
     def _delete(self, path: str):
-        try:
-            conv_id = self.store.load(path)["id"]
-        except Exception:
-            conv_id = Path(path).stem
-        self.store.delete(path)
-        self.deleted.emit(conv_id)
-        self.refresh()
+        self._start_action("delete", path)
 
     def _restore(self, path: str):
-        self.store.restore(path)
-        self.refresh()
+        self._start_action("restore", path)
 
     def _on_edit_started(self, item: ConversationItem):
         prev = self._editing_item
@@ -610,14 +694,49 @@ class ConversationPanel(QWidget):
         self._editing_item = item
 
     def _rename(self, path: str, title: str):
-        conv_id = self.store.rename(path, title)
-        self.renamed.emit(conv_id, title)
         self._editing_item = None
-        self.refresh()
+        self._start_action("rename", path, title)
 
     def _toggle_pin(self, path: str):
-        self.store.toggle_pin(path)
+        self._start_action("pin", path)
+
+    def _start_action(self, action: str, path: str, title: str = "") -> None:
+        worker = _ConversationActionWorker(self.store, action, path, title)
+        worker.signals.done.connect(self._on_action_done)
+        self._action_pool.start(worker)
+
+    def _on_action_done(self, action: str, conv_id: str, detail: str, error: str) -> None:
+        if error:
+            QMessageBox.warning(self, "Conversation action failed", error)
+            return
+        if action == "delete":
+            self.deleted.emit(conv_id)
+        elif action == "rename":
+            self.renamed.emit(conv_id, detail)
         self.refresh()
 
-    def _export(self, path: str):
-        export_conversation_file(path, parent=self.window())
+    def _export(self, path: str, title: str = ""):
+        if self._export_active:
+            return
+        default = default_export_name({"title": title or Path(path).stem})
+        out_path, _ = QFileDialog.getSaveFileName(
+            self.window(),
+            "Export conversation",
+            default,
+            "Markdown (*.md)",
+        )
+        if not out_path:
+            return
+        self._export_generation += 1
+        generation = self._export_generation
+        self._export_active = True
+        worker = _ConversationExportWorker(generation, path, out_path)
+        worker.signals.done.connect(self._on_export_done)
+        self._export_pool.start(worker)
+
+    def _on_export_done(self, generation: int, _path: str, error: str) -> None:
+        if generation != self._export_generation:
+            return
+        self._export_active = False
+        if error:
+            QMessageBox.warning(self, "Export failed", error)

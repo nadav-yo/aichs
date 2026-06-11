@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -33,7 +33,50 @@ from services.tool_registry import (
     extension_overview,
     set_extension_enabled,
 )
-from ui.theme import palette, chat_font_pt, meta_font_pt, icon_button_style
+from ui.theme import (
+    checkbox_style,
+    chat_font_pt,
+    compact_combo_box_style,
+    dialog_button_box_style,
+    dialog_shell_style,
+    form_field_style,
+    hint_label_style,
+    icon_button_style,
+    extension_detail_name_style,
+    extension_detail_table_frame_style,
+    extension_detail_value_style,
+    extension_header_frame_style,
+    extension_list_meta_style,
+    extension_list_name_style,
+    extension_list_row_style,
+    extension_panel_heading_style,
+    meta_font_pt,
+    palette,
+    section_label_style,
+    status_pill_style,
+    transparent_scroll_area_style,
+    title_label_style,
+)
+
+
+class _ExtensionOverviewSignals(QObject):
+    done = pyqtSignal(int, object, str)
+
+
+class _ExtensionOverviewWorker(QRunnable):
+    def __init__(self, generation: int, cwd: str):
+        super().__init__()
+        self.signals = _ExtensionOverviewSignals()
+        self._generation = generation
+        self._cwd = cwd
+
+    def run(self) -> None:
+        try:
+            overview = extension_overview(self._cwd)
+        except BaseException as exc:
+            self.signals.done.emit(self._generation, None, str(exc) or exc.__class__.__name__)
+            return
+        self.signals.done.emit(self._generation, overview, "")
 
 
 class ExtensionsDialog(QDialog):
@@ -45,21 +88,17 @@ class ExtensionsDialog(QDialog):
     ):
         super().__init__(parent)
         self._cwd = overview_or_cwd if isinstance(overview_or_cwd, str) else ""
-        self._overview = (
-            extension_overview(self._cwd)
-            if isinstance(overview_or_cwd, str)
-            else overview_or_cwd
-        )
+        self._overview = ExtensionOverview(files=[]) if self._cwd else overview_or_cwd
         self._on_reload = on_reload
         self._selected_path = ""
+        self._overview_generation = 0
+        self._overview_pool = QThreadPool.globalInstance()
+        self._pending_enable_warning_path = ""
         self.setWindowTitle("Extensions")
         self.resize(900, 620)
 
+        self.setStyleSheet(dialog_shell_style() + transparent_scroll_area_style())
         p = palette()
-        self.setStyleSheet(
-            f"QDialog {{ background:{p['BG2']}; color:{p['TEXT']}; }}"
-            f"QScrollArea {{ background:{p['BG2']}; border:none; }}"
-        )
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
@@ -70,9 +109,7 @@ class ExtensionsDialog(QDialog):
         title_row.setSpacing(8)
 
         title = QLabel("Extensions")
-        title.setStyleSheet(
-            f"font-size:{chat_font_pt() + 2}px; font-weight:600; color:{p['TEXT']};"
-        )
+        title.setStyleSheet(title_label_style(font_weight="600"))
         title_row.addWidget(title)
         title_row.addStretch()
 
@@ -90,7 +127,7 @@ class ExtensionsDialog(QDialog):
         root.addLayout(title_row)
 
         self._summary = QLabel()
-        self._summary.setStyleSheet(f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;")
+        self._summary.setStyleSheet(hint_label_style())
         root.addWidget(self._summary)
 
         content = QHBoxLayout()
@@ -114,18 +151,73 @@ class ExtensionsDialog(QDialog):
         self._detail_scroll.setStyleSheet(_detail_scroll_style())
         content.addWidget(self._detail_scroll, 1)
 
-        self._render()
+        if self._cwd:
+            self._load_overview()
+        else:
+            self._render()
 
     def _reload(self):
         if self._cwd:
-            self._overview = extension_overview(self._cwd)
+            self._load_overview()
+            return
+        self._render()
         if self._on_reload:
             self._on_reload()
+
+    def _load_overview(self):
+        if not self._cwd:
+            self._render()
+            return
+        self._overview_generation += 1
+        generation = self._overview_generation
+        self._show_loading()
+        worker = _ExtensionOverviewWorker(generation, self._cwd)
+        worker.signals.done.connect(self._on_overview_ready)
+        self._overview_pool.start(worker)
+
+    def _on_overview_ready(self, generation: int, overview: object, error: str):
+        if generation != self._overview_generation:
+            return
+        if error:
+            self._summary.setText(f"Extension overview failed: {error}")
+            self._show_placeholder()
+            return
+        self._overview = overview if isinstance(overview, ExtensionOverview) else ExtensionOverview(files=[])
         self._render()
+        if self._on_reload:
+            self._on_reload()
+        warning_path = self._pending_enable_warning_path
+        self._pending_enable_warning_path = ""
+        if warning_path:
+            selected = _find_file(self._overview, warning_path)
+            if selected and selected.errors:
+                QMessageBox.warning(
+                    self,
+                    "Extension failed to load",
+                    _extension_error_text(selected),
+                )
 
     def _set_enabled(self, path: str, enabled: bool):
-        set_extension_enabled(path, enabled, self._cwd or None)
-        self._reload()
+        try:
+            set_extension_enabled(path, enabled, self._cwd or None)
+            self._pending_enable_warning_path = path if enabled else ""
+            self._reload()
+        except BaseException as exc:
+            if enabled:
+                try:
+                    set_extension_enabled(path, False, self._cwd or None)
+                except BaseException:
+                    pass
+            QMessageBox.warning(
+                self,
+                "Extension enable failed" if enabled else "Extension disable failed",
+                str(exc) or exc.__class__.__name__,
+            )
+            try:
+                self._reload()
+            except BaseException:
+                self._show_placeholder()
+            return
 
     def _install_extensions(self) -> None:
         dialog = ExtensionInstallDialog(self._cwd, parent=self)
@@ -174,6 +266,89 @@ class ExtensionsDialog(QDialog):
     def _show_placeholder(self) -> None:
         self._detail_scroll.setWidget(_PlaceholderPane())
 
+    def _show_loading(self) -> None:
+        self._summary.setText("Loading extensions...")
+        _clear_layout(self._list_layout)
+        label = QLabel("Loading extension overview...")
+        label.setStyleSheet(hint_label_style())
+        self._list_layout.addWidget(label)
+        self._list_layout.addStretch()
+        self._show_placeholder()
+
+    def closeEvent(self, event) -> None:
+        self._overview_generation += 1
+        super().closeEvent(event)
+
+
+class _ExtensionInstallFetchSignals(QObject):
+    done = pyqtSignal(int, object, str)
+
+
+class _ExtensionInstallFetchWorker(QRunnable):
+    def __init__(
+        self,
+        generation: int,
+        url: str,
+        previous_source: ExtensionInstallSource | None,
+    ):
+        super().__init__()
+        self.signals = _ExtensionInstallFetchSignals()
+        self._generation = generation
+        self._url = url
+        self._previous_source = previous_source
+
+    def run(self) -> None:
+        try:
+            cleanup_extension_install_source(self._previous_source)
+            source = prepare_extension_install_source(self._url)
+        except Exception as exc:
+            self.signals.done.emit(self._generation, None, str(exc))
+            return
+        self.signals.done.emit(self._generation, source, "")
+
+
+class _ExtensionInstallApplySignals(QObject):
+    done = pyqtSignal(int, object, str)
+
+
+class _ExtensionInstallApplyWorker(QRunnable):
+    def __init__(
+        self,
+        generation: int,
+        candidates: list[ExtensionInstallCandidate],
+        scope: str,
+        cwd: str | None,
+        source: ExtensionInstallSource | None,
+    ):
+        super().__init__()
+        self.signals = _ExtensionInstallApplySignals()
+        self._generation = generation
+        self._candidates = candidates
+        self._scope = scope
+        self._cwd = cwd
+        self._source = source
+
+    def run(self) -> None:
+        results = []
+        error = ""
+        try:
+            results = install_extension_candidates(
+                self._candidates,
+                scope=self._scope,
+                cwd=self._cwd,
+            )
+        except Exception as exc:
+            error = str(exc)
+        try:
+            cleanup_extension_install_source(self._source)
+        except Exception as exc:
+            if not error:
+                error = str(exc)
+        if error:
+            self.signals.done.emit(self._generation, [], error)
+            return
+        self.signals.done.emit(self._generation, results, "")
+
 
 class ExtensionInstallDialog(QDialog):
     def __init__(self, cwd: str = "", parent=None):
@@ -181,13 +356,19 @@ class ExtensionInstallDialog(QDialog):
         self._cwd = cwd
         self._source: ExtensionInstallSource | None = None
         self._candidate_checks: list[tuple[QCheckBox, ExtensionInstallCandidate]] = []
+        self._fetch_generation = 0
+        self._fetch_active = False
+        self._install_generation = 0
+        self._install_active = False
+        self._worker_pool = QThreadPool(self)
+        self._worker_pool.setMaxThreadCount(1)
         self.setWindowTitle("Add Extensions")
         self.resize(620, 480)
 
         p = palette()
         self.setStyleSheet(
-            f"QDialog {{ background:{p['BG2']}; color:{p['TEXT']}; }}"
-            f"QScrollArea {{ background:{p['BG2']}; border:1px solid {p['BORDER_SUBTLE']}; }}"
+            dialog_shell_style()
+            + transparent_scroll_area_style(border=f"1px solid {p['BORDER_SUBTLE']}")
         )
 
         root = QVBoxLayout(self)
@@ -195,9 +376,7 @@ class ExtensionInstallDialog(QDialog):
         root.setSpacing(10)
 
         title = QLabel("Add Extensions")
-        title.setStyleSheet(
-            f"font-size:{chat_font_pt() + 2}px; font-weight:600; color:{p['TEXT']};"
-        )
+        title.setStyleSheet(title_label_style(font_weight="600"))
         root.addWidget(title)
 
         source_row = QHBoxLayout()
@@ -205,6 +384,7 @@ class ExtensionInstallDialog(QDialog):
         source_row.setSpacing(8)
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("Git URL")
+        self.url_edit.setStyleSheet(form_field_style(selector="QLineEdit", padding="7px 10px"))
         source_row.addWidget(self.url_edit, 1)
         self.fetch_btn = QPushButton("Fetch")
         self.fetch_btn.clicked.connect(self._fetch)
@@ -215,10 +395,11 @@ class ExtensionInstallDialog(QDialog):
         scope_row.setContentsMargins(0, 0, 0, 0)
         scope_row.setSpacing(8)
         scope_label = QLabel("Install to")
-        scope_label.setStyleSheet(f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;")
+        scope_label.setStyleSheet(hint_label_style())
         self.scope_combo = QComboBox()
         self.scope_combo.addItem("Local project", "local")
         self.scope_combo.addItem("Global user", "global")
+        self.scope_combo.setStyleSheet(_install_scope_combo_style())
         if not self._cwd:
             self.scope_combo.setCurrentIndex(1)
         scope_row.addWidget(scope_label)
@@ -228,7 +409,7 @@ class ExtensionInstallDialog(QDialog):
 
         self.status_label = QLabel("Fetch a git source to choose extensions.")
         self.status_label.setWordWrap(True)
-        self.status_label.setStyleSheet(f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;")
+        self.status_label.setStyleSheet(hint_label_style())
         root.addWidget(self.status_label)
 
         self.candidate_scroll = QScrollArea()
@@ -242,6 +423,7 @@ class ExtensionInstallDialog(QDialog):
         self._set_candidates([])
 
         buttons = QDialogButtonBox()
+        buttons.setStyleSheet(dialog_button_box_style())
         self.install_btn = buttons.addButton("Install", QDialogButtonBox.ButtonRole.AcceptRole)
         self.install_btn.setEnabled(False)
         cancel = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
@@ -250,29 +432,66 @@ class ExtensionInstallDialog(QDialog):
         root.addWidget(buttons)
 
     def reject(self) -> None:
+        if self._fetch_active:
+            self._set_status("Fetch is still running.")
+            return
+        if self._install_active:
+            self._set_status("Install is still running.")
+            return
+        self._fetch_generation += 1
+        self._install_generation += 1
         cleanup_extension_install_source(self._source)
         self._source = None
         super().reject()
+
+    def closeEvent(self, event) -> None:
+        if self._fetch_active:
+            self._set_status("Fetch is still running.")
+            event.ignore()
+            return
+        if self._install_active:
+            self._set_status("Install is still running.")
+            event.ignore()
+            return
+        self._fetch_generation += 1
+        self._install_generation += 1
+        cleanup_extension_install_source(self._source)
+        self._source = None
+        super().closeEvent(event)
 
     def _fetch(self) -> None:
         url = self.url_edit.text().strip()
         if not url:
             self._set_status("Enter a git URL.", danger=True)
             return
+        self._fetch_generation += 1
+        generation = self._fetch_generation
+        previous_source = self._source
+        self._source = None
+        self._fetch_active = True
         self.fetch_btn.setEnabled(False)
         self.install_btn.setEnabled(False)
+        self._set_candidates([])
         self._set_status("Cloning source...")
-        cleanup_extension_install_source(self._source)
-        self._source = None
-        try:
-            self._source = prepare_extension_install_source(url)
-        except Exception as exc:
+        worker = _ExtensionInstallFetchWorker(generation, url, previous_source)
+        worker.signals.done.connect(self._on_fetch_done)
+        self._worker_pool.start(worker)
+
+    def _on_fetch_done(self, generation: int, source: object, error: str) -> None:
+        if generation != self._fetch_generation:
+            if isinstance(source, ExtensionInstallSource):
+                cleanup_extension_install_source(source)
+            return
+        self._fetch_active = False
+        if error:
             self._set_candidates([])
-            self._set_status(str(exc), danger=True)
+            self._set_status(error, danger=True)
             self.fetch_btn.setEnabled(True)
             return
-        self._set_candidates(self._source.candidates)
-        count = len(self._source.candidates)
+        self._source = source if isinstance(source, ExtensionInstallSource) else None
+        candidates = self._source.candidates if self._source else []
+        self._set_candidates(candidates)
+        count = len(candidates)
         if count:
             noun = "extension" if count == 1 else "extensions"
             self._set_status(f"Found {count} installable {noun}.")
@@ -281,20 +500,38 @@ class ExtensionInstallDialog(QDialog):
         self.fetch_btn.setEnabled(True)
 
     def _install(self) -> None:
+        if self._fetch_active or self._install_active:
+            return
         selected = self.selected_candidates()
         if not selected:
             self._set_status("Choose at least one extension to install.", danger=True)
             return
-        try:
-            install_extension_candidates(
-                selected,
-                scope=str(self.scope_combo.currentData()),
-                cwd=self._cwd or None,
-            )
-        except Exception as exc:
-            QMessageBox.warning(self, "Install failed", str(exc))
+        self._install_generation += 1
+        generation = self._install_generation
+        self._install_active = True
+        self.fetch_btn.setEnabled(False)
+        self.install_btn.setEnabled(False)
+        self._set_status("Installing extensions...")
+        worker = _ExtensionInstallApplyWorker(
+            generation,
+            selected,
+            str(self.scope_combo.currentData()),
+            self._cwd or None,
+            self._source,
+        )
+        worker.signals.done.connect(self._on_install_done)
+        self._worker_pool.start(worker)
+
+    def _on_install_done(self, generation: int, _results: object, error: str) -> None:
+        if generation != self._install_generation:
             return
-        cleanup_extension_install_source(self._source)
+        self._install_active = False
+        self.fetch_btn.setEnabled(True)
+        if error:
+            self._sync_install_enabled()
+            self._set_status("Install failed.", danger=True)
+            QMessageBox.warning(self, "Install failed", error)
+            return
         self._source = None
         QMessageBox.information(
             self,
@@ -315,7 +552,7 @@ class ExtensionInstallDialog(QDialog):
         self._candidate_checks = []
         if not candidates:
             empty = QLabel("No extensions discovered yet.")
-            empty.setStyleSheet(f"color:{palette()['TEXT_DIM']};")
+            empty.setStyleSheet(hint_label_style())
             self.candidate_layout.addWidget(empty)
             self.candidate_layout.addStretch()
             self.install_btn.setEnabled(False) if hasattr(self, "install_btn") else None
@@ -325,7 +562,7 @@ class ExtensionInstallDialog(QDialog):
             checkbox.setToolTip(_candidate_disclosure(candidate))
             checkbox.setChecked(True)
             checkbox.setStyleSheet(_enabled_checkbox_style())
-            checkbox.toggled.connect(self._sync_install_enabled)
+            checkbox.toggled.connect(lambda _checked: self._sync_install_enabled())
             self.candidate_layout.addWidget(checkbox)
             disclosure = QLabel(_candidate_disclosure(candidate))
             disclosure.setWordWrap(True)
@@ -342,7 +579,7 @@ class ExtensionInstallDialog(QDialog):
     def _set_status(self, text: str, *, danger: bool = False) -> None:
         color = "#f87171" if danger else palette()["TEXT_DIM"]
         self.status_label.setText(text)
-        self.status_label.setStyleSheet(f"color:{color}; font-size:{meta_font_pt()}px;")
+        self.status_label.setStyleSheet(hint_label_style(text_color=color))
 
 
 class _ExtensionListRow(QFrame):
@@ -388,8 +625,7 @@ class _ExtensionListRow(QFrame):
         )
         checkbox.setStyleSheet(_enabled_checkbox_style())
         checkbox.toggled.connect(
-            lambda checked, path=file.path:
-                on_toggle and on_toggle(path, bool(checked))
+            lambda checked, path=file.path: _queue_toggle(on_toggle, path, checked)
         )
         layout.addWidget(checkbox, 2, 0, Qt.AlignmentFlag.AlignLeft)
 
@@ -517,7 +753,7 @@ class _ExtensionDetailPane(QWidget):
         path = QLabel(file.path)
         path.setWordWrap(True)
         path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        path.setStyleSheet(f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;")
+        path.setStyleSheet(hint_label_style())
         layout.addWidget(path, 1, 0, 1, 2)
 
         enabled = file.status != "Disabled"
@@ -525,8 +761,7 @@ class _ExtensionDetailPane(QWidget):
         checkbox.setChecked(enabled)
         checkbox.setStyleSheet(_enabled_checkbox_style())
         checkbox.toggled.connect(
-            lambda checked, path=file.path:
-                self._on_toggle and self._on_toggle(path, bool(checked))
+            lambda checked, path=file.path: _queue_toggle(self._on_toggle, path, checked)
         )
         layout.addWidget(checkbox, 2, 0, 1, 2, Qt.AlignmentFlag.AlignLeft)
         root.addWidget(header)
@@ -539,7 +774,7 @@ class _ExtensionDetailPane(QWidget):
         label.setWordWrap(True)
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         label.setStyleSheet(
-            f"color:{p['TEXT']}; background:transparent;"
+            f"color:{p['TEXT']}; background-color:transparent;"
             f"border-left:2px solid {p['BORDER']}; padding:0 0 0 10px;"
         )
         root.addWidget(label)
@@ -552,7 +787,7 @@ class _EmptyList(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         label = QLabel("No extension files found.")
-        label.setStyleSheet(f"color:{p['TEXT_DIM']};")
+        label.setStyleSheet(hint_label_style())
         layout.addWidget(label)
         layout.addStretch()
 
@@ -566,7 +801,7 @@ class _PlaceholderPane(QWidget):
         layout.addStretch()
         label = QLabel("No extension selected.")
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setStyleSheet(f"color:{p['TEXT_DIM']};")
+        label.setStyleSheet(hint_label_style())
         layout.addWidget(label)
         layout.addStretch()
 
@@ -636,6 +871,21 @@ def _find_file(
     path: str,
 ) -> ExtensionFileSummary | None:
     return next((file for file in overview.files if file.path == path), None)
+
+
+def _queue_toggle(on_toggle, path: str, checked: bool) -> None:
+    if on_toggle:
+        QTimer.singleShot(0, lambda: on_toggle(path, bool(checked)))
+
+
+def _extension_error_text(file: ExtensionFileSummary) -> str:
+    if not file.errors:
+        return "Extension did not load."
+    shown = "\n\n".join(str(error) for error in file.errors[:2])
+    hidden = len(file.errors) - 2
+    if hidden > 0:
+        shown += f"\n\n... and {hidden} more error(s)."
+    return shown
 
 
 def _extension_name(file: ExtensionFileSummary) -> str:
@@ -765,105 +1015,58 @@ def _requirements_rows(file: ExtensionFileSummary) -> list[tuple[str, str]]:
 
 
 def _heading_style(tone: str = "") -> str:
-    p = palette()
-    color = "#f87171" if tone == "danger" else p["TEXT_DIM"]
-    return (
-        f"color:{color}; font-size:{meta_font_pt()}px;"
-        "font-weight:600;"
-    )
+    return extension_panel_heading_style(tone=tone)
 
 
 def _list_scroll_style() -> str:
     p = palette()
-    return (
-        f"QScrollArea {{ background:{p['BG2']}; border-right:1px solid {p['BORDER_SUBTLE']}; }}"
+    return transparent_scroll_area_style(
+        border=f"0px solid {p['BORDER_SUBTLE']}; border-right:1px solid {p['BORDER_SUBTLE']}",
+        include_viewport=False,
     )
 
 
 def _detail_scroll_style() -> str:
-    p = palette()
-    return (
-        f"QScrollArea {{ background:{p['BG2']}; border:none; }}"
-        f"QScrollArea QWidget {{ background:{p['BG2']}; }}"
-    )
+    return transparent_scroll_area_style()
 
 
 def _list_row_style(selected: bool, tone: str) -> str:
-    p = palette()
-    bg = p["SELECTION"] if selected else p["BG2"]
-    hover = p["SELECTION"] if selected else p["BG3"]
-    border = {
-        "danger": "#5f252d",
-        "disabled": p["BORDER_SUBTLE"],
-    }.get(tone, p["BORDER_SUBTLE"])
-    return (
-        f"QFrame#extensionListRow {{ background:{bg};"
-        f"border-bottom:1px solid {border}; border-radius:0; }}"
-        f"QFrame#extensionListRow:hover {{ background:{hover}; }}"
-    )
+    return extension_list_row_style(selected=selected, tone=tone)
 
 
 def _list_name_style() -> str:
-    p = palette()
-    return f"color:{p['TEXT']}; font-weight:600;"
+    return extension_list_name_style()
 
 
 def _list_meta_style(tone: str) -> str:
-    p = palette()
-    color = {
-        "danger": "#f87171",
-        "disabled": p["TEXT_DIM"],
-        "success": p["SUCCESS"],
-    }.get(tone, p["TEXT_DIM"])
-    return f"color:{color}; font-size:{meta_font_pt()}px; font-weight:600;"
+    return extension_list_meta_style(tone)
 
 
 def _list_path_style() -> str:
-    p = palette()
-    return f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;"
+    return hint_label_style()
 
 
 def _header_style() -> str:
-    p = palette()
-    return (
-        f"QFrame#extensionHeader {{ background:transparent;"
-        f"border-bottom:1px solid {p['BORDER_SUBTLE']}; border-radius:0; }}"
-    )
+    return extension_header_frame_style()
 
 
 def _detail_table_style(tone: str = "") -> str:
-    p = palette()
-    border = "#5f252d" if tone == "danger" else p["BORDER_SUBTLE"]
-    return (
-        f"QFrame#extensionDetailTable {{ background:transparent;"
-        f"border-top:1px solid {border}; border-radius:0; }}"
-    )
+    return extension_detail_table_frame_style(tone=tone)
 
 
 def _detail_name_style(tone: str = "") -> str:
-    p = palette()
-    color = "#f87171" if tone == "danger" else p["TEXT"]
-    return f"color:{color}; font-weight:600;"
+    return extension_detail_name_style(tone=tone)
 
 
 def _detail_value_style(tone: str = "") -> str:
-    p = palette()
-    color = "#fca5a5" if tone == "danger" else p["TEXT_DIM"]
-    return f"color:{color}; font-size:{meta_font_pt()}px;"
+    return extension_detail_value_style(tone=tone)
 
 
 def _status_label_style(tone: str) -> str:
-    p = palette()
-    if tone == "danger":
-        bg, fg, border = "#35191d", "#f87171", "#5f252d"
-    elif tone == "disabled":
-        bg, fg, border = p["BG3"], p["TEXT_DIM"], p["BORDER"]
-    else:
-        bg, fg, border = p["SUCCESS_BG"], p["SUCCESS"], p["SUCCESS_BORDER"]
-    return (
-        f"background-color:{bg}; color:{fg}; border:1px solid {border};"
-        "border-radius:8px; padding-left:8px; padding-right:8px;"
-        f"font-size:{meta_font_pt()}px;"
+    return status_pill_style(
+        tone=tone,
+        border_radius=8,
+        padding="2px 8px",
     )
 
 
@@ -876,8 +1079,17 @@ def _status_tone(file: ExtensionFileSummary) -> str:
 
 
 def _enabled_checkbox_style() -> str:
+    return checkbox_style(font_pt=meta_font_pt(), indicator_px=14, spacing_px=6)
+
+
+def _install_scope_combo_style() -> str:
     p = palette()
-    return (
-        f"QCheckBox {{ color:{p['TEXT']}; font-size:{meta_font_pt()}px; }}"
-        "QCheckBox::indicator { width:15px; height:15px; }"
+    fs = meta_font_pt()
+    return compact_combo_box_style(
+        font_pt=fs,
+        padding="5px 28px 5px 8px",
+        border_radius=6,
+        background=p["BG3"],
+        popup_background=p["BG3"],
+        popup_item_padding="5px 8px",
     )

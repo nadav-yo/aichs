@@ -34,8 +34,10 @@ def diff_to_html(unified_diff: str, theme: str | None = None) -> str:
 
     body = "\n".join(rows) if rows else f'<div style="color:{meta};">(no differences)</div>'
     return (
+        f'<div style="background:{p["BG3"]}; color:{p["TEXT"]}; margin:0; padding:0;">'
         f'<pre style="font-family:{MONO_FONT_CSS}; font-size:{fs}px; line-height:1.5;'
         f'margin:0; padding:12px; background:{bg};">{body}</pre>'
+        "</div>"
     )
 
 
@@ -68,8 +70,10 @@ def inline_new_file_diff_to_html(
 
     body = "\n".join(rows) if rows else f'<div style="color:{meta};">(empty file)</div>'
     return (
+        f'<div style="background:{p["BG3"]}; color:{p["TEXT"]}; margin:0; padding:0;">'
         f'<pre style="font-family:{MONO_FONT_CSS}; font-size:{fs}px; line-height:1.5;'
         f'margin:0; padding:12px; background:{bg};">{body}</pre>'
+        "</div>"
     )
 
 

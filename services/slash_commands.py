@@ -18,22 +18,35 @@ class SlashCommand:
 
 
 _ARCHIVIST_PROMPT = DEFAULT_ARCHIVIST_PROMPT
+_EXECUTABLE_BUILTIN_NAMES = {"compact", "reload"}
+_BUILTIN_DESCRIPTIONS = {
+    "compact": "Summarize older messages to free context",
+    "reload": "Reload skills and extensions",
+    "archivist": "Use saved chat memory and exact dropped chat references",
+}
+_ARCHIVIST_TOOLS = ["search_project_chats", "read_project_chat"]
 
 
-def _builtin_commands() -> list[SlashCommand]:
+def _builtin_commands(*, load_settings: bool = True) -> list[SlashCommand]:
+    archivist = _archivist_command(load_settings=load_settings)
     return [
-        SlashCommand("compact", "Summarize older messages to free context", executable=True),
-        SlashCommand("reload", "Reload skills and extensions", executable=True),
-        SlashCommand(
-            "archivist",
-            "Use saved chat memory and exact dropped chat references",
-            prompt=archivist_prompt(SettingsStore().load()),
-            tools=["search_project_chats", "read_project_chat"],
-        ),
+        SlashCommand("compact", _BUILTIN_DESCRIPTIONS["compact"], executable=True),
+        SlashCommand("reload", _BUILTIN_DESCRIPTIONS["reload"], executable=True),
+        archivist,
     ]
 
 
-BUILTIN_COMMANDS: list[SlashCommand] = _builtin_commands()
+def _archivist_command(*, load_settings: bool = True) -> SlashCommand:
+    prompt = archivist_prompt(SettingsStore().load()) if load_settings else _ARCHIVIST_PROMPT
+    return SlashCommand(
+        "archivist",
+        _BUILTIN_DESCRIPTIONS["archivist"],
+        prompt=prompt,
+        tools=list(_ARCHIVIST_TOOLS),
+    )
+
+
+BUILTIN_COMMANDS: list[SlashCommand] = _builtin_commands(load_settings=False)
 
 
 def parse_builtin_command(text: str) -> str | None:
@@ -43,10 +56,7 @@ def parse_builtin_command(text: str) -> str | None:
     name = t[1:].split()[0] if len(t) > 1 else ""
     if not name:
         return None
-    for cmd in _builtin_commands():
-        if cmd.name == name and cmd.executable:
-            return cmd.name
-    return None
+    return name if name in _EXECUTABLE_BUILTIN_NAMES else None
 
 
 def parse_builtin_prompt_command(text: str) -> SlashCommand | None:
@@ -56,9 +66,8 @@ def parse_builtin_prompt_command(text: str) -> SlashCommand | None:
     name = t[1:].split()[0] if len(t) > 1 else ""
     if not name:
         return None
-    for cmd in _builtin_commands():
-        if cmd.name == name and not cmd.executable:
-            return cmd
+    if name.casefold() == "archivist":
+        return _archivist_command(load_settings=True)
     return None
 
 

@@ -8,8 +8,11 @@ import shlex
 from dataclasses import dataclass
 
 from config import MAX_FILE_PREVIEW_BYTES
+from services.git_snapshot import GitSnapshot
 from services.git_status import GitFileChange, is_git_repo, list_file_changes, run_git
 from services.subprocess_utils import run_no_window
+
+_CHANGE_UNSET = object()
 
 
 @dataclass(frozen=True)
@@ -36,16 +39,31 @@ def _run_git(cmd: list[str], cwd: str) -> tuple[int, str]:
         return 1, ""
 
 
-def change_for_file(repo_path: str, abs_path: str) -> GitFileChange | None:
+def change_for_file(
+    repo_path: str,
+    abs_path: str,
+    *,
+    git_snapshot: GitSnapshot | None = None,
+) -> GitFileChange | None:
     target = os.path.normpath(os.path.abspath(abs_path))
-    for ch in list_file_changes(repo_path):
+    changes = git_snapshot.changes if git_snapshot is not None else list_file_changes(repo_path)
+    for ch in changes:
         if os.path.normpath(ch.abs_path) == target:
             return ch
     return None
 
 
-def can_diff_against_head(repo_path: str, abs_path: str) -> bool:
-    return change_for_file(repo_path, abs_path) is not None
+def can_diff_against_head(
+    repo_path: str,
+    abs_path: str,
+    *,
+    git_snapshot: GitSnapshot | None = None,
+) -> bool:
+    if git_snapshot is not None and not git_snapshot.is_repo:
+        return False
+    if git_snapshot is None:
+        return change_for_file(repo_path, abs_path) is not None
+    return change_for_file(repo_path, abs_path, git_snapshot=git_snapshot) is not None
 
 
 def _read_text(path: str) -> tuple[str, bool]:
@@ -90,15 +108,31 @@ def _unified(old: str, new: str, rel_path: str) -> str:
     return "\n".join(lines)
 
 
-def diff_against_head(repo_path: str, abs_path: str) -> str | None:
+def diff_against_head(
+    repo_path: str,
+    abs_path: str,
+    *,
+    git_snapshot: GitSnapshot | None = None,
+    change: GitFileChange | None | object = _CHANGE_UNSET,
+) -> str | None:
     """
     Unified diff (working tree vs HEAD) for a changed file.
     Returns None if not a git repo, file is clean, or diff is empty.
     """
-    if not is_git_repo(repo_path):
+    if git_snapshot is not None:
+        if not git_snapshot.is_repo:
+            return None
+    elif not is_git_repo(repo_path):
         return None
 
-    ch = change_for_file(repo_path, abs_path)
+    if change is _CHANGE_UNSET:
+        ch = (
+            change_for_file(repo_path, abs_path)
+            if git_snapshot is None
+            else change_for_file(repo_path, abs_path, git_snapshot=git_snapshot)
+        )
+    else:
+        ch = change
     if not ch:
         return None
 

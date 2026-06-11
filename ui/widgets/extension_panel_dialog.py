@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QDialog,
     QFrame,
@@ -14,7 +14,37 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ui.theme import palette, chat_font_pt, meta_font_pt
+from ui.theme import (
+    dialog_shell_style,
+    hint_label_style,
+    meta_font_pt,
+    palette,
+    section_label_style,
+    secondary_button_style,
+    surface_frame_style,
+    title_label_style,
+    transparent_scroll_area_style,
+)
+
+
+class _ExtensionPanelRefreshSignals(QObject):
+    done = pyqtSignal(int, str, object, str)
+
+
+class _ExtensionPanelRefreshWorker(QRunnable):
+    def __init__(self, generation: int, callback: Callable[[], tuple[str, object]]):
+        super().__init__()
+        self.signals = _ExtensionPanelRefreshSignals()
+        self._generation = generation
+        self._callback = callback
+
+    def run(self) -> None:
+        try:
+            title, data = self._callback()
+        except BaseException as exc:
+            self.signals.done.emit(self._generation, "", None, str(exc))
+            return
+        self.signals.done.emit(self._generation, str(title), data, "")
 
 
 class ExtensionPanelDialog(QDialog):
@@ -24,23 +54,22 @@ class ExtensionPanelDialog(QDialog):
         self._on_refresh: Callable[[], tuple[str, object]] | None = None
         self._data = data
         self._warnings: list[str] = []
+        self._refresh_generation = 0
+        self._refresh_active = False
+        self._refresh_pool = QThreadPool(self)
+        self._refresh_pool.setMaxThreadCount(1)
         self.setWindowTitle(title)
         self.resize(560, 520)
 
         p = palette()
-        self.setStyleSheet(
-            f"QDialog {{ background:{p['BG2']}; color:{p['TEXT']}; }}"
-            f"QScrollArea {{ background:{p['BG2']}; border:none; }}"
-        )
+        self.setStyleSheet(dialog_shell_style() + transparent_scroll_area_style())
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(10)
 
         self._heading = QLabel(_panel_title(title, data))
-        self._heading.setStyleSheet(
-            f"font-size:{chat_font_pt() + 2}px; font-weight:600; color:{p['TEXT']};"
-        )
+        self._heading.setStyleSheet(title_label_style(font_weight="600"))
         root.addWidget(self._heading)
 
         scroll = QScrollArea()
@@ -98,10 +127,7 @@ class ExtensionPanelDialog(QDialog):
         p = palette()
         card = QFrame()
         card.setObjectName("extensionPanelItem")
-        card.setStyleSheet(
-            f"QFrame#extensionPanelItem {{ background-color:{p['BG3']};"
-            f"border:1px solid {p['BORDER']}; border-radius:8px; }}"
-        )
+        card.setStyleSheet(surface_frame_style(selector="QFrame#extensionPanelItem"))
         layout = QHBoxLayout(card)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(10)
@@ -134,20 +160,20 @@ class ExtensionPanelDialog(QDialog):
 
         title_label = QLabel(title)
         title_label.setWordWrap(True)
-        title_label.setStyleSheet(f"color:{p['TEXT']}; font-weight:600;")
+        title_label.setStyleSheet(title_label_style(font_weight="600"))
         text_col.addWidget(title_label)
 
         if subtitle:
             sub = QLabel(subtitle)
             sub.setWordWrap(True)
-            sub.setStyleSheet(f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;")
+            sub.setStyleSheet(hint_label_style())
             text_col.addWidget(sub)
 
         if body:
             body_label = QLabel(body)
             body_label.setWordWrap(True)
             body_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            body_label.setStyleSheet(f"color:{p['TEXT']};")
+            body_label.setStyleSheet(title_label_style(font_weight="normal"))
             text_col.addWidget(body_label)
 
         layout.addLayout(text_col, 1)
@@ -188,25 +214,46 @@ class ExtensionPanelDialog(QDialog):
 
     def _run_action(self, action: dict):
         if action.get("type") == "refresh_panel":
-            self._refresh()
+            self.refresh_panel()
             return
         if self._on_action:
             self._on_action(action)
         if action.get("refresh"):
-            self._refresh()
+            self.refresh_panel()
 
     def _refresh(self):
-        if self._on_refresh:
-            title, data = self._on_refresh()
-            self._data = data
-            self._heading.setText(_panel_title(title, data))
+        self.refresh_panel()
+
+    def refresh_panel(self) -> None:
+        if not self._on_refresh:
+            self._rebuild()
+            return
+        self._refresh_generation += 1
+        generation = self._refresh_generation
+        self._refresh_active = True
+        worker = _ExtensionPanelRefreshWorker(generation, self._on_refresh)
+        worker.signals.done.connect(self._on_refresh_done)
+        self._refresh_pool.start(worker)
+
+    def _on_refresh_done(self, generation: int, title: str, data, error: str) -> None:
+        if generation != self._refresh_generation:
+            return
+        self._refresh_active = False
+        if error:
+            self._rebuild(warnings=[f"Panel refresh failed: {error}"])
+            return
+        self._data = data
+        self._heading.setText(_panel_title(title, data))
+        self._rebuild()
+
+    def _rebuild(self, *, warnings: list[str] | None = None) -> None:
         while self._layout.count():
             item = self._layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
             elif item.layout():
                 _delete_layout(item.layout())
-        self._warnings.clear()
+        self._warnings = list(warnings or [])
         self._render(self._data)
         self._render_warnings()
         self._layout.addStretch()
@@ -219,7 +266,7 @@ class ExtensionPanelDialog(QDialog):
         label = QLabel(text)
         label.setWordWrap(True)
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        label.setStyleSheet(f"color:{p['TEXT']};")
+        label.setStyleSheet(title_label_style(font_weight="normal"))
         self._layout.addWidget(label)
 
 
@@ -230,11 +277,7 @@ def _panel_title(default: str, data) -> str:
 
 
 def _heading_style() -> str:
-    p = palette()
-    return (
-        f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;"
-        "font-weight:600;"
-    )
+    return section_label_style()
 
 
 def _normalise_actions(raw, warnings: list[str]) -> list[dict]:
@@ -284,9 +327,9 @@ def _delete_layout(layout):
 
 def _action_button_style() -> str:
     p = palette()
-    return (
-        f"QPushButton {{ background-color:{p['BG2']}; color:{p['TEXT']};"
-        f"border:1px solid {p['BORDER']}; border-radius:7px;"
-        f"padding:4px 10px; font-size:{meta_font_pt()}px; min-width:52px; }}"
-        f"QPushButton:hover {{ background-color:{p['BORDER']}; }}"
+    return secondary_button_style(
+        background=p["BG2"],
+        border_radius=7,
+        padding="4px 10px",
+        font_size=meta_font_pt(),
     )

@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import QFileDialog, QWidget
 
 from services.content import content_text, is_visible_message
 from services.crew import crew_name_from_metadata
+from services.performance import time_operation
 from services.usage import usage_summary
 
 
@@ -17,42 +18,47 @@ def default_export_name(data: dict) -> str:
 
 
 def conversation_to_markdown(data: dict) -> str:
-    title = data.get("title", "Untitled")
-    lines = [f"# {title}", ""]
+    messages = data.get("messages", [])
+    with time_operation(
+        "conversation.export.render",
+        detail=f"messages={len(messages) if isinstance(messages, list) else 0}",
+    ):
+        title = data.get("title", "Untitled")
+        lines = [f"# {title}", ""]
 
-    meta: list[str] = []
-    if model := data.get("model"):
-        meta.append(f"**Model:** {model}")
-    if created := data.get("created_at"):
-        meta.append(f"**Created:** {_fmt_ts(created)}")
-    if updated := data.get("updated_at"):
-        meta.append(f"**Updated:** {_fmt_ts(updated)}")
-    if meta:
-        lines.extend(meta)
-        lines.append("")
+        meta: list[str] = []
+        if model := data.get("model"):
+            meta.append(f"**Model:** {model}")
+        if created := data.get("created_at"):
+            meta.append(f"**Created:** {_fmt_ts(created)}")
+        if updated := data.get("updated_at"):
+            meta.append(f"**Updated:** {_fmt_ts(updated)}")
+        if meta:
+            lines.extend(meta)
+            lines.append("")
 
-    lines.extend(["---", ""])
+        lines.extend(["---", ""])
 
-    for msg in data.get("messages", []):
-        if not is_visible_message(msg):
-            continue
-        role = msg.get("role")
-        content = msg.get("content", "")
-        ts = msg.get("created_at", "")
-
-        if role == "user":
-            if _skip_user_message(content):
+        for msg in messages if isinstance(messages, list) else []:
+            if not is_visible_message(msg):
                 continue
-            lines.extend(_user_blocks(content, ts))
-        elif role == "assistant":
-            lines.extend(_assistant_blocks(
-                content,
-                ts,
-                crew_name_from_metadata(msg.get("crew")),
-                msg.get("usage"),
-            ))
+            role = msg.get("role")
+            content = msg.get("content", "")
+            ts = msg.get("created_at", "")
 
-    return "\n".join(lines).rstrip() + "\n"
+            if role == "user":
+                if _skip_user_message(content):
+                    continue
+                lines.extend(_user_blocks(content, ts))
+            elif role == "assistant":
+                lines.extend(_assistant_blocks(
+                    content,
+                    ts,
+                    crew_name_from_metadata(msg.get("crew")),
+                    msg.get("usage"),
+                ))
+
+        return "\n".join(lines).rstrip() + "\n"
 
 
 def export_conversation_dialog(data: dict, parent: QWidget | None = None) -> bool:
@@ -62,15 +68,33 @@ def export_conversation_dialog(data: dict, parent: QWidget | None = None) -> boo
     )
     if not path:
         return False
-    if not path.lower().endswith(".md"):
-        path += ".md"
-    Path(path).write_text(conversation_to_markdown(data), encoding="utf-8")
+    write_conversation_markdown(data, path)
     return True
 
 
 def export_conversation_file(conv_path: str, parent: QWidget | None = None) -> bool:
     data = json.loads(Path(conv_path).read_text(encoding="utf-8"))
     return export_conversation_dialog(data, parent)
+
+
+def export_conversation_file_to_path(conv_path: str, out_path: str) -> Path:
+    with time_operation("conversation.export.file", detail=f"path={conv_path}"):
+        data = json.loads(Path(conv_path).read_text(encoding="utf-8"))
+        return write_conversation_markdown(data, out_path)
+
+
+def write_conversation_markdown(data: dict, out_path: str) -> Path:
+    path = normalized_export_path(out_path)
+    with time_operation("conversation.export.write", detail=f"path={path}"):
+        path.write_text(conversation_to_markdown(data), encoding="utf-8")
+        return path
+
+
+def normalized_export_path(path: str) -> Path:
+    out = Path(path)
+    if out.suffix.lower() != ".md":
+        out = out.with_suffix(".md")
+    return out
 
 
 def _fmt_ts(iso: str) -> str:

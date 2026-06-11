@@ -25,7 +25,8 @@ from services.crew_context import crew_context_window
 from services.compaction import compact_with_result, compaction_threshold
 from services.model_registry import context_window_tokens, get_model_config, resolve_api_key
 from services.model_requests import apply_generation_params
-from services.content import content_preview, prepare_for_anthropic, prepare_for_openai
+from services.content import build_user_content, content_preview, prepare_for_anthropic, prepare_for_openai
+from services.file_refs import files_for_refs
 from services.tool_policy import ConversationToolPolicy, ToolApprovalBus, resolve_path
 from services.shell_tool import is_shell_tool
 from services.tools import (
@@ -63,20 +64,23 @@ class ChatThread(QThread):
     done        = pyqtSignal(str)
     error       = pyqtSignal(str)
 
-    def __init__(self, model: str, history: list, system: str, cwd: str,
+    def __init__(self, model: str, history: list, system, cwd: str,
                  allowed_tools: list[str] | None = None,
                  tool_policy: ConversationToolPolicy | None = None,
                  approval_bus: ToolApprovalBus | None = None,
                  write_roots: list[str] | tuple[str, ...] | None = None,
                  enable_crew_tool: bool = True,
                  crew_settings: dict | None = None,
-                 configured_providers: set[str] | None = None):
+                 configured_providers: set[str] | None = None,
+                 deferred_file_refs: list[str] | tuple[str, ...] | None = None,
+                 deferred_file_target: int | None = None):
         super().__init__()
         self.model          = model
         self._model_cfg     = get_model_config(model)
         self.provider       = self._model_cfg.api   # "anthropic" | "openai-compatible"
         self.history        = list(history)
-        self.system         = system
+        self._system_factory = system if callable(system) else None
+        self.system         = "" if callable(system) else system
         self.cwd            = cwd
         self._cancel        = threading.Event()
         self._allowed_tools = allowed_tools
@@ -86,6 +90,8 @@ class ChatThread(QThread):
         self._enable_crew_tool = enable_crew_tool
         self._crew_settings = dict(crew_settings or {})
         self._configured_providers = set(configured_providers or set())
+        self._deferred_file_refs = list(deferred_file_refs or [])
+        self._deferred_file_target = deferred_file_target
         self._chunk_buffer: list[str] = []
         self._last_chunk_emit = 0.0
         self.last_usage: dict = {}
@@ -95,6 +101,26 @@ class ChatThread(QThread):
         self._cancel.set()
         if self._approval_bus:
             self._approval_bus.cancel_wait()
+
+    def _resolve_system(self) -> str:
+        if self._system_factory is not None:
+            self.system = str(self._system_factory())
+            self._system_factory = None
+        return self.system
+
+    def _resolve_deferred_file_refs(self) -> None:
+        if not self._deferred_file_refs:
+            return
+        target = self._deferred_file_target
+        if target is None or target < 0 or target >= len(self.history):
+            self._deferred_file_refs = []
+            return
+        files = files_for_refs(self.cwd, self._deferred_file_refs)
+        self._deferred_file_refs = []
+        if not files:
+            return
+        msg = self.history[target]
+        msg["content"] = _content_with_file_blocks(msg.get("content", ""), files)
 
     def _tools_anthropic(self) -> list:
         tools = tools_anthropic(self.cwd)
@@ -123,6 +149,8 @@ class ChatThread(QThread):
 
     def run(self):
         try:
+            self._resolve_system()
+            self._resolve_deferred_file_refs()
             start_ctx = HookContext(
                 event="turn_start",
                 cwd=self.cwd,
@@ -754,6 +782,17 @@ def _serialize_anthropic(content) -> list:
             out.append({"type": "tool_use", "id": block.id,
                         "name": block.name, "input": dict(block.input)})
     return out
+
+
+def _content_with_file_blocks(content, files: list[dict]):
+    file_blocks = build_user_content("", [], files)
+    if not file_blocks:
+        return content
+    if isinstance(content, list):
+        return list(content) + list(file_blocks)
+    if content:
+        return build_user_content(str(content), [], files)
+    return file_blocks
 
 
 def _estimate_model_request_tokens(provider: str, system: str, history: list[dict], tools: list) -> int:

@@ -52,8 +52,9 @@ By default, `aichs` honors the directory it was started from. Use
 workspace.
 
 Conversation history is stored in user data, not in your repository. Each
-workspace gets a stable entry in `~/.aichs/workspaces.json` and its chats are
-saved under `~/.aichs/<workspace_id>/conversations/`.
+workspace gets a stable entry in `AICHS_HOME/workspaces.json` (default
+`~/.aichs/workspaces.json`) and its chats are saved under
+`AICHS_HOME/<workspace_id>/conversations/`.
 
 API keys can be configured in **Settings -> Models** or through environment
 variables. Requires Python 3.11+.
@@ -86,6 +87,7 @@ Contributor setup, source installs, tests, packaging, and release notes live in
 | Extensions and custom tools | [docs/extensions.md](docs/extensions.md) |
 | Slash-command skills | [docs/skills.md](docs/skills.md) |
 | Compaction and decision memory | [docs/compact.md](docs/compact.md) |
+| Performance north star | [docs/performance-north-star.md](docs/performance-north-star.md) |
 | YUK user kits | [docs/yuk.md](docs/yuk.md) |
 
 ## FAQ

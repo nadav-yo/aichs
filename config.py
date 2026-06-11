@@ -1,6 +1,17 @@
+import os
 from pathlib import Path
 
-AICHS_HOME      = Path.home() / ".aichs"
+AICHS_HOME_ENV  = "AICHS_HOME"
+
+
+def resolve_aichs_home() -> Path:
+    override = os.environ.get(AICHS_HOME_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".aichs"
+
+
+AICHS_HOME      = resolve_aichs_home()
 CONV_DIR        = AICHS_HOME / "conversations"
 SETTINGS_PATH   = AICHS_HOME / "settings.json"
 AVATARS_DIR     = AICHS_HOME / "avatars"

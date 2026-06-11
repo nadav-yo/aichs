@@ -4,13 +4,12 @@ import re
 from datetime import datetime, date
 from pathlib import PurePath
 
-import markdown as _md
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout, QVBoxLayout, QLabel, QSizePolicy, QMenu, QTextEdit,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize, QEvent
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize, QEvent, QObject, QRunnable, QThreadPool
 from PyQt6.QtCore import QMimeData
-from PyQt6.QtGui import QPixmap, QAction, QGuiApplication
+from PyQt6.QtGui import QPixmap, QAction, QGuiApplication, QTextCursor
 
 from services.content import content_text, image_blocks
 from services.crew import crew_name_from_metadata
@@ -19,8 +18,10 @@ from services.file_ref_clipboard import (
     file_ref_spans,
     file_refs_payload,
 )
+from services.performance import time_operation
 from services.usage import usage_summary
 from ui.avatars import AVATAR_SIZE, avatar_label, avatar_pixmap
+from ui.markdown_html import code_from_copy_url, markdown_body
 from ui.theme import (
     palette, chat_font_pt, bubble_label_style, composer_style, edit_bubble_style,
     markdown_css, markdown_file_link_style, timestamp_style, crew_name_style, crew_tone,
@@ -28,6 +29,8 @@ from ui.theme import (
 )
 
 _CODE_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
+_STREAM_RENDER_INTERVAL_MS = 50
+_ASYNC_MARKDOWN_RENDER_CHARS = 16_000
 _FILE_RE = re.compile(
     r"(?P<path>[\w./\\-]+\.(?:py|md|json|yaml|yml|toml|sh|js|ts|tsx|jsx|css|html|txt|rs|go|java|c|cpp|h|hpp|cs|php|rb|swift|kt|sql|xml))",
     re.IGNORECASE,
@@ -76,7 +79,7 @@ def _update_ignored_html_stack(tag: str, ignored: list[str]) -> None:
     if not match:
         return
     name = match.group(1).lower()
-    if name not in {"a", "style"}:
+    if name not in {"a", "style", "pre", "code"}:
         return
     is_close = tag.startswith("</")
     is_self_closing = tag.rstrip().endswith("/>")
@@ -107,8 +110,25 @@ def _linkify_path_text(text: str) -> str:
 
 
 def _to_html(text: str) -> str:
-    body = _md.markdown(text, extensions=["fenced_code", "nl2br", "tables"])
+    body = markdown_body(text, extensions=["fenced_code", "nl2br", "tables"])
     return f"<style>{markdown_css()}</style>{_linkify_paths(body)}"
+
+
+class _MarkdownRenderSignals(QObject):
+    done = pyqtSignal(int, str, str)
+
+
+class _MarkdownRenderWorker(QRunnable):
+    def __init__(self, generation: int, source: str):
+        super().__init__()
+        self.signals = _MarkdownRenderSignals()
+        self._generation = generation
+        self._source = source
+
+    def run(self):
+        with time_operation("markdown.render", detail=f"chars={len(self._source)}"):
+            html_text = _to_html(self._source)
+        self.signals.done.emit(self._generation, self._source, html_text)
 
 
 _MENTION_RE = re.compile(r'@(?:"([^"]+)"|([^\s@]*[^\s@.,:;!?)\]}]))')
@@ -267,6 +287,40 @@ class _EditInput(QTextEdit):
         super().keyPressEvent(event)
 
 
+class _StreamTextView(QTextEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self.setAcceptRichText(False)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self.document().documentLayout().documentSizeChanged.connect(self._fit_height)
+        self._fit_height()
+
+    def append_text(self, text: str):
+        if not text:
+            return
+        cursor = QTextCursor(self.document())
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(text)
+        self.setTextCursor(cursor)
+        self._fit_height()
+
+    def clear_text(self):
+        self.clear()
+        self._fit_height()
+
+    def _fit_height(self):
+        margins = self.contentsMargins()
+        height = int(self.document().size().height()) + margins.top() + margins.bottom() + 4
+        self.setFixedHeight(max(24, height))
+        self.updateGeometry()
+
+
 class MessageBubble(QFrame):
     _DOTS = ["●", "● ●", "● ● ●"]
 
@@ -294,6 +348,15 @@ class MessageBubble(QFrame):
         self._usage_lbl = None
         self._speaker_lbl = None
         self._md_source: str | None = None
+        self._md_html: str | None = None
+        self._markdown_render_generation = 0
+        self._markdown_render_pool = QThreadPool.globalInstance()
+        self._stream_render_pending = False
+        self._stream_render_chunks: list[str] = []
+        self._stream_render_timer = QTimer(self)
+        self._stream_render_timer.setSingleShot(True)
+        self._stream_render_timer.setInterval(_STREAM_RENDER_INTERVAL_MS)
+        self._stream_render_timer.timeout.connect(self._flush_stream_text)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
 
         if timestamp:
@@ -335,6 +398,17 @@ class MessageBubble(QFrame):
         if is_user and not typing:
             self.label.mouseDoubleClickEvent = lambda e: self._start_edit()
 
+        self._stream_view = None if is_user else _StreamTextView()
+        if self._stream_view is not None:
+            self._stream_view.setMaximumWidth(880)
+            self._stream_view.setMinimumWidth(520)
+            self._stream_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            self._stream_view.customContextMenuRequested.connect(
+                lambda pos, widget=self._stream_view: self._context_menu(pos, widget)
+            )
+            self._stream_view.installEventFilter(self)
+            self._stream_view.hide()
+
         self.edit_input = _EditInput(text)
         self.edit_input.hide()
         self.edit_input.submitted.connect(self._commit_edit)
@@ -362,7 +436,11 @@ class MessageBubble(QFrame):
             self.label.setStyleSheet(
                 bubble_label_style(False, crew_id=self._crew_id, crew_color=self._crew_color)
             )
+            self._stream_view.setStyleSheet(
+                bubble_label_style(False, crew_id=self._crew_id, crew_color=self._crew_color)
+            )
             self.body.addWidget(self.label, 0, Qt.AlignmentFlag.AlignLeft)
+            self.body.addWidget(self._stream_view, 0, Qt.AlignmentFlag.AlignLeft)
             self.body.addWidget(self.edit_input, 0, Qt.AlignmentFlag.AlignLeft)
 
         if timestamp:
@@ -452,6 +530,9 @@ class MessageBubble(QFrame):
         self._typing = True
         self._dot_step = 0
         self.label.setText(self._DOTS[0])
+        stream_view = getattr(self, "_stream_view", None)
+        if stream_view is not None:
+            stream_view.hide()
         self._timer.start(350)
 
     def _tick(self):
@@ -465,7 +546,40 @@ class MessageBubble(QFrame):
             self.label.setText("")
         self.label.setTextFormat(Qt.TextFormat.PlainText)
         self._copy_text += text
-        self.label.setText(self._copy_text)
+        if not hasattr(self, "_stream_render_chunks"):
+            self._stream_render_chunks = []
+        self._stream_render_chunks.append(text)
+        if self._stream_render_timer.isActive():
+            self._stream_render_pending = True
+            return
+        self._stream_render_pending = False
+        self._render_stream_text()
+        self._stream_render_timer.start()
+
+    def _flush_stream_text(self):
+        if not self._stream_render_pending:
+            return
+        self._stream_render_pending = False
+        self._render_stream_text()
+
+    def _render_stream_text(self):
+        chunks = getattr(self, "_stream_render_chunks", None)
+        if chunks is None:
+            self.label.setText(self._copy_text)
+            return
+        text = "".join(chunks)
+        chunks.clear()
+        if not text:
+            return
+        stream_view = getattr(self, "_stream_view", None)
+        if stream_view is None:
+            self.label.setText(self._copy_text)
+            return
+        if hasattr(self.label, "hide"):
+            self.label.hide()
+        if hasattr(stream_view, "show"):
+            stream_view.show()
+        stream_view.append_text(text)
 
     def is_empty_typing(self) -> bool:
         return self._typing and not self._copy_text
@@ -474,6 +588,14 @@ class MessageBubble(QFrame):
         """Render assistant markdown, including fenced code, inside the bubble."""
         if self._is_user:
             return
+        self._stream_render_timer.stop()
+        self._stream_render_pending = False
+        if hasattr(self, "_stream_render_chunks"):
+            self._stream_render_chunks.clear()
+        stream_view = getattr(self, "_stream_view", None)
+        if stream_view is not None:
+            stream_view.clear_text()
+            stream_view.hide()
         source = full_text.strip()
         rendered = source
         artifacts: list[dict] = []
@@ -484,14 +606,38 @@ class MessageBubble(QFrame):
         self._md_source = rendered or None
 
         if rendered:
-            self.label.setTextFormat(Qt.TextFormat.RichText)
-            self.label.setText(_to_html(rendered))
+            self.label.show()
+            MessageBubble._render_final_markdown(self, rendered)
         else:
             self.label.hide()
 
         if on_artifact:
             for artifact in artifacts:
                 on_artifact(artifact)
+
+    def _render_final_markdown(self, source: str):
+        if len(source) < _ASYNC_MARKDOWN_RENDER_CHARS:
+            MessageBubble._apply_markdown_html(self, source, _to_html(source))
+            return
+        self._markdown_render_generation += 1
+        generation = self._markdown_render_generation
+        self._md_html = None
+        self.label.setTextFormat(Qt.TextFormat.PlainText)
+        self.label.setText(source)
+        worker = _MarkdownRenderWorker(generation, source)
+        worker.signals.done.connect(self._on_markdown_render_done)
+        self._markdown_render_pool.start(worker)
+
+    def _on_markdown_render_done(self, generation: int, source: str, html_text: str):
+        if generation != self._markdown_render_generation or source != self._md_source:
+            return
+        MessageBubble._apply_markdown_html(self, source, html_text)
+
+    def _apply_markdown_html(self, source: str, html_text: str):
+        self._md_source = source
+        self._md_html = html_text
+        self.label.setTextFormat(Qt.TextFormat.RichText)
+        self.label.setText(html_text)
 
     def apply_appearance(self):
         fs = chat_font_pt()
@@ -512,15 +658,23 @@ class MessageBubble(QFrame):
         self.label.setStyleSheet(
             bubble_label_style(False, fs, self._crew_id, self._crew_color)
         )
-        if self._md_source:
+        if self._stream_view is not None:
+            self._stream_view.setStyleSheet(
+                bubble_label_style(False, fs, self._crew_id, self._crew_color)
+            )
+        if self._md_html:
             self.label.setTextFormat(Qt.TextFormat.RichText)
-            self.label.setText(_to_html(self._md_source))
+            self.label.setText(self._md_html)
 
     def _on_link(self, href: str):
+        code = code_from_copy_url(href)
+        if code is not None:
+            QGuiApplication.clipboard().setText(code)
+            return
         if href.startswith("aichs-file:"):
             self.file_clicked.emit(href[len("aichs-file:"):])
 
-    def _context_menu(self, pos):
+    def _context_menu(self, pos, widget=None):
         menu = QMenu(self)
         if self._copy_text:
             copy = QAction("Copy", self)
@@ -543,7 +697,8 @@ class MessageBubble(QFrame):
             )
             menu.addAction(branch)
         if menu.actions():
-            menu.exec(self.label.mapToGlobal(pos))
+            origin = widget or self.label
+            menu.exec(origin.mapToGlobal(pos))
 
     def _copy_to_clipboard(self):
         QGuiApplication.clipboard().setMimeData(self._copy_mime())
@@ -556,7 +711,8 @@ class MessageBubble(QFrame):
         return mime
 
     def eventFilter(self, obj, event):
-        if obj is self.label and event.type() == QEvent.Type.KeyPress:
+        stream_view = getattr(self, "_stream_view", None)
+        if obj in (self.label, stream_view) and event.type() == QEvent.Type.KeyPress:
             copy_mods = (
                 Qt.KeyboardModifier.ControlModifier |
                 Qt.KeyboardModifier.MetaModifier
@@ -568,6 +724,11 @@ class MessageBubble(QFrame):
         return super().eventFilter(obj, event)
 
     def _selected_or_copy_text(self) -> str:
+        stream_view = getattr(self, "_stream_view", None)
+        if stream_view is not None and stream_view.isVisible():
+            cursor = stream_view.textCursor()
+            if cursor.hasSelection():
+                return cursor.selectedText().replace("\u2029", "\n")
         try:
             if self.label.hasSelectedText():
                 return self.label.selectedText().replace("\u2029", "\n")

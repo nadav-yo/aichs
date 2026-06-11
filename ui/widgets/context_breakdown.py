@@ -9,8 +9,11 @@ from ui.theme import (
     meta_font_pt,
     chat_font_pt,
     MONO_FONT_CSS,
-    separator_color,
+    dialog_shell_style,
+    separator_frame_style,
+    hint_label_style,
     primary_button_style,
+    title_label_style,
 )
 
 
@@ -23,33 +26,32 @@ class ContextBreakdownDialog(QDialog):
         p = palette()
         fs = chat_font_pt()
         meta = meta_font_pt()
-        self.setStyleSheet(f"QDialog {{ background:{p['BG2']}; color:{p['TEXT']}; }}")
+        hint = hint_label_style()
+        mono_hint = hint_label_style(font_family=MONO_FONT_CSS)
+        self.setStyleSheet(dialog_shell_style())
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 16)
         root.setSpacing(12)
 
         header = QLabel("Context window")
-        header.setStyleSheet(f"font-size:{fs + 2}px; font-weight:bold; color:{p['TEXT']};")
+        header.setStyleSheet(title_label_style(font_pt=fs + 2, font_weight="bold"))
         root.addWidget(header)
 
         summary = QLabel(
             f"{budget.used_tokens:,} / {budget.window_tokens:,} tokens  "
             f"({budget.pct:.0f}%)  ·  {format_bytes(budget.used_bytes)}"
         )
-        summary.setStyleSheet(f"color:{p['TEXT_DIM']}; font-size:{meta}px;")
+        summary.setStyleSheet(hint)
         root.addWidget(summary)
 
         model_lbl = QLabel(f"Model: {model}")
-        model_lbl.setStyleSheet(f"color:{p['TEXT_DIM']}; font-size:{meta}px;")
+        model_lbl.setStyleSheet(hint)
         root.addWidget(model_lbl)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep_color = separator_color()
-        sep.setStyleSheet(
-            f"background:{sep_color}; color:{sep_color}; border:none; max-height:1px;"
-        )
+        sep.setStyleSheet(separator_frame_style())
         root.addWidget(sep)
 
         cols = QHBoxLayout()
@@ -57,23 +59,21 @@ class ContextBreakdownDialog(QDialog):
         tok_hdr = QLabel("tokens")
         tok_hdr.setFixedWidth(56)
         tok_hdr.setAlignment(Qt.AlignmentFlag.AlignRight)
-        tok_hdr.setStyleSheet(f"color:{p['TEXT_DIM']}; font-size:{meta}px;")
+        tok_hdr.setStyleSheet(hint)
         size_hdr = QLabel("size")
         size_hdr.setFixedWidth(64)
         size_hdr.setAlignment(Qt.AlignmentFlag.AlignRight)
-        size_hdr.setStyleSheet(f"color:{p['TEXT_DIM']}; font-size:{meta}px;")
+        size_hdr.setStyleSheet(hint)
         cols.addWidget(tok_hdr)
         cols.addWidget(size_hdr)
         root.addLayout(cols)
 
         for seg in budget.segments:
-            root.addWidget(self._row(seg.label, seg.byte_count, seg.token_count, seg.detail, p, fs, meta))
+            root.addWidget(self._row(seg.label, seg.byte_count, seg.token_count, seg.detail, p, fs, hint, mono_hint))
 
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet(
-            f"background:{sep_color}; color:{sep_color}; border:none; max-height:1px;"
-        )
+        sep2.setStyleSheet(separator_frame_style())
         root.addWidget(sep2)
 
         footer = QLabel(
@@ -81,7 +81,7 @@ class ContextBreakdownDialog(QDialog):
             f"({budget.reserve_tokens:,} reserved for the next response)."
         )
         footer.setWordWrap(True)
-        footer.setStyleSheet(f"color:{p['TEXT_DIM']}; font-size:{meta}px;")
+        footer.setStyleSheet(hint)
         root.addWidget(footer)
 
         btn_row = QHBoxLayout()
@@ -93,30 +93,28 @@ class ContextBreakdownDialog(QDialog):
         root.addLayout(btn_row)
 
     @staticmethod
-    def _row(label: str, nbytes: int, tokens: int, detail: str, p: dict, fs: int, meta: int) -> QWidget:
+    def _row(label: str, nbytes: int, tokens: int, detail: str, p: dict, fs: int, hint: str, mono_hint: str) -> QWidget:
         row = QHBoxLayout()
         row.setContentsMargins(0, 4, 0, 4)
 
         left = QVBoxLayout()
         left.setSpacing(2)
         title = QLabel(label)
-        title.setStyleSheet(f"color:{p['TEXT']}; font-size:{fs}px;")
+        title.setStyleSheet(title_label_style(font_pt=fs, font_weight="normal"))
         left.addWidget(title)
         if detail:
             sub = QLabel(detail)
-            sub.setStyleSheet(f"color:{p['TEXT_DIM']}; font-size:{meta}px;")
+            sub.setStyleSheet(hint)
             left.addWidget(sub)
 
         size = QLabel(format_bytes(nbytes))
         size.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        size.setStyleSheet(f"color:{p['TEXT']}; font-size:{fs}px; font-family:{MONO_FONT_CSS};")
+        size.setStyleSheet(hint_label_style(text_color=p["TEXT"], font_family=MONO_FONT_CSS))
 
         tokens_lbl = QLabel(f"{tokens:,}")
         tokens_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         tokens_lbl.setFixedWidth(56)
-        tokens_lbl.setStyleSheet(
-            f"color:{p['TEXT_DIM']}; font-size:{meta}px; font-family:{MONO_FONT_CSS};"
-        )
+        tokens_lbl.setStyleSheet(mono_hint)
 
         wrap = QWidget()
         outer = QHBoxLayout(wrap)

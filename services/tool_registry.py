@@ -6,12 +6,14 @@ import hashlib
 import json
 import shutil
 import sys
+import threading
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal
 
 import config
+from services.performance import time_operation
 
 
 ToolExecute = Callable[["ToolContext", dict], str]
@@ -134,7 +136,7 @@ class ExtensionStorage:
 
     def _config_path(self, scope: str) -> Path:
         if scope == "global":
-            return Path.home() / ".aichs" / "extensions" / f"{self.extension_id}.json"
+            return config.AICHS_HOME / "extensions" / f"{self.extension_id}.json"
         if scope != "project":
             raise ValueError("scope must be 'project' or 'global'")
         return Path(self.cwd) / ".aichs" / "extensions" / f"{self.extension_id}.json"
@@ -314,6 +316,37 @@ class ExtensionOverview:
     @property
     def error_count(self) -> int:
         return sum(len(file.errors) for file in self.files)
+
+
+@dataclass(frozen=True)
+class _RegistrySnapshot:
+    tools: tuple[ToolDefinition, ...]
+    commands: tuple[ExtensionCommand, ...]
+    context_providers: tuple[tuple[str, ContextProvider, str], ...]
+    hooks: tuple[tuple[str, tuple[tuple[HookHandler, str], ...]], ...]
+    badges: tuple[StatusBadge, ...]
+    panels: tuple[ExtensionPanel, ...]
+    languages: tuple[LanguageContribution, ...]
+    errors: tuple[str, ...]
+    permission_violations: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _RegistryCacheEntry:
+    signature: tuple
+    snapshot: _RegistrySnapshot
+
+
+@dataclass(frozen=True)
+class _OverviewCacheEntry:
+    signature: tuple
+    overview: ExtensionOverview
+
+
+_EXTENSION_CACHE_LOCK = threading.RLock()
+_REGISTRY_CACHE: dict[tuple[str, str, str], _RegistryCacheEntry] = {}
+_OVERVIEW_CACHE: dict[tuple[str, str, str], _OverviewCacheEntry] = {}
+_EXTENSION_CACHE_EPOCHS: dict[tuple[str, str, str], int] = {}
 
 
 @dataclass(frozen=True)
@@ -584,7 +617,11 @@ class ToolRegistry:
                 extension_id=extension_id,
             )
             try:
-                text = provider(scoped_ctx)
+                with time_operation(
+                    "extension.context",
+                    detail=f"extension={extension_id} name={name}",
+                ):
+                    text = provider(scoped_ctx)
             except Exception:
                 self.errors.append(f"context {name}:\n{traceback.format_exc().rstrip()}")
                 continue
@@ -597,7 +634,11 @@ class ToolRegistry:
         for handler, extension_id in self._hooks.get(event, []):
             ctx.extension_id = extension_id
             try:
-                _collect_directives(ctx, handler(ctx))
+                with time_operation(
+                    "extension.hook",
+                    detail=f"extension={extension_id} event={event}",
+                ):
+                    _collect_directives(ctx, handler(ctx))
             except Exception:
                 self.errors.append(f"hook {event}:\n{traceback.format_exc().rstrip()}")
             finally:
@@ -607,7 +648,11 @@ class ToolRegistry:
         badges: list[tuple[StatusBadge, object]] = []
         for badge in self._badges.values():
             try:
-                data = badge.provider(ctx)
+                with time_operation(
+                    "extension.status_badge",
+                    detail=f"name={badge.name}",
+                ):
+                    data = badge.provider(ctx)
             except Exception:
                 self.errors.append(f"status badge {badge.name}:\n{traceback.format_exc().rstrip()}")
                 continue
@@ -638,10 +683,7 @@ class ToolRegistry:
         return False
 
 def load_extensions(registry: ToolRegistry, cwd: str | None = None) -> None:
-    for path in _extension_files(cwd):
-        if is_extension_disabled(path, cwd):
-            continue
-        _load_extension_file(registry, path)
+    _apply_registry_snapshot(registry, _cached_registry_snapshot(cwd))
 
 
 def extension_commands(cwd: str | None = None) -> list[ExtensionCommand]:
@@ -684,7 +726,12 @@ def run_extension_command(
         runtime=runtime_api,
     )
     try:
-        return command.execute(ctx, args), list(registry.errors)
+        with time_operation(
+            "extension.command",
+            detail=f"extension={command.extension_id} name={name}",
+        ):
+            result = command.execute(ctx, args)
+        return result, list(registry.errors)
     except Exception:
         registry.errors.append(f"command {name}:\n{traceback.format_exc().rstrip()}")
         return None, list(registry.errors)
@@ -716,8 +763,7 @@ def extension_errors(cwd: str | None = None) -> list[str]:
 
 
 def extension_overview(cwd: str | None = None) -> ExtensionOverview:
-    summaries = [_extension_file_summary(path, cwd) for path in _extension_files(cwd)]
-    return ExtensionOverview(files=summaries)
+    return _cached_extension_overview(cwd)
 
 
 def extension_static_summary(path: str | Path, cwd: str | None = None) -> ExtensionFileSummary:
@@ -737,6 +783,7 @@ def set_extension_enabled(path: str | Path, enabled: bool, cwd: str | None = Non
     else:
         disabled.add(normalized)
     _write_disabled_extension_paths(cwd, sorted(disabled))
+    clear_extension_cache(cwd)
 
 
 def extension_content_hash(path: str | Path) -> str:
@@ -762,29 +809,37 @@ def extension_content_hash(path: str | Path) -> str:
 
 
 def is_extension_reviewed(path: str | Path, cwd: str | None = None) -> bool:
+    return _extension_reviewed(path, cwd, extension_content_hash(path))
+
+
+def is_extension_seen(path: str | Path, cwd: str | None = None) -> bool:
+    return _extension_seen(path, cwd, extension_content_hash(path))
+
+
+def _extension_reviewed(path: str | Path, cwd: str | None, content_hash: str) -> bool:
     normalized = _normalized_extension_path(path)
-    expected = extension_content_hash(path)
     reviewed = _reviewed_extensions(cwd).get(normalized)
     return (
         isinstance(reviewed, dict)
-        and reviewed.get("hash") == expected
+        and reviewed.get("hash") == content_hash
         and bool(reviewed.get("trusted"))
     )
 
 
-def is_extension_seen(path: str | Path, cwd: str | None = None) -> bool:
+def _extension_seen(path: str | Path, cwd: str | None, content_hash: str) -> bool:
     normalized = _normalized_extension_path(path)
-    expected = extension_content_hash(path)
     reviewed = _reviewed_extensions(cwd).get(normalized)
-    return isinstance(reviewed, dict) and reviewed.get("hash") == expected
+    return isinstance(reviewed, dict) and reviewed.get("hash") == content_hash
 
 
 def mark_extension_reviewed(path: str | Path, cwd: str | None = None) -> None:
     _write_extension_review_state(path, cwd, trusted=True)
+    clear_extension_cache(cwd)
 
 
 def mark_extension_seen(path: str | Path, cwd: str | None = None) -> None:
     _write_extension_review_state(path, cwd, trusted=False)
+    clear_extension_cache(cwd)
 
 
 def _write_extension_review_state(path: str | Path, cwd: str | None, *, trusted: bool) -> None:
@@ -847,7 +902,11 @@ def extension_panel_data(
         return name, {"title": name, "body": "Panel not found."}, list(registry.errors)
     ctx = ExtensionContext(cwd=cwd, model=model, history=history or [], processes=_process_api(cwd))
     try:
-        data = panel.provider(ctx)
+        with time_operation(
+            "extension.panel",
+            detail=f"name={name}",
+        ):
+            data = panel.provider(ctx)
     except Exception:
         registry.errors.append(f"panel {name}:\n{traceback.format_exc().rstrip()}")
         data = {"title": panel.title, "body": "Panel failed to load."}
@@ -860,8 +919,182 @@ def extension_languages(cwd: str | None = None) -> tuple[list[LanguageContributi
     return registry.languages(), list(registry.errors)
 
 
+def clear_extension_cache(cwd: str | None = None) -> None:
+    scope = _extension_cache_scope(cwd)
+    with _EXTENSION_CACHE_LOCK:
+        _REGISTRY_CACHE.pop(scope, None)
+        _OVERVIEW_CACHE.pop(scope, None)
+        _EXTENSION_CACHE_EPOCHS[scope] = _EXTENSION_CACHE_EPOCHS.get(scope, 0) + 1
+
+
+def clear_all_extension_caches() -> None:
+    with _EXTENSION_CACHE_LOCK:
+        _REGISTRY_CACHE.clear()
+        _OVERVIEW_CACHE.clear()
+        _EXTENSION_CACHE_EPOCHS.clear()
+
+
+def extension_cache_signature(cwd: str | None = None) -> tuple:
+    scope = _extension_cache_scope(cwd)
+    signature = _extension_cache_signature(cwd)
+    with _EXTENSION_CACHE_LOCK:
+        epoch = _EXTENSION_CACHE_EPOCHS.get(scope, 0)
+    return (epoch, signature)
+
+
+def _cached_registry_snapshot(cwd: str | None) -> _RegistrySnapshot:
+    scope = _extension_cache_scope(cwd)
+    extension_files = _extension_files(cwd)
+    signature = _extension_cache_signature_for_files(cwd, extension_files)
+    with _EXTENSION_CACHE_LOCK:
+        entry = _REGISTRY_CACHE.get(scope)
+        if entry is not None and entry.signature == signature:
+            return entry.snapshot
+
+    registry = ToolRegistry()
+    with time_operation("extension.load", detail=f"cwd={cwd or ''}"):
+        _load_extensions_uncached(registry, cwd, extension_files=extension_files)
+    snapshot = _registry_snapshot(registry)
+
+    with _EXTENSION_CACHE_LOCK:
+        _REGISTRY_CACHE[scope] = _RegistryCacheEntry(signature=signature, snapshot=snapshot)
+    return snapshot
+
+
+def _cached_extension_overview(cwd: str | None) -> ExtensionOverview:
+    scope = _extension_cache_scope(cwd)
+    extension_files = _extension_files(cwd)
+    signature = _extension_cache_signature_for_files(cwd, extension_files)
+    with _EXTENSION_CACHE_LOCK:
+        entry = _OVERVIEW_CACHE.get(scope)
+        if entry is not None and entry.signature == signature:
+            return ExtensionOverview(files=list(entry.overview.files))
+
+    with time_operation("extension.overview", detail=f"cwd={cwd or ''}"):
+        overview = ExtensionOverview(
+            files=[_extension_file_summary(path, cwd) for path in extension_files]
+        )
+
+    with _EXTENSION_CACHE_LOCK:
+        _OVERVIEW_CACHE[scope] = _OverviewCacheEntry(signature=signature, overview=overview)
+    return ExtensionOverview(files=list(overview.files))
+
+
+def _load_extensions_uncached(
+    registry: ToolRegistry,
+    cwd: str | None = None,
+    *,
+    extension_files: list[Path] | None = None,
+) -> None:
+    for path in extension_files if extension_files is not None else _extension_files(cwd):
+        if is_extension_disabled(path, cwd):
+            continue
+        _load_extension_file(registry, path)
+
+
+def _registry_snapshot(registry: ToolRegistry) -> _RegistrySnapshot:
+    return _RegistrySnapshot(
+        tools=tuple(tool for tool in registry.all() if tool.source != "builtin"),
+        commands=tuple(registry.commands()),
+        context_providers=tuple(registry._context_providers),
+        hooks=tuple(
+            (event, tuple(handlers))
+            for event, handlers in sorted(registry._hooks.items())
+        ),
+        badges=tuple(registry._badges.values()),
+        panels=tuple(registry.panels()),
+        languages=tuple(registry.languages()),
+        errors=tuple(registry.errors),
+        permission_violations=tuple(registry.permission_violations),
+    )
+
+
+def _apply_registry_snapshot(registry: ToolRegistry, snapshot: _RegistrySnapshot) -> None:
+    for tool in snapshot.tools:
+        if tool.name in registry._tools:
+            registry.errors.append(f"cached extension tool {tool.name}: tool already registered")
+            continue
+        registry._tools[tool.name] = tool
+    for command in snapshot.commands:
+        if command.name in registry._commands:
+            registry.errors.append(f"cached extension command {command.name}: command already registered")
+            continue
+        registry._commands[command.name] = command
+    registry._context_providers.extend(snapshot.context_providers)
+    for event, handlers in snapshot.hooks:
+        registry._hooks.setdefault(event, []).extend(handlers)
+    for badge in snapshot.badges:
+        if badge.name not in registry._badges:
+            registry._badges[badge.name] = badge
+    for panel in snapshot.panels:
+        if panel.name not in registry._panels:
+            registry._panels[panel.name] = panel
+    for language in snapshot.languages:
+        if language.name not in registry._languages:
+            registry._languages[language.name] = language
+    registry.errors.extend(snapshot.errors)
+    registry.permission_violations.extend(snapshot.permission_violations)
+
+
+def _extension_cache_scope(cwd: str | None) -> tuple[str, str, str]:
+    root = ""
+    if cwd:
+        try:
+            root = str(Path(cwd).resolve())
+        except OSError:
+            root = str(Path(cwd))
+    return (root, str(config.AICHS_HOME))
+
+
+def _extension_cache_signature(cwd: str | None) -> tuple:
+    return _extension_cache_signature_for_files(cwd, _extension_files(cwd))
+
+
+def _extension_cache_signature_for_files(cwd: str | None, extension_files: list[Path]) -> tuple:
+    return (
+        tuple(_extension_file_signature(path) for path in extension_files),
+        _path_signature(_disabled_extensions_path(cwd)),
+        _path_signature(_reviewed_extensions_path(cwd)),
+    )
+
+
+def _extension_file_signature(path: Path) -> tuple:
+    entrypoint = _extension_entrypoint_path(path)
+    try:
+        normalized = str(entrypoint.resolve())
+    except OSError:
+        normalized = str(entrypoint)
+    if entrypoint.name != "extension.py":
+        return (normalized, ((_path_signature(entrypoint)),))
+
+    root = entrypoint.parent
+    files = []
+    try:
+        candidates = sorted(
+            item for item in root.rglob("*")
+            if item.is_file() and not any(part in {".git", "__pycache__"} for part in item.parts)
+        )
+    except OSError:
+        candidates = [entrypoint]
+    for item in candidates:
+        try:
+            rel = item.relative_to(root).as_posix()
+        except ValueError:
+            rel = item.name
+        files.append((rel, _path_signature(item)))
+    return (normalized, tuple(files))
+
+
+def _path_signature(path: Path) -> tuple:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path), -1, -1)
+    return (str(path), stat.st_mtime_ns, stat.st_size)
+
+
 def _extension_files(cwd: str | None) -> list[Path]:
-    roots = [Path.home() / ".aichs" / "extensions"]
+    roots = [config.AICHS_HOME / "extensions"]
     if cwd:
         roots.append(Path(cwd) / ".aichs" / "extensions")
 
@@ -899,7 +1132,7 @@ def _load_extension_file(registry: ToolRegistry, path: Path) -> None:
             _extension_manifest_metadata(path)
         )
         register(registry)
-    except Exception:
+    except BaseException:
         registry.errors.append(f"{path}:\n{traceback.format_exc().rstrip()}")
     finally:
         registry._current_extension_id = previous_extension_id
@@ -921,7 +1154,7 @@ def _extension_file_summary(
     missing_requirements = _missing_extension_requirements(requirements)
     permissions = _extension_manifest_permissions(manifest)
     content_hash = extension_content_hash(path)
-    reviewed = is_extension_reviewed(path, cwd)
+    reviewed = _extension_reviewed(path, cwd, content_hash)
     review_required = not reviewed
     risk_messages = _extension_risk_messages(permissions)
     if is_extension_disabled(path, cwd) or not load_code:

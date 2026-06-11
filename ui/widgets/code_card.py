@@ -8,7 +8,10 @@ from ui.theme import (
     meta_font_pt,
     chat_font_pt,
     MONO_FONT_CSS,
+    code_text_edit_style,
+    hint_label_style,
     primary_button_style,
+    secondary_button_style,
 )
 
 
@@ -113,20 +116,13 @@ class ArtifactCard(QFrame):
             f"color:{p['TEXT']}; font-size:{fs}px; font-weight:600;"
             "background:transparent; border:none;"
         )
-        self._reason_lbl.setStyleSheet(
-            f"color:{p['TEXT_DIM']}; font-size:{meta}px; background:transparent; border:none;"
-        )
-        self._lang_lbl.setStyleSheet(
-            f"color:{p['TEXT_DIM']}; font-size:{meta}px; font-family:{MONO_FONT_CSS};"
-            "background:transparent; border:none;"
-        )
-        self._lines_lbl.setStyleSheet(
-            f"color:{p['TEXT_DIM']}; font-size:{meta}px; background:transparent; border:none;"
-        )
-        secondary = (
-            f"QPushButton {{ background:{p['BG3']}; color:{p['TEXT']}; border:1px solid {p['BORDER']};"
-            f"border-radius:4px; padding:0 8px; font-size:{meta}px; }}"
-            f"QPushButton:hover {{ background:{p['BORDER']}; }}"
+        self._reason_lbl.setStyleSheet(hint_label_style())
+        self._lang_lbl.setStyleSheet(hint_label_style(font_family=MONO_FONT_CSS))
+        self._lines_lbl.setStyleSheet(hint_label_style())
+        secondary = secondary_button_style(
+            border_radius=4,
+            padding="0 8px",
+            font_size=meta,
         )
         primary = primary_button_style(
             border_radius=4,
@@ -138,7 +134,5 @@ class ArtifactCard(QFrame):
         self._copy_btn.setStyleSheet(secondary)
         self._open_btn.setStyleSheet(secondary)
         self._preview.setStyleSheet(
-            f"QPlainTextEdit {{ background:{p['BG2']}; color:{p['TEXT']};"
-            f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:6px;"
-            f"font-family:{MONO_FONT_CSS}; font-size:{max(10, fs - 1)}px; padding:8px; }}"
+            code_text_edit_style(font_pt=max(10, fs - 1))
         )

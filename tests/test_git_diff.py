@@ -1,4 +1,5 @@
 import services.git_diff as gd
+from services.git_snapshot import GitSnapshot
 from services.git_status import GitFileChange
 from services.git_diff import (
     can_diff_against_head,
@@ -86,6 +87,56 @@ class TestGitDiff:
 
         assert "--- a/new.py" in diff
         assert "+print('new')" in diff
+
+    def test_diff_against_head_reuses_supplied_change_without_status_scan(self, workspace, monkeypatch):
+        path = workspace / "new.py"
+        path.write_text("print('new')\n", encoding="utf-8")
+        change = GitFileChange("A ", "A", "new.py", str(path), staged=True, unstaged=False)
+        monkeypatch.setattr("services.git_diff.is_git_repo", lambda repo_path: True)
+        monkeypatch.setattr(
+            "services.git_diff.change_for_file",
+            lambda _repo_path, _abs_path: (_ for _ in ()).throw(AssertionError("status scan")),
+        )
+
+        diff = diff_against_head(str(workspace), str(path), change=change)
+
+        assert "--- a/new.py" in diff
+        assert "+print('new')" in diff
+
+    def test_diff_against_head_reuses_supplied_snapshot_without_status_scan(self, workspace, monkeypatch):
+        path = workspace / "new.py"
+        path.write_text("print('new')\n", encoding="utf-8")
+        change = GitFileChange("A ", "A", "new.py", str(path), staged=True, unstaged=False)
+        monkeypatch.setattr(
+            "services.git_diff.list_file_changes",
+            lambda _repo_path: (_ for _ in ()).throw(AssertionError("status scan")),
+        )
+
+        diff = diff_against_head(
+            str(workspace),
+            str(path),
+            git_snapshot=GitSnapshot(
+                repo_path=str(workspace.resolve()),
+                is_repo=True,
+                changes=(change,),
+            ),
+        )
+
+        assert "--- a/new.py" in diff
+        assert "+print('new')" in diff
+
+    def test_can_diff_against_head_uses_snapshot_repo_state(self, workspace, monkeypatch):
+        path = workspace / "src" / "main.py"
+        monkeypatch.setattr(
+            "services.git_diff.list_file_changes",
+            lambda _repo_path: (_ for _ in ()).throw(AssertionError("status scan")),
+        )
+
+        assert can_diff_against_head(
+            str(workspace),
+            str(path),
+            git_snapshot=GitSnapshot(repo_path=str(workspace.resolve()), is_repo=False),
+        ) is False
 
     def test_diff_against_head_deleted_file_returns_none_without_head_text(self, workspace, monkeypatch):
         path = workspace / "gone.py"

@@ -4,7 +4,15 @@ from PyQt6.QtGui import QAction, QGuiApplication, QKeySequence, QTextCursor
 
 from config import MAX_TERMINAL_BLOCKS
 from services.terminal_refs import TERMINAL_REF_MIME, terminal_ref
-from ui.theme import palette, card_frame_style, meta_font_pt, mono_font_pt, mono_font
+from ui.theme import (
+    palette,
+    card_frame_style,
+    code_text_edit_style,
+    hint_label_style,
+    meta_font_pt,
+    mono_font_pt,
+    mono_font,
+)
 
 
 class _TerminalOutput(QTextEdit):
@@ -105,32 +113,24 @@ class TerminalCard(QFrame):
         self._output.setFont(mono_font(mono))
         self.setStyleSheet(card_frame_style())
         self._output.setStyleSheet(
-            f"QTextEdit {{ background:transparent; color:{p['TEXT']}; border:none; padding:6px 10px; }}"
+            code_text_edit_style(selector="QTextEdit", font_pt=mono, padding="6px 10px")
         )
         self._footer.setStyleSheet(
             "QFrame { background:transparent; border:none; }"
         )
         if self._exit_code is None:
-            self._status.setStyleSheet(
-                f"color:{p['TEXT_DIM']}; font-size:{meta}px; background:transparent; border:none;"
-            )
-            self._ref.setStyleSheet(
-                f"color:{p['TEXT_DIM']}; font-size:{max(9, meta - 1)}px; background:transparent; border:none;"
-            )
+            self._status.setStyleSheet(hint_label_style(font_pt=meta))
+            self._ref.setStyleSheet(hint_label_style(font_pt=max(9, meta - 1)))
         elif self._exit_code == 0:
             self._status.setStyleSheet(
-                f"color:{p['SUCCESS']}; font-size:{max(9, meta - 1)}px; background:transparent; border:none;"
+                hint_label_style(text_color=p["SUCCESS"], font_pt=max(9, meta - 1))
             )
-            self._ref.setStyleSheet(
-                f"color:{p['TEXT_DIM']}; font-size:{max(9, meta - 1)}px; background:transparent; border:none;"
-            )
+            self._ref.setStyleSheet(hint_label_style(font_pt=max(9, meta - 1)))
         else:
             self._status.setStyleSheet(
-                f"color:#f87171; font-size:{meta}px; background:transparent; border:none;"
+                hint_label_style(text_color="#f87171", font_pt=meta)
             )
-            self._ref.setStyleSheet(
-                f"color:{p['TEXT_DIM']}; font-size:{max(9, meta - 1)}px; background:transparent; border:none;"
-            )
+            self._ref.setStyleSheet(hint_label_style(font_pt=max(9, meta - 1)))
 
     def append_line(self, line: str):
         if self._line_count == 0 and not str(line).strip():

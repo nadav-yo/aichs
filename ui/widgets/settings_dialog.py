@@ -2,6 +2,7 @@ from pathlib import Path
 import os
 import re
 
+import config
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QTextEdit, QComboBox, QWidget, QFileDialog, QScrollArea,
@@ -10,7 +11,7 @@ from PyQt6.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QColorDialog, QTabWidget, QAbstractItemView,
     QSizePolicy, QDialogButtonBox, QTreeWidget, QTreeWidgetItem,
 )
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QIntValidator, QPainter, QPen, QPixmap
 
 from config import MODELS, SYSTEM_PROMPT
@@ -45,11 +46,13 @@ from storage.settings import (
     DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE,
     DEFAULT_FILE_EDITOR_TAB_SPACES,
     DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
+    DEFAULT_GIT_FIX_PROMPT_TEMPLATE,
     DEFAULT_TRASH_RETENTION_DAYS,
     DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY,
     FILE_EDITOR_AUTO_SAVE_KEY,
     FILE_EDITOR_TAB_SPACES_KEY,
     FILE_REVIEW_PROMPT_TEMPLATE_KEY,
+    GIT_FIX_PROMPT_TEMPLATE_KEY,
     MAX_FILE_EDITOR_TAB_SPACES,
     MIN_FILE_EDITOR_TAB_SPACES,
     TRASH_RETENTION_DAYS_KEY,
@@ -61,13 +64,22 @@ from storage.settings import (
     diagnostic_fix_prompt_template,
     file_editor_tab_spaces,
     file_review_prompt_template,
+    git_fix_prompt_template,
     trash_retention_days,
 )
 from ui.avatars import avatar_pixmap, clear_cache, persist_portrait
 from ui.theme import (
     ACCENT, palette, DEFAULT_FONT_SIZE, DEFAULT_THEME,
-    apply_flat_tab_style, crew_tone, separator_color, primary_button_style,
-    chat_font_pt, meta_font_pt,
+    avatar_preview_style,
+    bordered_icon_button_style, checkbox_style,
+    apply_flat_tab_style, compact_combo_box_style, contained_list_style,
+    contained_tree_style, crew_tone, data_table_style,
+    dialog_button_box_style, dialog_shell_style,
+    navigation_list_style, panel_stack_style,
+    separator_color, separator_frame_style, surface_frame_style,
+    primary_button_style, chat_font_pt,
+    form_field_style, field_label_style, hint_label_style, meta_font_pt, secondary_button_style,
+    status_pill_style, title_label_style,
 )
 
 _NAV = [
@@ -303,12 +315,12 @@ class _PortraitPicker(QWidget):
 
         self.preview = QLabel()
         self.preview.setFixedSize(48, 48)
-        self.preview.setStyleSheet(f"border:1px solid {p['BORDER']}; border-radius:24px;")
+        self.preview.setStyleSheet(avatar_preview_style())
 
         col = QVBoxLayout()
         col.setSpacing(4)
         title = QLabel(label)
-        title.setStyleSheet(f"color:{p['TEXT']}; font-size:13px; font-weight:bold;")
+        title.setStyleSheet(title_label_style(font_pt=13, font_weight="bold"))
         col.addWidget(title)
 
         self.status = QLabel()
@@ -338,7 +350,9 @@ class _PortraitPicker(QWidget):
     def _refresh(self):
         source = self._custom_path or self._default
         border = self._accent_color or palette()["BORDER"]
-        self.preview.setStyleSheet(f"border:2px solid {border}; border-radius:24px;")
+        self.preview.setStyleSheet(
+            avatar_preview_style(border_color=border, border_width=2),
+        )
         self.preview.setPixmap(
             avatar_pixmap(source, 48, self._accent_color).scaled(
                 48, 48, Qt.AspectRatioMode.KeepAspectRatio,
@@ -586,7 +600,7 @@ class _ProviderDialog(QDialog):
         else:
             self._apply_kind_defaults()
 
-        self.setStyleSheet(f"QDialog {{ background:{p['BG2']}; }}")
+        self.setStyleSheet(dialog_shell_style())
 
     def _apply_kind_ui(self, kind: str):
         self._set_models_height(kind)
@@ -598,7 +612,7 @@ class _ProviderDialog(QDialog):
             self.hint.setText(
                 "For custom providers (e.g. Ollama), append @ tokens to each model line "
                 f"(defaults to {custom_default_context_window():,} when omitted). "
-                "Models are saved to ~/.aichs/models.json; API keys stay in settings."
+                f"Models are saved to {config.AICHS_HOME / 'models.json'}; API keys stay in settings."
             )
         else:
             self.models.setPlaceholderText("model-id\nmodel-id = Display Name")
@@ -609,7 +623,7 @@ class _ProviderDialog(QDialog):
             else:
                 self.hint.setText(
                     "OpenAI context limits use built-in defaults. "
-                    "Models are saved to ~/.aichs/models.json; API keys stay in settings."
+                    f"Models are saved to {config.AICHS_HOME / 'models.json'}; API keys stay in settings."
                 )
 
         if self.layout():
@@ -845,20 +859,110 @@ def _hint_label(text: str, style: str) -> QLabel:
     return label
 
 
+class _YukExportItemsSignals(QObject):
+    done = pyqtSignal(int, object, str)
+
+
+class _YukExportItemsWorker(QRunnable):
+    def __init__(self, generation: int, cwd: str):
+        super().__init__()
+        self.signals = _YukExportItemsSignals()
+        self._generation = generation
+        self._cwd = cwd
+
+    def run(self) -> None:
+        try:
+            items = discover_export_items(self._cwd)
+        except Exception as exc:
+            self.signals.done.emit(self._generation, [], str(exc))
+            return
+        self.signals.done.emit(self._generation, items, "")
+
+
+class _YukExportPackageSignals(QObject):
+    done = pyqtSignal(int, object, str)
+
+
+class _YukExportPackageWorker(QRunnable):
+    def __init__(self, generation: int, path: str, cwd: str, selected_item_ids: set[str]):
+        super().__init__()
+        self.signals = _YukExportPackageSignals()
+        self._generation = generation
+        self._path = path
+        self._cwd = cwd
+        self._selected_item_ids = set(selected_item_ids)
+
+    def run(self) -> None:
+        try:
+            manifest = export_yuk(
+                self._path,
+                self._cwd,
+                YukExportSelection(selected_item_ids=self._selected_item_ids),
+            )
+        except Exception as exc:
+            self.signals.done.emit(self._generation, None, str(exc))
+            return
+        self.signals.done.emit(self._generation, manifest, "")
+
+
+class _YukInspectSignals(QObject):
+    done = pyqtSignal(int, str, object, str)
+
+
+class _YukInspectWorker(QRunnable):
+    def __init__(self, generation: int, path: str, cwd: str):
+        super().__init__()
+        self.signals = _YukInspectSignals()
+        self._generation = generation
+        self._path = path
+        self._cwd = cwd
+
+    def run(self) -> None:
+        try:
+            inspection = inspect_yuk(self._path, self._cwd)
+        except Exception as exc:
+            self.signals.done.emit(self._generation, self._path, None, str(exc))
+            return
+        self.signals.done.emit(self._generation, self._path, inspection, "")
+
+
+class _YukApplySignals(QObject):
+    done = pyqtSignal(int, object, str)
+
+
+class _YukApplyWorker(QRunnable):
+    def __init__(self, generation: int, path: str, cwd: str, choices: dict[str, str]):
+        super().__init__()
+        self.signals = _YukApplySignals()
+        self._generation = generation
+        self._path = path
+        self._cwd = cwd
+        self._choices = dict(choices)
+
+    def run(self) -> None:
+        try:
+            result = apply_yuk(self._path, self._cwd, self._choices)
+        except Exception as exc:
+            self.signals.done.emit(self._generation, None, str(exc))
+            return
+        self.signals.done.emit(self._generation, result, "")
+
+
 class _YukExportDialog(QDialog):
     def __init__(self, cwd: str, parent=None):
         super().__init__(parent)
         self._cwd = cwd
         self._syncing = False
+        self._items_generation = 0
+        self._items_loaded = False
+        self._items_pool = QThreadPool.globalInstance()
         self.setWindowTitle("Export YUK")
         self.resize(720, 560)
 
         p = palette()
         self.setStyleSheet(
             f"QDialog {{ background:{p['BG2']}; color:{p['TEXT']}; }}"
-            f"QTreeWidget {{ background:{p['BG3']}; color:{p['TEXT']};"
-            f"border:1px solid {p['BORDER']}; border-radius:6px; }}"
-            f"QTreeWidget::item {{ padding:5px; }}"
+            f"{contained_tree_style(item_padding='5px', border_radius=6, bg=p['BG3'], border=p['BORDER'])}"
         )
 
         root = QVBoxLayout(self)
@@ -866,11 +970,11 @@ class _YukExportDialog(QDialog):
         root.setSpacing(10)
 
         title = QLabel("Export User Kit")
-        title.setStyleSheet(f"font-size:{chat_font_pt() + 2}px; font-weight:650; color:{p['TEXT']};")
+        title.setStyleSheet(title_label_style())
         root.addWidget(title)
         root.addWidget(_hint_label(
             "Choose the personalization pieces to package. Models, API keys, conversations, and runtime state are never exported.",
-            f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;",
+            hint_label_style(),
         ))
 
         controls = QHBoxLayout()
@@ -889,13 +993,15 @@ class _YukExportDialog(QDialog):
         self.tree.setColumnWidth(1, 90)
         self.tree.itemChanged.connect(self._on_item_changed)
         root.addWidget(self.tree, 1)
-        self._populate()
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
-        export_btn = buttons.addButton("Export", QDialogButtonBox.ButtonRole.AcceptRole)
-        export_btn.clicked.connect(self.accept)
+        buttons.setStyleSheet(dialog_button_box_style())
+        self._export_btn = buttons.addButton("Export", QDialogButtonBox.ButtonRole.AcceptRole)
+        self._export_btn.setEnabled(False)
+        self._export_btn.clicked.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+        self._start_item_load()
 
     def selected_item_ids(self) -> set[str]:
         selected: set[str] = set()
@@ -907,9 +1013,48 @@ class _YukExportDialog(QDialog):
                     selected.add(str(child.data(0, Qt.ItemDataRole.UserRole) or ""))
         return {item_id for item_id in selected if item_id}
 
-    def _populate(self) -> None:
+    def accept(self) -> None:
+        if not self._items_loaded:
+            return
+        super().accept()
+
+    def reject(self) -> None:
+        self._items_generation += 1
+        super().reject()
+
+    def closeEvent(self, event) -> None:
+        self._items_generation += 1
+        super().closeEvent(event)
+
+    def _start_item_load(self) -> None:
+        self._items_generation += 1
+        generation = self._items_generation
+        self._items_loaded = False
+        self._export_btn.setEnabled(False)
+        self._show_loading()
+        worker = _YukExportItemsWorker(generation, self._cwd)
+        worker.signals.done.connect(self._on_items_ready)
+        self._items_pool.start(worker)
+
+    def _on_items_ready(self, generation: int, items: object, error: str) -> None:
+        if generation != self._items_generation:
+            return
+        if error:
+            self.tree.clear()
+            self.tree.addTopLevelItem(QTreeWidgetItem([f"Could not load export items: {error}", "", ""]))
+            return
+        self._items_loaded = True
+        self._populate(list(items or []))
+        self._export_btn.setEnabled(True)
+
+    def _show_loading(self) -> None:
+        self.tree.clear()
+        self.tree.addTopLevelItem(QTreeWidgetItem(["Loading export items...", "", ""]))
+
+    def _populate(self, items: list) -> None:
+        self.tree.clear()
         by_section: dict[str, list] = {}
-        for item in discover_export_items(self._cwd):
+        for item in items:
             by_section.setdefault(item.section, []).append(item)
         for section_name, items in by_section.items():
             section = QTreeWidgetItem([section_name, "", f"{len(items)} item(s)"])
@@ -971,10 +1116,8 @@ class _YukImportDialog(QDialog):
         p = palette()
         self.setStyleSheet(
             f"QDialog {{ background:{p['BG2']}; color:{p['TEXT']}; }}"
-            f"QTreeWidget {{ background:{p['BG3']}; color:{p['TEXT']};"
-            f"border:1px solid {p['BORDER']}; border-radius:6px; }}"
-            f"QComboBox {{ background:{p['BG2']}; color:{p['TEXT']};"
-            f"border:1px solid {p['BORDER']}; border-radius:5px; padding:3px 8px; }}"
+            f"{contained_tree_style(item_padding='5px', border_radius=6, bg=p['BG3'], border=p['BORDER'])}"
+            f"{compact_combo_box_style(background=p['BG2'], popup_background=p['BG3'], font_pt=13, padding='3px 8px', border_radius=5)}"
         )
 
         root = QVBoxLayout(self)
@@ -982,12 +1125,12 @@ class _YukImportDialog(QDialog):
         root.setSpacing(10)
 
         title = QLabel("Import User Kit")
-        title.setStyleSheet(f"font-size:{chat_font_pt() + 2}px; font-weight:650; color:{p['TEXT']};")
+        title.setStyleSheet(title_label_style())
         root.addWidget(title)
         package_name = str(inspection.manifest.get("name") or "YUK package")
         root.addWidget(_hint_label(
             f"{package_name}. Review the contents before applying. Extension Python is not executed during preview. Imported extensions are installed disabled until reviewed.",
-            f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;",
+            hint_label_style(),
         ))
         if inspection.warnings:
             warning = QLabel("Warnings:\n" + "\n".join(f"- {text}" for text in inspection.warnings))
@@ -1007,6 +1150,7 @@ class _YukImportDialog(QDialog):
         self._populate()
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        buttons.setStyleSheet(dialog_button_box_style())
         import_btn = buttons.addButton("Import", QDialogButtonBox.ButtonRole.AcceptRole)
         import_btn.clicked.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -1124,42 +1268,26 @@ class SettingsDialog(QDialog):
         self.setMinimumSize(560, 420)
 
         p = palette()
-        field_base = (
-            f"background:{p['BG3']}; color:{p['TEXT']}; border:1px solid {p['BORDER']};"
-            "border-radius:6px; padding:8px 10px; font-size:13px;"
+        self._field_style = form_field_style()
+        self._label_style = field_label_style()
+        self._hint_style = hint_label_style()
+        self._btn_style = secondary_button_style(
+            border_radius=6,
+            padding="4px 12px",
+            font_size=12,
+            text_color=p["TEXT_DIM"],
         )
-        self._field_style = (
-            f"QLineEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{ {field_base} }}"
-            "QComboBox::drop-down { border:none; width:22px; }"
-            "QComboBox::down-arrow { image:none; }"
-            f"QComboBox QAbstractItemView {{ background:{p['BG3']}; color:{p['TEXT']};"
-            f"border:1px solid {p['BORDER']}; border-radius:6px;"
-            f"selection-background-color:{p['SELECTION']};"
-            f"selection-color:{p['SELECTION_TEXT']}; outline:none; padding:4px; }}"
-            f"QComboBox QAbstractItemView::item {{ background:{p['BG3']};"
-            f"color:{p['TEXT']}; padding:6px 8px; }}"
-            f"QComboBox QAbstractItemView::item:selected {{ background:{p['SELECTION']};"
-            f"color:{p['SELECTION_TEXT']}; }}"
+        self._icon_btn_style = bordered_icon_button_style()
+        self._checkbox_style = checkbox_style(
+            font_pt=13,
+            indicator_px=16,
+            spacing_px=8,
         )
-        self._label_style = f"color:{p['TEXT_DIM']}; font-size:12px;"
-        self._hint_style = f"color:{p['TEXT_DIM']}; font-size:12px;"
-        self._btn_style = (
-            f"QPushButton {{ background:{p['BG3']}; color:{p['TEXT_DIM']};"
-            f"border:1px solid {p['BORDER']}; border-radius:6px; padding:4px 12px; font-size:12px; }}"
-            f"QPushButton:hover {{ color:{p['TEXT']}; background:{p['BORDER']}; }}"
-        )
-        self._icon_btn_style = (
-            f"QToolButton {{ background:{p['BG3']}; color:{p['TEXT_DIM']};"
-            f"border:1px solid {p['BORDER']}; border-radius:6px; padding:3px; }}"
-            f"QToolButton:hover {{ color:{p['TEXT']}; background:{p['BORDER']}; }}"
-        )
-        check_icon = (Path(__file__).resolve().parents[2] / "assets" / "checkmark.svg").as_posix()
-        self._checkbox_style = (
-            f"QCheckBox {{ color:{p['TEXT']}; font-size:13px; spacing:8px; }}"
-            f"QCheckBox::indicator {{ width:16px; height:16px;"
-            f"background:{p['BG3']}; border:1px solid {p['TEXT_DIM']}; border-radius:3px; }}"
-            f"QCheckBox::indicator:hover {{ border:1px solid {ACCENT}; }}"
-            f"QCheckBox::indicator:checked {{ image:url({check_icon}); border:1px solid {ACCENT}; }}"
+        self._strong_checkbox_style = checkbox_style(
+            font_pt=13,
+            font_weight="700",
+            indicator_px=16,
+            spacing_px=8,
         )
         self._styles = {
             "hint": self._hint_style,
@@ -1176,6 +1304,17 @@ class SettingsDialog(QDialog):
         self._cwd = cwd or str(saved.get("workspace_path") or os.getcwd())
         self._page_ids = [page_id for page_id, _title in _NAV]
         self._built_pages: set[str] = set()
+        self._yuk_export_generation = 0
+        self._yuk_export_active = False
+        self._yuk_export_pool = QThreadPool(self)
+        self._yuk_export_pool.setMaxThreadCount(1)
+        self._yuk_import_generation = 0
+        self._yuk_import_active = False
+        self._yuk_import_pool = QThreadPool(self)
+        self._yuk_import_pool.setMaxThreadCount(1)
+        self._yuk_export_btn = None
+        self._yuk_import_btn = None
+        self._yuk_export_status = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1190,13 +1329,9 @@ class SettingsDialog(QDialog):
         self._nav.setFixedWidth(148)
         self._nav.setSpacing(0)
         self._nav.setStyleSheet(
-            f"QListWidget {{ background:{p['BG']}; border:none; border-right:1px solid {separator_color()};"
-            f"padding:8px 6px; outline:none; }}"
-            f"QListWidget::item {{ color:{p['TEXT_DIM']}; padding:10px 12px 10px 15px; border-radius:6px;"
-            f"border-left:3px solid transparent; }}"
-            f"QListWidget::item:selected {{ background:{p['BG3']}; color:{p['TEXT']};"
-            f"border-left:3px solid {ACCENT}; }}"
-            f"QListWidget::item:hover:!selected {{ background:{p['BG2']}; }}"
+            navigation_list_style(
+                border=f"0px solid {separator_color()}; border-right:1px solid {separator_color()}",
+            )
         )
         for _id, title in _NAV:
             item = QListWidgetItem(title)
@@ -1207,7 +1342,7 @@ class SettingsDialog(QDialog):
 
         # ── pages ─────────────────────────────────────────────────────────
         self._stack = QStackedWidget()
-        self._stack.setStyleSheet(f"background:{p['BG2']};")
+        self._stack.setStyleSheet(panel_stack_style())
 
         for _page_id, title in _NAV:
             self._stack.addWidget(self._placeholder_page(title))
@@ -1219,7 +1354,8 @@ class SettingsDialog(QDialog):
         # ── footer ────────────────────────────────────────────────────────
         footer = QFrame()
         footer.setStyleSheet(
-            f"QFrame {{ background:{p['BG2']}; border-top:1px solid {separator_color()}; }}"
+            f"QFrame {{ background:{p['BG2']}; border:none;"
+            f"border-top:1px solid {separator_color()}; }}"
         )
         buttons = QHBoxLayout(footer)
         buttons.setContentsMargins(16, 10, 16, 10)
@@ -1292,7 +1428,7 @@ class SettingsDialog(QDialog):
         layout.setSpacing(16)
         p = palette()
         hdr = QLabel(title)
-        hdr.setStyleSheet(f"color:{p['TEXT']}; font-size:18px; font-weight:bold;")
+        hdr.setStyleSheet(title_label_style(font_pt=18, font_weight="700"))
         layout.addWidget(hdr)
         if subtitle:
             sub = QLabel(subtitle)
@@ -1310,10 +1446,7 @@ class SettingsDialog(QDialog):
     def _section_separator(self) -> QFrame:
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep_color = separator_color()
-        sep.setStyleSheet(
-            f"background:{sep_color}; color:{sep_color}; border:none; max-height:1px;"
-        )
+        sep.setStyleSheet(separator_frame_style())
         return sep
 
     def _page_general(self, saved: dict) -> QWidget:
@@ -1438,6 +1571,19 @@ class SettingsDialog(QDialog):
             self._hint_style,
         ))
 
+        self.git_fix_prompt_template = QLineEdit()
+        self.git_fix_prompt_template.setPlaceholderText(DEFAULT_GIT_FIX_PROMPT_TEMPLATE)
+        self.git_fix_prompt_template.setStyleSheet(self._field_style)
+        self._field(
+            drafts_layout,
+            "Git fix first line",
+            self.git_fix_prompt_template,
+        )
+        drafts_layout.addWidget(_hint_label(
+            "Replaces only the first line. Use {action}, {label}, {repo}, {command}, {exit_code}, or {output}; git details are appended automatically.",
+            self._hint_style,
+        ))
+
         self.compact_resume_prompt = QLineEdit()
         self.compact_resume_prompt.setPlaceholderText(DEFAULT_COMPACT_RESUME_PROMPT)
         self.compact_resume_prompt.setStyleSheet(self._field_style)
@@ -1550,12 +1696,7 @@ class SettingsDialog(QDialog):
         self.providers_table.setAlternatingRowColors(False)
         self.providers_table.itemSelectionChanged.connect(self._on_provider_selection_changed)
         self.providers_table.row_moved.connect(self._move_provider)
-        self.providers_table.setStyleSheet(
-            f"QTableWidget {{ background:{palette()['BG2']}; color:{palette()['TEXT']};"
-            f"border:1px solid {separator_color()}; border-radius:8px; gridline-color:{palette()['BORDER']}; }}"
-            f"QHeaderView::section {{ background:{palette()['BG3']}; color:{palette()['TEXT_DIM']};"
-            f"border:none; border-bottom:1px solid {separator_color()}; padding:6px; }}"
-        )
+        self.providers_table.setStyleSheet(data_table_style(border_radius=8))
         header = self.providers_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         header.resizeSection(0, 30)
@@ -1576,10 +1717,12 @@ class SettingsDialog(QDialog):
 
         self.model_order_list = _ModelOrderList()
         self.model_order_list.setStyleSheet(
-            f"QListWidget {{ background:{palette()['BG2']}; color:{palette()['TEXT']};"
-            f"border:1px solid {palette()['BORDER']}; border-radius:8px; padding:4px; outline:none; }}"
-            f"QListWidget::item {{ padding:8px 10px; border-radius:6px; }}"
-            f"QListWidget::item:selected {{ background:{palette()['SELECTION']}; color:{palette()['SELECTION_TEXT']}; }}"
+            contained_list_style(
+                item_padding="8px 10px",
+                item_radius=6,
+                border_radius=8,
+                border=palette()["BORDER"],
+            )
         )
         self.model_order_list.order_changed.connect(self._apply_model_order)
         layout.addWidget(self.model_order_list)
@@ -1846,14 +1989,11 @@ class SettingsDialog(QDialog):
 
         lead_header = QHBoxLayout()
         lead_title = QLabel("aichs · Lead agent")
-        lead_title.setStyleSheet(f"color:{p['TEXT']}; font-weight:bold;")
+        lead_title.setStyleSheet(title_label_style(font_weight="bold"))
         lead_header.addWidget(lead_title)
         lead_header.addStretch()
         lead_status = QLabel("Always active")
-        lead_status.setStyleSheet(
-            f"color:{ACCENT}; background:{p['BG3']}; border:1px solid {p['BORDER']};"
-            "border-radius:6px; padding:4px 8px; font-size:12px;"
-        )
+        lead_status.setStyleSheet(status_pill_style(tone="accent", font_pt=12))
         lead_header.addWidget(lead_status)
         lead_layout.addLayout(lead_header)
 
@@ -1869,7 +2009,7 @@ class SettingsDialog(QDialog):
 
         prompt_row = QHBoxLayout()
         prompt_label = QLabel("Personality and instructions")
-        prompt_label.setStyleSheet(f"color:{p['TEXT']}; font-weight:bold;")
+        prompt_label.setStyleSheet(title_label_style(font_weight="bold"))
         prompt_row.addWidget(prompt_label)
         prompt_row.addStretch()
         reset_btn = QPushButton("Reset to default")
@@ -1895,7 +2035,7 @@ class SettingsDialog(QDialog):
             header = QHBoxLayout()
             enabled = QCheckBox(f"{member.name} · {member.title}")
             enabled.setChecked(cfg["enabled"])
-            enabled.setStyleSheet(f"color:{palette()['TEXT']}; font-weight:bold;")
+            enabled.setStyleSheet(self._strong_checkbox_style)
             header.addWidget(enabled)
             header.addStretch()
             card_layout.addLayout(header)
@@ -1971,7 +2111,7 @@ class SettingsDialog(QDialog):
 
         actions = QFrame()
         actions.setStyleSheet(
-            f"QFrame {{ background:{p['BG3']}; border:1px solid {p['BORDER']}; border-radius:8px; }}"
+            surface_frame_style()
         )
         action_layout = QVBoxLayout(actions)
         action_layout.setContentsMargins(14, 14, 14, 14)
@@ -1980,15 +2120,24 @@ class SettingsDialog(QDialog):
         export_btn = QPushButton("Export YUK...")
         export_btn.setStyleSheet(primary_button_style())
         export_btn.clicked.connect(self._export_yuk)
+        self._yuk_export_btn = export_btn
         action_layout.addWidget(export_btn)
 
         import_btn = QPushButton("Import YUK...")
         import_btn.setStyleSheet(self._btn_style)
         import_btn.clicked.connect(self._import_yuk)
+        self._yuk_import_btn = import_btn
         action_layout.addWidget(import_btn)
+
+        status = QLabel("")
+        status.setWordWrap(True)
+        status.setStyleSheet(self._hint_style)
+        self._yuk_export_status = status
+        action_layout.addWidget(status)
 
         layout.addWidget(actions)
         layout.addStretch()
+        self._sync_yuk_export_state()
         return page
 
     # ── logic ─────────────────────────────────────────────────────────────
@@ -2033,6 +2182,7 @@ class SettingsDialog(QDialog):
         self.diagnostic_fix_prompt_template.setText(
             diagnostic_fix_prompt_template(saved)
         )
+        self.git_fix_prompt_template.setText(git_fix_prompt_template(saved))
         self.compact_resume_prompt.setText(compact_resume_prompt(saved))
         self.auto_title_prompt_instructions.setPlainText(
             auto_title_prompt_instructions(saved)
@@ -2083,14 +2233,44 @@ class SettingsDialog(QDialog):
         )
         if not path:
             return
-        try:
-            export_yuk(path, self._cwd, YukExportSelection(selected_item_ids=selected))
-        except Exception as exc:
-            QMessageBox.warning(self, "Export failed", str(exc))
+        self._start_yuk_export(path, selected)
+
+    def _start_yuk_export(self, path: str, selected_item_ids: set[str]) -> None:
+        if self._yuk_export_active:
             return
+        self._yuk_export_generation += 1
+        generation = self._yuk_export_generation
+        self._yuk_export_active = True
+        self._sync_yuk_export_state("Exporting YUK package...")
+        worker = _YukExportPackageWorker(generation, path, self._cwd, selected_item_ids)
+        worker.signals.done.connect(self._on_yuk_export_done)
+        self._yuk_export_pool.start(worker)
+
+    def _on_yuk_export_done(self, generation: int, _manifest: object, error: str) -> None:
+        if generation != self._yuk_export_generation:
+            return
+        self._yuk_export_active = False
+        if error:
+            self._sync_yuk_export_state("Export failed.")
+            QMessageBox.warning(self, "Export failed", error)
+            return
+        self._sync_yuk_export_state("YUK package exported.")
         QMessageBox.information(self, "Exported", "YUK package exported.")
 
+    def _sync_yuk_export_state(self, status: str = "") -> None:
+        busy = self._yuk_export_active or self._yuk_import_active
+        if self._yuk_export_btn is not None:
+            self._yuk_export_btn.setEnabled(not busy)
+            self._yuk_export_btn.setText("Exporting..." if self._yuk_export_active else "Export YUK...")
+        if self._yuk_import_btn is not None:
+            self._yuk_import_btn.setEnabled(not busy)
+            self._yuk_import_btn.setText("Importing..." if self._yuk_import_active else "Import YUK...")
+        if self._yuk_export_status is not None:
+            self._yuk_export_status.setText(status)
+
     def _import_yuk(self):
+        if self._yuk_import_active or self._yuk_export_active:
+            return
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Import YUK",
@@ -2099,21 +2279,50 @@ class SettingsDialog(QDialog):
         )
         if not path:
             return
-        try:
-            inspection = inspect_yuk(path, self._cwd)
-        except Exception as exc:
-            QMessageBox.warning(self, "Import failed", str(exc))
+        self._start_yuk_inspect(path)
+
+    def _start_yuk_inspect(self, path: str) -> None:
+        self._yuk_import_generation += 1
+        generation = self._yuk_import_generation
+        self._yuk_import_active = True
+        self._sync_yuk_export_state("Inspecting YUK package...")
+        worker = _YukInspectWorker(generation, path, self._cwd)
+        worker.signals.done.connect(self._on_yuk_inspect_done)
+        self._yuk_import_pool.start(worker)
+
+    def _on_yuk_inspect_done(self, generation: int, path: str, inspection: object, error: str) -> None:
+        if generation != self._yuk_import_generation:
+            return
+        if error:
+            self._yuk_import_active = False
+            self._sync_yuk_export_state("Import failed.")
+            QMessageBox.warning(self, "Import failed", error)
             return
         dialog = _YukImportDialog(inspection, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
+            self._yuk_import_active = False
+            self._sync_yuk_export_state("")
             return
-        try:
-            apply_yuk(path, self._cwd, dialog.choices())
-        except Exception as exc:
-            QMessageBox.warning(self, "Import failed", str(exc))
+        self._start_yuk_apply(path, dialog.choices())
+
+    def _start_yuk_apply(self, path: str, choices: dict[str, str]) -> None:
+        generation = self._yuk_import_generation
+        self._sync_yuk_export_state("Importing YUK package...")
+        worker = _YukApplyWorker(generation, path, self._cwd, choices)
+        worker.signals.done.connect(self._on_yuk_apply_done)
+        self._yuk_import_pool.start(worker)
+
+    def _on_yuk_apply_done(self, generation: int, _result: object, error: str) -> None:
+        if generation != self._yuk_import_generation:
+            return
+        self._yuk_import_active = False
+        if error:
+            self._sync_yuk_export_state("Import failed.")
+            QMessageBox.warning(self, "Import failed", error)
             return
         clear_cache()
         self._saved = self.store.load()
+        self._sync_yuk_export_state("YUK package imported.")
         QMessageBox.information(self, "Imported", "YUK package imported.")
         self.accept()
 
@@ -2130,6 +2339,7 @@ class SettingsDialog(QDialog):
             "system_prompt": str(saved.get("system_prompt") or SYSTEM_PROMPT).strip() or SYSTEM_PROMPT,
             FILE_REVIEW_PROMPT_TEMPLATE_KEY: file_review_prompt_template(saved),
             DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY: diagnostic_fix_prompt_template(saved),
+            GIT_FIX_PROMPT_TEMPLATE_KEY: git_fix_prompt_template(saved),
             COMPACT_RESUME_PROMPT_KEY: compact_resume_prompt(saved),
             AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY: auto_title_prompt_instructions(saved),
             COMPACTION_SUMMARY_GUIDANCE_KEY: compaction_summary_guidance(saved),
@@ -2158,6 +2368,7 @@ class SettingsDialog(QDialog):
             "system_prompt": self.system_prompt.toPlainText().strip() or SYSTEM_PROMPT,
             FILE_REVIEW_PROMPT_TEMPLATE_KEY: self.file_review_prompt_template.text().strip() or file_review_prompt_template({}),
             DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY: self.diagnostic_fix_prompt_template.text().strip() or diagnostic_fix_prompt_template({}),
+            GIT_FIX_PROMPT_TEMPLATE_KEY: self.git_fix_prompt_template.text().strip() or git_fix_prompt_template({}),
             COMPACT_RESUME_PROMPT_KEY: self.compact_resume_prompt.text().strip() or compact_resume_prompt({}),
             AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY: self.auto_title_prompt_instructions.toPlainText().strip() or auto_title_prompt_instructions({}),
             COMPACTION_SUMMARY_GUIDANCE_KEY: self.compaction_summary_guidance.toPlainText().strip(),
@@ -2297,6 +2508,7 @@ class SettingsDialog(QDialog):
             FILE_EDITOR_TAB_SPACES_KEY: self.file_editor_tab_spaces_spin.value(),
             FILE_REVIEW_PROMPT_TEMPLATE_KEY: self.file_review_prompt_template.text().strip(),
             DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY: self.diagnostic_fix_prompt_template.text().strip(),
+            GIT_FIX_PROMPT_TEMPLATE_KEY: self.git_fix_prompt_template.text().strip(),
             COMPACT_RESUME_PROMPT_KEY: self.compact_resume_prompt.text().strip(),
             AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY: self.auto_title_prompt_instructions.toPlainText().strip(),
             COMPACTION_SUMMARY_GUIDANCE_KEY: self.compaction_summary_guidance.toPlainText().strip(),
@@ -2321,7 +2533,8 @@ class SettingsDialog(QDialog):
             data["anthropic_api_key"] = ""
             data["openai_api_key"] = ""
         save_user_providers(user_providers)
-        model_registry.reload()
+        model_registry.reload(refresh_anthropic=False)
+        model_registry.refresh_anthropic_context_async()
         self.store.save(data)
         self.store.apply_saved(data)
         clear_cache()

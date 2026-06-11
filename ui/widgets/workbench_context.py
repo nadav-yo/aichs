@@ -1,12 +1,11 @@
 from dataclasses import dataclass
 from datetime import datetime
-import fnmatch
 import os
 from pathlib import Path
 import re
 
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QMenu
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -20,8 +19,21 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from services.language_features import Diagnostic, LanguageFeatureStatus, language_status
-from ui.theme import ACCENT, chat_font_pt, icon_button_style, meta_font_pt, palette
+from services.language_features import Diagnostic, LanguageFeatureStatus
+from services.language_snapshot import LanguageStatusSnapshot, build_language_status_snapshot
+from ui.theme import (
+    ACCENT,
+    chat_font_pt,
+    compact_combo_box_style,
+    contained_list_style,
+    context_panel_title_button_style,
+    hint_label_style,
+    icon_button_style,
+    meta_font_pt,
+    palette,
+    section_label_style,
+    secondary_button_style,
+)
 
 
 @dataclass(frozen=True)
@@ -55,6 +67,18 @@ class _RunLogEntry:
         return "\n".join(lines)
 
 
+class _LanguageStatusThread(QThread):
+    done = pyqtSignal(int, object)
+
+    def __init__(self, generation: int, context: dict, parent=None):
+        super().__init__(parent)
+        self._generation = generation
+        self._context = dict(context)
+
+    def run(self):
+        self.done.emit(self._generation, build_language_status_snapshot(self._context))
+
+
 class WorkbenchContextPanel(QWidget):
     collapse_requested = pyqtSignal()
     language_available_changed = pyqtSignal(bool)
@@ -77,6 +101,9 @@ class WorkbenchContextPanel(QWidget):
         self._language_statuses: list[LanguageFeatureStatus] = []
         self._language_errors: list[str] = []
         self._language_diagnostics_data: list[Diagnostic] = []
+        self._language_status_generation = 0
+        self._language_status_key: tuple[str, str, bool] = ("", "", False)
+        self._language_status_threads: list[_LanguageStatusThread] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -255,13 +282,25 @@ class WorkbenchContextPanel(QWidget):
 
     def set_language_context(self, context: dict):
         self._language_context = dict(context or {})
-        self._language_statuses, self._language_errors = self._matching_language_statuses()
         self._language_diagnostics_data = list(self._language_context.get("diagnostics") or [])
-        supported = bool(self._language_statuses)
-        if supported != self._language_available:
-            self._language_available = supported
-            self.language_available_changed.emit(supported)
+        self._language_status_generation += 1
+        generation = self._language_status_generation
+        key = _language_context_key(self._language_context)
+        if not _can_load_language_status(self._language_context):
+            self._language_status_key = key
+            self._language_statuses = []
+            self._language_errors = []
+            self._set_language_available(False)
+            self._render_language()
+            return
+
+        if key != self._language_status_key:
+            self._language_status_key = key
+            self._language_statuses = []
+            self._language_errors = []
+            self._set_language_available(False)
         self._render_language()
+        self._start_language_status_refresh(generation, self._language_context)
 
     def set_active_panel(self, panel: str):
         self._active_panel = panel if panel in {"run_log", "language"} else "run_log"
@@ -273,22 +312,33 @@ class WorkbenchContextPanel(QWidget):
         self._collapse_btn.setAccessibleName(f"Collapse {title.lower()}")
         self._collapse_btn.setToolTip(f"Collapse {title.lower()}")
 
-    def _matching_language_statuses(self) -> tuple[list[LanguageFeatureStatus], list[str]]:
-        path = str(self._language_context.get("path") or "")
-        repo_root = str(self._language_context.get("repo_root") or "")
-        if not path or not repo_root or not self._language_context.get("is_text"):
-            return [], []
-        statuses, errors = language_status(repo_root)
-        rel = _relative_path(repo_root, path)
-        name = os.path.basename(path)
-        matches = [
-            status for status in statuses
-            if any(
-                fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(name, pattern)
-                for pattern in status.file_patterns
-            )
-        ]
-        return matches, list(errors)
+    def _start_language_status_refresh(self, generation: int, context: dict):
+        thread = _LanguageStatusThread(generation, context, self)
+        self._language_status_threads.append(thread)
+        thread.done.connect(self._apply_language_status_snapshot)
+        thread.finished.connect(lambda t=thread: self._release_language_status_thread(t))
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _apply_language_status_snapshot(self, generation: int, snapshot: LanguageStatusSnapshot):
+        if generation != self._language_status_generation:
+            return
+        if (snapshot.repo_root, snapshot.path, snapshot.is_text) != self._language_status_key:
+            return
+        self._language_statuses = list(snapshot.statuses)
+        self._language_errors = list(snapshot.errors)
+        self._set_language_available(bool(self._language_statuses))
+        self._render_language()
+
+    def _release_language_status_thread(self, thread: _LanguageStatusThread):
+        if thread in self._language_status_threads:
+            self._language_status_threads.remove(thread)
+
+    def _set_language_available(self, available: bool):
+        if available == self._language_available:
+            return
+        self._language_available = available
+        self.language_available_changed.emit(available)
 
     def _render_language(self):
         self._language_diagnostics.clear()
@@ -507,20 +557,15 @@ class WorkbenchContextPanel(QWidget):
         self.setStyleSheet(
             f"background-color:{p['BG2']}; color:{p['TEXT']};"
         )
-        list_style = (
-            f"QListWidget {{ background-color:{p['BG2']};"
-            f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:7px; }}"
-            "QListWidget::item { padding:4px 6px; }"
-            f"QListWidget::item:selected {{ background-color:{p['SELECTION']};"
-            f"color:{p['SELECTION_TEXT']}; }}"
-        )
+        list_style = contained_list_style(item_padding="4px 6px", item_margin="0px")
         self._tool_activity.setStyleSheet(list_style)
         self._language_diagnostics.setStyleSheet(list_style)
         self._collapse_btn.setStyleSheet(icon_button_style(28))
-        action_style = (
-            f"background:{p['BG3']}; color:{p['TEXT_DIM']};"
-            f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:6px;"
-            "padding:5px 8px;"
+        action_style = secondary_button_style(
+            padding="5px 8px",
+            font_size=meta_font_pt(),
+            text_color=p["TEXT_DIM"],
+            border_color=p["BORDER_SUBTLE"],
         )
         self._copy_btn.setStyleSheet(action_style)
         self._copy_details_btn.setStyleSheet(action_style)
@@ -532,34 +577,37 @@ class WorkbenchContextPanel(QWidget):
         self._language_quick_fix_btn.setStyleSheet(action_style)
         self._language_ask_btn.setStyleSheet(action_style)
         self._scope_combo.setStyleSheet(
-            f"QComboBox#runLogScope {{ background:{p['BG3']}; color:{p['TEXT']};"
-            f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:6px;"
-            "padding:4px 8px; }"
-            "QComboBox#runLogScope::drop-down { border:0px; width:18px; }"
+            compact_combo_box_style(
+                selector="QComboBox#runLogScope",
+                font_pt=meta_font_pt(),
+                padding="4px 8px",
+                border_radius=6,
+                drop_down_width=18,
+                border_color=p["BORDER_SUBTLE"],
+                popup_background=p["BG3"],
+                popup_item_padding="5px 8px",
+            )
         )
         language_type_style = (
             f"color:{p['TEXT']}; font-size:{max(13, chat_font_pt())}px;"
             "font-weight:600; padding-bottom:2px;"
         )
         self._language_type.setStyleSheet(language_type_style)
-        self._language_file.setStyleSheet(
-            f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;"
-            "padding-bottom:2px;"
-        )
+        self._language_file.setStyleSheet(hint_label_style(padding="0 0 2px 0"))
         self._language_icon.setStyleSheet(
             f"background:{p['BG3']}; color:{ACCENT};"
             f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:6px;"
             f"font-size:{meta_font_pt()}px; font-weight:700;"
         )
-        self._language_summary.setStyleSheet(
-            f"color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;"
-            "padding-bottom:2px;"
-        )
-        self._title.setStyleSheet(_title_button_style(p))
+        self._language_summary.setStyleSheet(hint_label_style(padding="0 0 2px 0"))
+        self._title.setStyleSheet(context_panel_title_button_style())
         for label in self.findChildren(QLabel, "contextPanelSection"):
             label.setStyleSheet(
-                f"color:{ACCENT}; font-size:{meta_font_pt()}px;"
-                "font-weight:700; padding-top:4px;"
+                section_label_style(
+                    text_color=ACCENT,
+                    font_weight="700",
+                    padding="4px 0 0 0",
+                )
             )
         if self._tool_items:
             self._render_activity()
@@ -575,6 +623,16 @@ class WorkbenchContextPanel(QWidget):
         self._icon_cache[key] = icon
         return icon
 
+    def shutdown(self):
+        self._language_status_generation += 1
+        for thread in list(self._language_status_threads):
+            if thread.isRunning():
+                thread.wait(3000)
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
+
 
 def _section_label(text: str) -> QLabel:
     label = QLabel(text)
@@ -582,15 +640,21 @@ def _section_label(text: str) -> QLabel:
     return label
 
 
-def _title_button_style(p: dict) -> str:
+def _language_context_key(context: dict) -> tuple[str, str, bool]:
     return (
-        f"QPushButton#contextPanelTitleButton {{ background:{p['BG2']};"
-        f"color:{p['TEXT']}; border:1px solid {p['BG2']};"
-        "border-radius:6px; padding:4px 2px; text-align:left;"
-        f"font-size:{max(13, chat_font_pt())}px; font-weight:700; }}"
-        f"QPushButton#contextPanelTitleButton:hover {{ background:{p['BG3']};"
-        f"border-color:{p['BORDER_SUBTLE']}; }}"
+        str(context.get("repo_root") or ""),
+        str(context.get("path") or ""),
+        bool(context.get("is_text")),
     )
+
+
+def _can_load_language_status(context: dict) -> bool:
+    repo_root, path, is_text = _language_context_key(context)
+    return bool(repo_root and path and is_text)
+
+
+def _title_button_style(p: dict) -> str:
+    return context_panel_title_button_style()
 
 
 def _relative_path(repo_root: str, path: str) -> str:

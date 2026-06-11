@@ -118,6 +118,38 @@ def test_builtin_provider_model_order_can_be_overridden():
         reg.reload()
 
 
+def test_reload_can_skip_anthropic_context_refresh(tmp_path, monkeypatch):
+    path = tmp_path / ".aichs" / "models.json"
+    monkeypatch.setattr(reg, "_MODELS_PATH", path)
+    monkeypatch.setattr(
+        reg,
+        "_fetch_anthropic_context_window",
+        lambda _cfg, _model_id: (_ for _ in ()).throw(AssertionError("remote refresh")),
+    )
+    monkeypatch.setattr(reg, "_ANTHROPIC_CONTEXT", {"old": 1})
+
+    reg.reload(refresh_anthropic=False)
+
+    assert reg._ANTHROPIC_CONTEXT == {}
+
+
+def test_stale_anthropic_context_refresh_does_not_apply(monkeypatch):
+    cfg = reg.ModelConfig(
+        provider_id="claude",
+        api="anthropic",
+        base_url=None,
+        api_key_spec="ANTHROPIC_API_KEY",
+        display_name="Claude",
+    )
+    monkeypatch.setattr(reg, "_ANTHROPIC_CONTEXT", {"old": 1})
+    monkeypatch.setattr(reg, "_CONTEXT_REFRESH_GENERATION", 2)
+    monkeypatch.setattr(reg, "_fetch_anthropic_context_window", lambda _cfg, _model_id: 200_000)
+
+    reg._refresh_anthropic_context_cache({"claude-test": cfg}, generation=1)
+
+    assert reg._ANTHROPIC_CONTEXT == {"old": 1}
+
+
 def test_merge_reorders_partial_builtin_models_and_keeps_unspecified_models():
     merged = reg._merge(
         {

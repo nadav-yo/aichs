@@ -24,7 +24,7 @@ from config import (
 )
 from services.shell_tool import shell_tool_name
 from services.content import is_visible_message
-from storage.repository import project_conversation_records, workspace_id
+from storage.repository import ConversationStore, project_conversation_summaries, workspace_id
 from services.subprocess_utils import popen_no_window, run_no_window
 from services.tool_policy import resolve_path, validate_tool_paths
 from services.tool_registry import ToolContext, ToolRegistry, load_extensions
@@ -389,13 +389,13 @@ def _execute_list_files(ctx: ToolContext, inputs: dict) -> str:
     glob = inputs.get("glob") or "*"
     recursive = _as_bool(inputs.get("recursive", False))
     limit = _bounded_int(inputs.get("limit"), default=200, minimum=1, maximum=1000)
-    return _list_files(directory, glob, recursive, limit, ctx.cwd)
+    return _list_files(directory, glob, recursive, limit, ctx.cwd, cancel=ctx.cancel)
 
 
 def _execute_search_files(ctx: ToolContext, inputs: dict) -> str:
     directory = resolve_path(inputs.get("directory", ctx.cwd), ctx.cwd)
     glob = inputs.get("glob", "*")
-    return _search_files(directory, glob, inputs["pattern"], ctx.cwd)
+    return _search_files(directory, glob, inputs["pattern"], ctx.cwd, cancel=ctx.cancel)
 
 
 def _execute_search_project_chats(ctx: ToolContext, inputs: dict) -> str:
@@ -683,16 +683,20 @@ def _shell_command_args(command: str) -> list[str]:
     return ["/bin/sh", "-c", command]
 
 
-def _list_files(directory: Path, glob: str, recursive: bool, limit: int, cwd: str) -> str:
+def _list_files(directory: Path, glob: str, recursive: bool, limit: int, cwd: str, cancel=None) -> str:
     if not directory.exists():
         return f"Directory not found: {directory}"
     if not directory.is_dir():
         return f"Not a directory: {directory}"
+    if _cancelled(cancel):
+        return "[cancelled]"
 
     paths = sorted(
-        _iter_list_paths(directory, glob, recursive),
+        _iter_list_paths(directory, glob, recursive, cancel=cancel),
         key=lambda p: (not p.is_dir(), _display_path(p, cwd).casefold()),
     )
+    if _cancelled(cancel):
+        return "[cancelled]"
     lines = []
     for path in paths[:limit]:
         suffix = "/" if path.is_dir() else ""
@@ -708,9 +712,11 @@ def _list_files(directory: Path, glob: str, recursive: bool, limit: int, cwd: st
     return _trim_output(text)
 
 
-def _iter_list_paths(directory: Path, glob: str, recursive: bool):
+def _iter_list_paths(directory: Path, glob: str, recursive: bool, cancel=None):
     iterator = directory.rglob(glob) if recursive else directory.glob(glob)
     for path in iterator:
+        if _cancelled(cancel):
+            return
         if path == directory:
             continue
         try:
@@ -722,13 +728,15 @@ def _iter_list_paths(directory: Path, glob: str, recursive: bool):
         yield path
 
 
-def _search_files(directory: Path, glob: str, pattern: str, cwd: str) -> str:
+def _search_files(directory: Path, glob: str, pattern: str, cwd: str, cancel=None) -> str:
     if not directory.exists():
         return f"Directory not found: {directory}"
     if not directory.is_dir():
         return f"Not a directory: {directory}"
+    if _cancelled(cancel):
+        return "[cancelled]"
 
-    rg_output = _search_files_with_rg(directory, glob, pattern, cwd)
+    rg_output = _search_files_with_rg(directory, glob, pattern, cwd, cancel=cancel)
     if rg_output is not None:
         return rg_output
 
@@ -738,10 +746,17 @@ def _search_files(directory: Path, glob: str, pattern: str, cwd: str) -> str:
         return f"Invalid search pattern: {exc}"
 
     lines = []
-    for path in sorted(_iter_search_paths(directory, glob)):
+    paths = sorted(_iter_search_paths(directory, glob, cancel=cancel))
+    if _cancelled(cancel):
+        return "[cancelled]"
+    for path in paths:
+        if _cancelled(cancel):
+            return "[cancelled]"
         try:
             with path.open("r", encoding="utf-8", errors="replace") as f:
                 for line_no, line in enumerate(f, start=1):
+                    if _cancelled(cancel):
+                        return "[cancelled]"
                     if matcher.search(line):
                         lines.append(f"{_display_path(path, cwd)}:{line_no}:{line.rstrip()}")
         except OSError as exc:
@@ -760,27 +775,27 @@ def _search_project_chats(query: str, cwd: str, limit=None) -> str:
         max_results = 5
     max_results = max(1, min(10, max_results))
 
-    records = project_conversation_records(cwd)
+    records = project_conversation_summaries(cwd)
     if not records:
         return "(no saved conversations)"
 
     cwd_path = Path(cwd).resolve()
     matches = []
-    for path, data in records:
-        scope = _conversation_project_scope(data, cwd_path)
+    for path, summary in records:
+        scope = _conversation_project_scope(summary, cwd_path)
         if scope is None:
             continue
-        snippets = _conversation_snippets(data, query)
-        title = str(data.get("title") or "Untitled")
+        snippets = _conversation_snippets(summary, query)
+        title = str(summary.get("title") or "Untitled")
         title_hit = query.casefold() in title.casefold()
         if not snippets and not title_hit:
             continue
         score = (4 if title_hit else 0) + len(snippets)
         matches.append((
             score,
-            str(data.get("updated_at") or ""),
+            str(summary.get("updated_at") or ""),
             path,
-            data,
+            summary,
             scope,
             snippets,
         ))
@@ -790,10 +805,10 @@ def _search_project_chats(query: str, cwd: str, limit=None) -> str:
 
     matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
     lines = [f"Found {min(len(matches), max_results)} chat match(es) for {query!r}:"]
-    for idx, (_score, _updated, path, data, scope, snippets) in enumerate(matches[:max_results], start=1):
-        title = str(data.get("title") or "Untitled")
-        updated = str(data.get("updated_at") or data.get("created_at") or "unknown date")
-        lines.append(f"\n{idx}. {title} ({updated}, current workspace, id: {data.get('id') or path.stem})")
+    for idx, (_score, _updated, path, summary, scope, snippets) in enumerate(matches[:max_results], start=1):
+        title = str(summary.get("title") or "Untitled")
+        updated = str(summary.get("updated_at") or summary.get("created_at") or "unknown date")
+        lines.append(f"\n{idx}. {title} ({updated}, current workspace, id: {summary.get('id') or path.stem})")
         if snippets:
             for snippet in snippets[:3]:
                 lines.append(f"   - {snippet}")
@@ -812,26 +827,18 @@ def _read_project_chat(conversation_id: str, cwd: str, max_messages=None) -> str
         limit = 20
     limit = max(1, min(50, limit))
 
-    records = project_conversation_records(cwd)
-    if not records:
+    store = ConversationStore(cwd)
+    if not store.list_all():
         return "(no saved conversations)"
-
-    cwd_path = Path(cwd).resolve()
-    found = None
-    for path, data in records:
-        conv_id = str(data.get("id") or path.stem)
-        if conv_id != wanted and path.stem != wanted:
-            continue
-        scope = _conversation_project_scope(data, cwd_path)
-        if scope is None:
-            return f"[tool error] Conversation {wanted!r} belongs to another workspace."
-        found = (path, data, scope)
-        break
-
-    if found is None:
+    try:
+        path = store.path_for_id(wanted)
+        data = store.load(str(path))
+    except FileNotFoundError:
         return f"[tool error] Conversation not found: {wanted}"
 
-    path, data, scope = found
+    scope = _conversation_project_scope(data, Path(cwd).resolve())
+    if scope is None:
+        return f"[tool error] Conversation {wanted!r} belongs to another workspace."
     title = str(data.get("title") or "Untitled")
     updated = str(data.get("updated_at") or data.get("created_at") or "unknown date")
     lines = [
@@ -881,10 +888,8 @@ def _conversation_project_scope(data: dict, cwd_path: Path) -> str | None:
 def _conversation_snippets(data: dict, query: str) -> list[str]:
     terms = _chat_search_terms(query)
     snippets = []
-    for msg in data.get("messages", []):
-        if not is_visible_message(msg):
-            continue
-        text = _message_text(msg.get("content", ""))
+    for msg in data.get("search_messages", []):
+        text = str(msg.get("text") or "")
         folded = text.casefold()
         if not any(term in folded for term in terms):
             continue
@@ -937,9 +942,11 @@ def _snippet(text: str, terms: list[str], radius: int = 120) -> str:
     return f"{prefix}{compact[start:end]}{suffix}"
 
 
-def _search_files_with_rg(directory: Path, glob: str, pattern: str, cwd: str) -> str | None:
+def _search_files_with_rg(directory: Path, glob: str, pattern: str, cwd: str, cancel=None) -> str | None:
     if not shutil.which("rg"):
         return None
+    if _cancelled(cancel):
+        return "[cancelled]"
 
     search_root = _display_path(directory, cwd)
     try:
@@ -965,6 +972,8 @@ def _search_files_with_rg(directory: Path, glob: str, pattern: str, cwd: str) ->
     except subprocess.TimeoutExpired:
         return "Search timed out after 30 seconds"
 
+    if _cancelled(cancel):
+        return "[cancelled]"
     if r.returncode == 0:
         return _trim_output(r.stdout.strip() or "(no matches)")
     if r.returncode == 1:
@@ -974,12 +983,18 @@ def _search_files_with_rg(directory: Path, glob: str, pattern: str, cwd: str) ->
     return _trim_output(output or f"rg failed with exit code {r.returncode}")
 
 
-def _iter_search_paths(directory: Path, glob: str):
+def _iter_search_paths(directory: Path, glob: str, cancel=None):
     for path in directory.rglob(glob):
+        if _cancelled(cancel):
+            return
         if any(part in IGNORED for part in path.relative_to(directory).parts):
             continue
         if path.is_file():
             yield path
+
+
+def _cancelled(cancel) -> bool:
+    return bool(cancel and getattr(cancel, "is_set", lambda: False)())
 
 
 def _display_path(path: Path, cwd: str) -> str:

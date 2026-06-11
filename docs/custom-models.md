@@ -1,6 +1,6 @@
 # Custom models
 
-aichs ships with Claude and OpenAI models built in. You can add any provider that exposes an **OpenAI-compatible API** by creating `~/.aichs/models.json`.
+aichs ships with Claude and OpenAI models built in. You can add any provider that exposes an **OpenAI-compatible API** by creating `AICHS_HOME/models.json` (default `~/.aichs/models.json`).
 
 Custom providers appear automatically in the provider dropdown — no code changes needed.
 
@@ -127,7 +127,7 @@ ollama serve
 
 Ollama listens on `http://localhost:11434` by default.
 
-**4. Add to `~/.aichs/models.json`**
+**4. Add to `AICHS_HOME/models.json`**
 
 ```json
 {
@@ -264,7 +264,7 @@ Works with any CLI tool: `op` (1Password), `bw` (Bitwarden), `pass`, `security` 
 
 ## Full example
 
-A `~/.aichs/models.json` combining multiple providers:
+A `AICHS_HOME/models.json` combining multiple providers:
 
 ```json
 {

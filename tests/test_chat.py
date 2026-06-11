@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from services.chat import ChatThread, _active_task_preview, _serialize_anthropic
+from services.chat import ChatThread, _active_task_preview, _content_with_file_blocks, _serialize_anthropic
 from services.crew import ASK_CREW_TOOL_NAME, get_crew_member
 from services.tool_policy import ConversationToolPolicy, ToolApprovalBus
 
@@ -97,6 +97,58 @@ def test_emit_chunk_buffering(qapp, workspace):
     thread._emit_chunk("a" * 600, force=True)
     assert len(chunks) == 1
     assert len(chunks[0]) >= 600
+
+
+def test_chat_thread_resolves_lazy_system_once(workspace, qapp):
+    calls = []
+    thread = ChatThread(
+        "claude-sonnet-4-6",
+        [],
+        lambda: calls.append("build") or "lazy system",
+        str(workspace),
+    )
+
+    assert thread.system == ""
+    assert calls == []
+    assert thread._resolve_system() == "lazy system"
+    assert thread._resolve_system() == "lazy system"
+    assert calls == ["build"]
+
+
+def test_chat_thread_resolves_deferred_file_refs_in_worker_history(workspace, qapp):
+    target = workspace / "src" / "main.py"
+    target.parent.mkdir(exist_ok=True)
+    target.write_bytes(b"print('worker')\n")
+    thread = ChatThread(
+        "claude-sonnet-4-6",
+        [{"role": "user", "content": "check @src/main.py"}],
+        "sys",
+        str(workspace),
+        deferred_file_refs=["src/main.py"],
+        deferred_file_target=0,
+    )
+
+    thread._resolve_deferred_file_refs()
+
+    content = thread.history[0]["content"]
+    assert content[0] == {"type": "text", "text": "check @src/main.py"}
+    assert content[1]["type"] == "file"
+    assert content[1]["path"] == "src/main.py"
+    assert content[1]["content"] == "print('worker')\n"
+    assert thread._deferred_file_refs == []
+
+
+def test_content_with_file_blocks_preserves_existing_image_blocks():
+    content = [{"type": "image", "media_type": "image/png", "data": "abc"}]
+
+    updated = _content_with_file_blocks(
+        content,
+        [{"path": "a.py", "content": "code", "size": 4}],
+    )
+
+    assert updated[0]["type"] == "image"
+    assert updated[1]["type"] == "file"
+    assert content == [{"type": "image", "media_type": "image/png", "data": "abc"}]
 
 
 def test_check_tool_gate_extension_once(workspace, qapp):

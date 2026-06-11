@@ -3,6 +3,8 @@ import html
 import json
 import os
 import re
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -10,12 +12,15 @@ from uuid import uuid4
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QFrame,
-    QLabel, QPushButton, QComboBox, QSizePolicy, QMenu,
+    QLabel, QPushButton, QComboBox, QSizePolicy, QMenu, QFileDialog, QMessageBox,
 )
-from PyQt6.QtCore import Qt, QPoint, QPointF, QSize, QTimer, pyqtSignal, QThread
+from PyQt6.QtCore import (
+    Qt, QPoint, QPointF, QSize, QTimer, pyqtSignal, QThread,
+    QObject, QRunnable, QThreadPool,
+)
 from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap, QTextCursor
 
-from config import IGNORED, MAX_FILE_PREVIEW_BYTES, MAX_TOOL_READ_BYTES
+from config import MAX_FILE_PREVIEW_BYTES
 from config import MODELS, MODEL_PROVIDER
 from storage.repository import ConversationStore
 from storage.settings import SettingsStore, compact_resume_prompt
@@ -46,8 +51,11 @@ from services.content import (
 from services.auto_title import TitleThread
 from services.context_budget import analyze_context
 from services.model_registry import configured_provider_ids
+from services.performance import time_operation
 from services.workspace import build_system
-from services.export import export_conversation_dialog
+from services.export import default_export_name, write_conversation_markdown
+from services.file_search import list_workspace_files
+from services.file_refs import MENTION_RE, files_for_refs, message_file_refs
 from services.processes import RuntimeProcessApi, get_process_manager
 from services.tool_registry import (
     RuntimeCommandApi,
@@ -57,7 +65,8 @@ from services.tool_registry import (
 from ui.theme import (
     palette, input_bar_style, separator_color,
     send_button_style, stop_button_style, floating_button_style,
-    tool_notice_style, center_notice_style, icon_button_style,
+    tool_notice_style, center_notice_style, icon_button_style, inline_code_style,
+    secondary_button_style, surface_frame_style, hint_label_style,
 )
 from services.skills import Skill, load_all as load_skills
 from services.shell_tool import is_shell_tool
@@ -66,8 +75,6 @@ from services.user_terminal import UserTerminalThread
 from services.slash_commands import (
     load_all_commands,
     parse_builtin_command,
-    parse_builtin_prompt_command,
-    parse_extension_command,
     slash_invocation,
 )
 from ui.widgets.bubble import MessageBubble
@@ -83,8 +90,245 @@ from ui.widgets.extensions_dialog import ExtensionsDialog
 
 _INITIAL_RENDER_BYTES = 1 * 1024 * 1024
 _INITIAL_RENDER_MESSAGES = 150
+_INITIAL_RENDER_SYNC_MESSAGES = 40
+_HISTORY_RENDER_BATCH_MESSAGES = 30
 _OLDER_RENDER_BYTES = 512 * 1024
 _OLDER_RENDER_MESSAGES = 75
+_MAX_RENDERED_HISTORY_MESSAGES = 180
+_NEWER_RENDER_BYTES = 512 * 1024
+_NEWER_RENDER_MESSAGES = 75
+_CONTEXT_UI_DEBOUNCE_MS = 120
+
+
+class _ConversationSaveSignals(QObject):
+    done = pyqtSignal(str, bool, str)
+
+
+class _ConversationSaveWorker(QRunnable):
+    def __init__(self, store: ConversationStore, conv_id: str, data: dict):
+        super().__init__()
+        self.signals = _ConversationSaveSignals()
+        self._store = store
+        self._conv_id = conv_id
+        self._data = data
+
+    def run(self):
+        try:
+            self._store.save(self._conv_id, self._data)
+        except Exception as exc:
+            self.signals.done.emit(self._conv_id, False, str(exc))
+            return
+        self.signals.done.emit(self._conv_id, True, "")
+
+
+class _ConversationLoadSignals(QObject):
+    done = pyqtSignal(int, str, object, str)
+
+
+class _ConversationLoadWorker(QRunnable):
+    def __init__(self, store: ConversationStore, generation: int, path: str):
+        super().__init__()
+        self.signals = _ConversationLoadSignals()
+        self._store = store
+        self._generation = generation
+        self._path = str(path)
+
+    def run(self):
+        try:
+            data = self._store.load(self._path)
+        except Exception as exc:
+            self.signals.done.emit(self._generation, self._path, None, str(exc))
+            return
+        self.signals.done.emit(self._generation, self._path, data, "")
+
+
+class _ActiveConversationExportSignals(QObject):
+    done = pyqtSignal(int, str, str)
+
+
+class _ActiveConversationExportWorker(QRunnable):
+    def __init__(self, generation: int, data: dict, out_path: str):
+        super().__init__()
+        self.signals = _ActiveConversationExportSignals()
+        self._generation = generation
+        self._data = copy.deepcopy(data)
+        self._out_path = out_path
+
+    def run(self):
+        try:
+            written = write_conversation_markdown(self._data, self._out_path)
+        except Exception as exc:
+            self.signals.done.emit(self._generation, "", str(exc))
+            return
+        self.signals.done.emit(self._generation, str(written), "")
+
+
+class _MentionFilesSignals(QObject):
+    done = pyqtSignal(int, str, object)
+
+
+class _MentionFilesWorker(QRunnable):
+    def __init__(self, generation: int, cwd: str, limit: int = 800):
+        super().__init__()
+        self.signals = _MentionFilesSignals()
+        self._generation = generation
+        self._cwd = cwd
+        self._limit = limit
+
+    def run(self):
+        self.signals.done.emit(
+            self._generation,
+            self._cwd,
+            _list_mention_files(self._cwd, limit=self._limit),
+        )
+
+
+class _ExtensionCommandSignals(QObject):
+    done = pyqtSignal(str, str, str, object, object)
+
+
+class _ExtensionCommandApprovalBridge(QObject):
+    requested = pyqtSignal(object, object)
+
+    def request_start(self, request) -> bool:
+        done = threading.Event()
+        result = {"approved": False}
+        self.requested.emit(request, (done, result))
+        done.wait()
+        return bool(result.get("approved"))
+
+
+class _ExtensionCommandWorker(QRunnable):
+    def __init__(
+        self,
+        cwd: str,
+        name: str,
+        args: str,
+        *,
+        model: str,
+        history: list[dict],
+        conversation_id: str,
+        approve_start,
+    ):
+        super().__init__()
+        self.signals = _ExtensionCommandSignals()
+        self._cwd = cwd
+        self._name = name
+        self._args = args
+        self._model = model
+        self._history = copy.deepcopy(history)
+        self._conversation_id = conversation_id
+        self._approve_start = approve_start
+
+    def run(self):
+        directives: list[tuple[str, object]] = []
+        runtime = RuntimeCommandApi(
+            show_notice=lambda text: directives.append(("notice", str(text or ""))),
+            send_message=lambda text: directives.append(("send", str(text or ""))),
+            enqueue_message=lambda text: directives.append(("enqueue", str(text or ""))),
+            compact_now=lambda force: directives.append(("compact", bool(force))),
+            compact_and_resume=lambda prompt, force: directives.append(
+                ("continue_after_compact", (str(prompt or ""), bool(force)))
+            ),
+            process_factory=lambda extension_id: RuntimeProcessApi(
+                get_process_manager(),
+                workspace=self._cwd,
+                extension_id=extension_id,
+                approve_start=self._approve_start,
+            ),
+        )
+        result, errors = run_extension_command(
+            self._cwd,
+            self._name,
+            self._args,
+            model=self._model,
+            history=self._history,
+            conversation_id=self._conversation_id,
+            runtime=runtime,
+        )
+        self.signals.done.emit(self._cwd, self._conversation_id, self._name, result, {
+            "errors": list(errors or []),
+            "directives": directives,
+        })
+
+
+class _ExtensionReloadSignals(QObject):
+    done = pyqtSignal(int, str, object)
+
+
+class _ExtensionReloadWorker(QRunnable):
+    def __init__(self, generation: int, cwd: str):
+        super().__init__()
+        self.signals = _ExtensionReloadSignals()
+        self._generation = generation
+        self._cwd = cwd
+
+    def run(self):
+        try:
+            errors = extension_errors(self._cwd)
+        except BaseException as exc:
+            errors = [str(exc)]
+        self.signals.done.emit(self._generation, self._cwd, list(errors or []))
+
+
+class _SkillPickerLoadSignals(QObject):
+    done = pyqtSignal(int, str, object, object, str)
+
+
+class _SkillPickerLoadWorker(QRunnable):
+    def __init__(self, generation: int, cwd: str):
+        super().__init__()
+        self.signals = _SkillPickerLoadSignals()
+        self._generation = generation
+        self._cwd = cwd
+
+    def run(self):
+        try:
+            skills = load_skills(self._cwd)
+            commands = load_all_commands(self._cwd)
+        except BaseException as exc:
+            self.signals.done.emit(self._generation, self._cwd, [], [], str(exc))
+            return
+        self.signals.done.emit(self._generation, self._cwd, skills, commands, "")
+
+
+class _ContextBudgetSignals(QObject):
+    done = pyqtSignal(int, str, str, object, str)
+
+
+class _ContextBudgetWorker(QRunnable):
+    def __init__(
+        self,
+        generation: int,
+        cwd: str,
+        model: str,
+        history: list[dict],
+        settings: SettingsStore,
+        active_skill,
+    ):
+        super().__init__()
+        self.signals = _ContextBudgetSignals()
+        self._generation = generation
+        self._cwd = cwd
+        self._model = model
+        self._history = copy.deepcopy(history)
+        self._settings = settings
+        self._active_skill = active_skill
+
+    def run(self):
+        try:
+            custom = self._settings.load().get("system_prompt", "").strip()
+            budget = analyze_context(
+                self._model,
+                self._cwd,
+                self._history,
+                custom_system=custom,
+                active_skill=self._active_skill,
+            )
+        except BaseException as exc:
+            self.signals.done.emit(self._generation, self._cwd, self._model, None, str(exc))
+            return
+        self.signals.done.emit(self._generation, self._cwd, self._model, budget, "")
 
 
 def _composer_send_icon() -> QIcon:
@@ -144,6 +388,27 @@ class _CompactionRun:
     model: str
     history_snapshot: list[dict]
     data_snapshot: dict
+
+
+def _build_chat_system(cwd: str, skill_prompt: str, crew: CrewMember | None, settings: dict) -> str:
+    custom = str(settings.get("system_prompt") or "").strip()
+    base = skill_prompt.strip() if skill_prompt else (custom or None)
+    system = build_system(cwd, base)
+    return crew_system_prompt(crew, system, crew_prompt(crew, settings)) if crew else system
+
+
+def _thread_history_target_index(
+    source_history: list[dict],
+    thread_history: list[dict],
+    source_index: int | None,
+) -> int | None:
+    if source_index is None or source_index < 0 or source_index >= len(source_history):
+        return None
+    target = source_history[source_index]
+    for idx in range(len(thread_history) - 1, -1, -1):
+        if thread_history[idx] == target:
+            return idx
+    return None
 
 
 def _compact_text(text: str, limit: int = 120) -> str:
@@ -276,8 +541,7 @@ def _tool_notice_html(text: str) -> str:
     if code_detail:
         detail_html = detail_html.replace(" ", "&nbsp;")
         detail_html = (
-            f"<code style=\"background:transparent; color:{p['TEXT']};"
-            "font-family:Consolas, monospace;\">"
+            f"<code style=\"{inline_code_style()}\">"
             f"{detail_html}</code>"
         )
     return (
@@ -445,6 +709,7 @@ class ChatPanel(QWidget):
         self._settings          = settings or SettingsStore()
         self.cwd                = cwd or os.getcwd()
         self._context_ui_suspended = True
+        self._focused_width     = False
         self._approval_bus      = ToolApprovalBus(self)
         self._approval_bus.approval_needed.connect(self._on_approval_needed)
         self.history            = []
@@ -459,13 +724,64 @@ class ChatPanel(QWidget):
         self._runtimes: dict[str, _ConversationRuntime] = {}
         self._orphan_threads: list[QThread] = []
         self._user_terminal_threads: list[UserTerminalThread] = []
+        self._conversation_save_pool = QThreadPool(self)
+        self._conversation_save_pool.setMaxThreadCount(1)
+        self._conversation_load_pool = QThreadPool(self)
+        self._conversation_load_pool.setMaxThreadCount(2)
+        self._conversation_load_generation = 0
+        self._pending_conversation_load_path: str | None = None
+        self._current_conversation_path: str | None = None
+        self._active_export_pool = QThreadPool(self)
+        self._active_export_pool.setMaxThreadCount(1)
+        self._active_export_generation = 0
+        self._active_export_running = False
+        self._mention_files_pool = QThreadPool(self)
+        self._mention_files_pool.setMaxThreadCount(1)
+        self._mention_files_generation = 0
+        self._mention_files_loading = False
+        self._mention_files_cwd = ""
+        self._mention_files: list[tuple[str, str]] = []
+        self._extension_command_pool = QThreadPool(self)
+        self._extension_command_pool.setMaxThreadCount(1)
+        self._extension_command_approval = _ExtensionCommandApprovalBridge(self)
+        self._extension_command_approval.requested.connect(
+            self._on_extension_process_approval_requested
+        )
+        self._extension_reload_pool = QThreadPool(self)
+        self._extension_reload_pool.setMaxThreadCount(1)
+        self._extension_reload_generation = 0
+        self._skill_picker_pool = QThreadPool(self)
+        self._skill_picker_pool.setMaxThreadCount(1)
+        self._skill_picker_generation = 0
+        self._skill_picker_loading = False
+        self._skill_picker_query = ""
+        self._slash_commands: list[object] = []
+        self._slash_commands_cwd = ""
+        self._context_budget_pool = QThreadPool(self)
+        self._context_budget_pool.setMaxThreadCount(1)
+        self._context_budget_generation = 0
+        self._context_budget_running = False
+        self._context_budget_pending = False
+        self._context_budget_cache = None
+        self._context_budget_model = ""
+        self._file_mention_text = ""
         self._auto_scroll       = True
         self._programmatic_scroll = False
         self._history_prepend_enabled = True
         self._last_scroll_value = 0
         self._bubbles: dict[int, MessageBubble] = {}
+        self._history_widgets: dict[int, list[QWidget]] = {}
         self._render_start_index = 0
+        self._render_end_index = 0
         self._older_btn: QPushButton | None = None
+        self._newer_btn: QPushButton | None = None
+        self._message_layout_batch_depth = 0
+        self._pending_history_render_target: int | None = None
+        self._pending_history_render_next = -1
+        self._history_render_timer = QTimer(self)
+        self._history_render_timer.setSingleShot(True)
+        self._history_render_timer.setInterval(0)
+        self._history_render_timer.timeout.connect(self._render_pending_history_batch)
         self._stream_buffer: list[str] = []
         self._stream_flush_timer = QTimer(self)
         self._stream_flush_timer.setInterval(100)
@@ -494,8 +810,13 @@ class ChatPanel(QWidget):
         self._scroll_after_load_finish_timer.setSingleShot(True)
         self._scroll_after_load_finish_timer.setInterval(300)
         self._scroll_after_load_finish_timer.timeout.connect(self._finish_scroll_after_load)
+        self._context_update_timer = QTimer(self)
+        self._context_update_timer.setSingleShot(True)
+        self._context_update_timer.setInterval(_CONTEXT_UI_DEBOUNCE_MS)
+        self._context_update_timer.timeout.connect(self._apply_context_ui)
 
         root = QVBoxLayout(self)
+        self._root_layout = root
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
@@ -557,6 +878,7 @@ class ChatPanel(QWidget):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
         self.msg_container = _MessageListContainer(self._on_message_list_resize)
         self.msg_layout = QVBoxLayout(self.msg_container)
@@ -632,9 +954,10 @@ class ChatPanel(QWidget):
         root.addWidget(self._input_frame)
 
         self._apply_chrome()
+        self.set_focused_width(True)
         self._apply_input_preferences()
         self._context_ui_suspended = False
-        self._update_context_ui()
+        self._update_context_ui(immediate=True)
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -735,6 +1058,9 @@ class ChatPanel(QWidget):
         rt.queued.clear()
 
     def _reset_view(self):
+        self._conversation_load_generation += 1
+        self._pending_conversation_load_path = None
+        self._current_conversation_path = None
         self._auto_scroll = True
         self.jump_btn.hide()
         self.history       = []
@@ -746,8 +1072,11 @@ class ChatPanel(QWidget):
         self._stream_buffer.clear()
         self._stream_flush_timer.stop()
         self._bubbles      = {}
+        self._history_widgets = {}
         self._render_start_index = 0
+        self._render_end_index = 0
         self._older_btn = None
+        self._newer_btn = None
         self._update_queue_ui()
         self._clear_bubbles()
         self._update_context_ui()
@@ -769,6 +1098,7 @@ class ChatPanel(QWidget):
         self.stop_managed_processes()
         self.store = store
         self.cwd = cwd or os.getcwd()
+        self._invalidate_mention_files()
         for conv_id in list(self._runtimes):
             self._dispose_runtime(conv_id)
         self._reset_view()
@@ -786,12 +1116,46 @@ class ChatPanel(QWidget):
             self._reset_view()
 
     def load_conversation(self, path: str):
-        data = self.store.load(path)
-        if self.conv_id == data.get("id") and self.conv_data is not None:
+        path = str(path)
+        if self._current_conversation_path == path and self.conv_data is not None:
             return
-        self.new_conversation()
-        self.conv_id   = data["id"]
+        if self._pending_conversation_load_path == path:
+            return
+
+        self._flush_stream_buffer()
+        self._detach_visible_run_ui()
+        self._save()
+        self._reset_view()
+        self._conversation_load_generation += 1
+        generation = self._conversation_load_generation
+        self._pending_conversation_load_path = path
+        self._add_notice("Loading conversation...")
+        worker = _ConversationLoadWorker(self.store, generation, path)
+        worker.signals.done.connect(self._on_conversation_load_done)
+        self._conversation_load_pool.start(worker)
+
+    def _on_conversation_load_done(self, generation: int, path: str, data: object, error: str):
+        if (
+            generation != self._conversation_load_generation
+            or path != self._pending_conversation_load_path
+        ):
+            return
+        self._pending_conversation_load_path = None
+        if error:
+            self._add_notice(f"Conversation load failed: {error}")
+            return
+        if not isinstance(data, dict):
+            self._add_notice("Conversation load failed: invalid conversation data.")
+            return
+        self._apply_loaded_conversation(path, data)
+
+    def _apply_loaded_conversation(self, path: str, data: dict):
+        self._clear_bubbles()
+        conv_id = str(data.get("id") or Path(path).stem)
+        data["id"] = conv_id
+        self.conv_id   = conv_id
         self.conv_data = data
+        self._current_conversation_path = str(path)
         self.conversation_changed.emit(self.conv_id)
         self.history   = prepare_for_storage(data.get("messages", []))
         self.conv_data["messages"] = self.history
@@ -826,10 +1190,26 @@ class ChatPanel(QWidget):
         self._scroll_layout_timer.stop()
         self._scroll_zero_timer.stop()
         self._prepend_restore_timer.stop()
+        self._history_render_timer.stop()
         for timer in self._scroll_after_load_timers:
             timer.stop()
         self._scroll_after_load_finish_timer.stop()
+        self._context_update_timer.stop()
+        self._conversation_save_pool.waitForDone(3000)
+        self._conversation_load_pool.waitForDone(3000)
+        self._active_export_pool.waitForDone(3000)
+        self._mention_files_pool.waitForDone(3000)
+        self._extension_command_pool.waitForDone(3000)
+        self._extension_reload_pool.waitForDone(3000)
+        self._skill_picker_pool.waitForDone(3000)
+        self._context_budget_pool.waitForDone(3000)
         self.stop_managed_processes()
+
+    def set_focused_width(self, focused: bool):
+        self._focused_width = False
+        self.msg_container.setMaximumWidth(16777215)
+        self._input_frame.setMaximumWidth(16777215)
+        self.scroll.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
     def attach_file(self, path: str):
         try:
@@ -877,6 +1257,8 @@ class ChatPanel(QWidget):
     def export_conversation(self):
         if not self.history:
             return
+        if self._active_export_running:
+            return
         if self.conv_id and self.conv_data is not None:
             self._save()
             data = dict(self.conv_data)
@@ -889,7 +1271,28 @@ class ChatPanel(QWidget):
                 "updated_at": datetime.now().isoformat(),
                 "messages": list(self.history),
             }
-        export_conversation_dialog(data, parent=self.window())
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(),
+            "Export conversation",
+            default_export_name(data),
+            "Markdown (*.md)",
+        )
+        if not path:
+            return
+        self._active_export_generation += 1
+        generation = self._active_export_generation
+        self._active_export_running = True
+        worker = _ActiveConversationExportWorker(generation, data, path)
+        worker.signals.done.connect(self._on_active_export_done)
+        self._active_export_pool.start(worker)
+
+    def _on_active_export_done(self, generation: int, _path: str, error: str):
+        if generation != self._active_export_generation:
+            return
+        self._active_export_running = False
+        if error:
+            self._add_notice(f"Conversation export failed: {error}")
+            QMessageBox.warning(self, "Export failed", error)
 
     def show_extensions(self):
         ExtensionsDialog(
@@ -966,8 +1369,6 @@ class ChatPanel(QWidget):
             self._run_user_terminal_from_input(text)
             return
 
-        files = _message_files(self.cwd, text, pasted_file_refs)
-
         cmd = parse_builtin_command(text) if text and not images else None
         if cmd:
             if self._visible_run() or self._visible_compaction():
@@ -983,7 +1384,7 @@ class ChatPanel(QWidget):
             self._run_builtin_command(cmd)
             return
 
-        builtin_prompt_cmd = parse_builtin_prompt_command(text) if text and not images else None
+        builtin_prompt_cmd = ChatPanel._loaded_builtin_prompt_command(self, text) if text and not images else None
         if builtin_prompt_cmd:
             invocation = slash_invocation(text)
             trailing_text = invocation[1] if invocation else ""
@@ -996,10 +1397,9 @@ class ChatPanel(QWidget):
                 self._activate_extension_command(builtin_prompt_cmd)
                 return
             text = trailing_text
-            files = _message_files(self.cwd, text, pasted_file_refs)
             self.composer.set_skill(self._skill_from_command(builtin_prompt_cmd))
 
-        ext_cmd = parse_extension_command(text, self.cwd) if text and not images else None
+        ext_cmd = ChatPanel._loaded_extension_command(self, text) if text and not images else None
         if ext_cmd:
             invocation = slash_invocation(text)
             trailing_text = invocation[1] if invocation else ""
@@ -1022,15 +1422,21 @@ class ChatPanel(QWidget):
                 self._activate_extension_command(ext_cmd)
                 return
             text = trailing_text
-            files = _message_files(self.cwd, text, pasted_file_refs)
             self.composer.set_skill(self._skill_from_extension_command(ext_cmd))
+        elif ChatPanel._slash_command_snapshot_needed(self, text, images):
+            self._start_skill_picker_load()
+            self._add_notice("Slash commands are still loading. Try again in a moment.")
+            return
+
+        file_refs = message_file_refs(text, pasted_file_refs)
 
         draft = {
-            "content": build_user_content(text, images, files),
+            "content": build_user_content(text, images, []),
             "title_text": text or "Image",
             "skill": self.composer.active_skill(),
             "crew": _first_summoned_crew(text, self._settings.load()),
             "chat_refs": pasted_chat_refs,
+            "file_refs": file_refs,
         }
 
         self.composer.clear()
@@ -1066,9 +1472,8 @@ class ChatPanel(QWidget):
             user_msg["synthetic"] = draft["synthetic"]
         self.history.append(user_msg)
         user_idx = len(self.history) - 1
-        if self._render_start_index == user_idx:
-            self._render_start_index = user_idx
-        if is_visible_message(user_msg):
+        rerendered_tail = self._ensure_tail_rendered_for_append(user_idx)
+        if is_visible_message(user_msg) and (not rerendered_tail or user_idx not in self._bubbles):
             self._add_bubble(content, is_user=True, history_index=user_idx, timestamp=now)
         chat_ref_context = _chat_ref_context(draft.get("chat_refs"))
         if chat_ref_context:
@@ -1077,13 +1482,19 @@ class ChatPanel(QWidget):
                 "content": chat_ref_context,
                 "synthetic": "chat_refs",
             })
+            self._render_end_index = max(self._render_end_index, len(self.history))
         if draft.get("crew"):
             self._add_notice(_crew_notice_text(crew_metadata(draft["crew"], self._settings.load()), "joined"))
 
         self._save(touch_updated=True)
         self._maybe_auto_title()
 
-        self._start_assistant(skill=draft.get("skill"), crew=draft.get("crew"))
+        self._start_assistant(
+            skill=draft.get("skill"),
+            crew=draft.get("crew"),
+            deferred_file_refs=draft.get("file_refs") or [],
+            deferred_file_target=user_idx,
+        )
         self._pin_to_bottom()
 
     def _run_user_terminal_from_input(self, text: str):
@@ -1110,7 +1521,9 @@ class ChatPanel(QWidget):
         user_msg = {"role": "user", "content": content, "created_at": now}
         self.history.append(user_msg)
         user_idx = len(self.history) - 1
-        self._add_bubble(content, is_user=True, history_index=user_idx, timestamp=now)
+        rerendered_tail = self._ensure_tail_rendered_for_append(user_idx)
+        if not rerendered_tail or user_idx not in self._bubbles:
+            self._add_bubble(content, is_user=True, history_index=user_idx, timestamp=now)
         self._add_tool_notice(f"Running command: {command}")
         card = self._add_terminal_card()
         self._save(touch_updated=True)
@@ -1142,13 +1555,18 @@ class ChatPanel(QWidget):
             "messages":   [],
         }
         self._runtime_for(self.conv_id)
-        self.store.save(self.conv_id, self.conv_data)
-        self.saved.emit()
+        self._queue_conversation_save(self.conv_id, self.conv_data)
         self.conversation_created.emit(self.conv_id)
         self.conversation_changed.emit(self.conv_id)
         self._sync_header_title()
 
-    def _start_assistant(self, skill=None, crew: CrewMember | None = None):
+    def _start_assistant(
+        self,
+        skill=None,
+        crew: CrewMember | None = None,
+        deferred_file_refs: list[str] | None = None,
+        deferred_file_target: int | None = None,
+    ):
         if not self.conv_id or self.conv_data is None:
             return
         model = self._model_for_crew(crew)
@@ -1164,6 +1582,8 @@ class ChatPanel(QWidget):
             skill=skill,
             crew=crew,
             visible=True,
+            deferred_file_refs=deferred_file_refs,
+            deferred_file_target=deferred_file_target,
         )
 
     def _start_assistant_run(
@@ -1176,14 +1596,23 @@ class ChatPanel(QWidget):
         skill=None,
         crew: CrewMember | None = None,
         visible: bool = False,
+        deferred_file_refs: list[str] | None = None,
+        deferred_file_target: int | None = None,
     ):
         run_id = uuid4().hex
         settings = self._settings.load()
-        system = self._build_system(skill, crew=crew, settings=settings)
+        cwd = self.cwd
+        skill_prompt = str(getattr(skill, "prompt", "") or "")
+        system = lambda: _build_chat_system(cwd, skill_prompt, crew, copy.deepcopy(settings))
         allowed_tools = list(crew.tools) if crew else (skill.tools if skill else None)
         write_roots = list(crew.write_roots) if crew else None
         tool_policy = self._runtime_for(conv_id).tool_policy
         thread_history = crew_context_window(history_snapshot) if crew else copy.deepcopy(history_snapshot)
+        thread_file_target = _thread_history_target_index(
+            history_snapshot,
+            thread_history,
+            deferred_file_target,
+        )
         thread = ChatThread(
             model, copy.deepcopy(thread_history), system, self.cwd,
             allowed_tools=allowed_tools,
@@ -1193,6 +1622,8 @@ class ChatPanel(QWidget):
             enable_crew_tool=(crew is None),
             crew_settings=settings,
             configured_providers=set(self._configured_providers()),
+            deferred_file_refs=deferred_file_refs,
+            deferred_file_target=thread_file_target,
         )
         crew_meta = crew_metadata(crew, settings) if crew else None
         bubble = (
@@ -1242,6 +1673,10 @@ class ChatPanel(QWidget):
         for k in list(self._bubbles.keys()):
             if k > user_idx:
                 del self._bubbles[k]
+        for k in list(self._history_widgets.keys()):
+            if k > user_idx:
+                del self._history_widgets[k]
+        self._render_end_index = min(self._render_end_index, len(self.history))
         self._sync_regenerate_flags()
         self._save(touch_updated=True)
         self._enter_streaming()
@@ -1268,12 +1703,18 @@ class ChatPanel(QWidget):
         for k in list(self._bubbles.keys()):
             if k >= idx:
                 del self._bubbles[k]
+        for k in list(self._history_widgets.keys()):
+            if k >= idx:
+                del self._history_widgets[k]
 
         self.history = self.history[:idx]
         now = datetime.now().isoformat()
         self.history.append({"role": "user", "content": new_content, "created_at": now})
         new_idx = len(self.history) - 1
-        self._add_bubble(new_content, is_user=True, history_index=new_idx, timestamp=now)
+        self._render_end_index = min(self._render_end_index, new_idx)
+        rerendered_tail = self._ensure_tail_rendered_for_append(new_idx)
+        if not rerendered_tail or new_idx not in self._bubbles:
+            self._add_bubble(new_content, is_user=True, history_index=new_idx, timestamp=now)
         self._sync_regenerate_flags()
         self._save(touch_updated=True)
         self._enter_streaming()
@@ -1294,8 +1735,7 @@ class ChatPanel(QWidget):
             "model":      self.model_combo.currentText(),
             "messages":   prepare_for_storage(self.history[: idx + 1]),
         }
-        self.store.save(conv_id, data)
-        self.saved.emit()
+        self._queue_conversation_save(conv_id, data)
 
     # ── slots ─────────────────────────────────────────────────────────────────
 
@@ -1357,10 +1797,12 @@ class ChatPanel(QWidget):
         settings: dict | None = None,
     ) -> str:
         settings = settings or self._settings.load()
-        custom = settings.get("system_prompt", "").strip()
-        base = skill.prompt if skill else (custom or None)
-        system = build_system(self.cwd, base)
-        return crew_system_prompt(crew, system, crew_prompt(crew, settings)) if crew else system
+        return _build_chat_system(
+            self.cwd,
+            str(getattr(skill, "prompt", "") or ""),
+            crew,
+            copy.deepcopy(settings),
+        )
 
     def _model_for_crew(self, crew: CrewMember | None) -> str:
         current = self.model_combo.currentText()
@@ -1381,16 +1823,7 @@ class ChatPanel(QWidget):
             if self._skill_picker:
                 self._skill_picker.hide()
             return
-        if self._skill_picker is None:
-            self._skill_picker = SkillPicker(
-                load_skills(self.cwd),
-                load_all_commands(self.cwd),
-                include_terminal=True,
-                parent=self,
-            )
-            self._skill_picker.skill_selected.connect(self._on_skill_selected)
-            self._skill_picker.command_selected.connect(self._on_command_selected)
-            self._skill_picker.terminal_selected.connect(self._on_terminal_hint_selected)
+        self._ensure_skill_picker(text)
         self._skill_picker.filter(text)
         if self._skill_picker.count() == 0:
             self._skill_picker.hide()
@@ -1404,16 +1837,7 @@ class ChatPanel(QWidget):
             if self._skill_picker:
                 self._skill_picker.hide()
             return
-        if self._skill_picker is None:
-            self._skill_picker = SkillPicker(
-                load_skills(self.cwd),
-                load_all_commands(self.cwd),
-                include_terminal=True,
-                parent=self,
-            )
-            self._skill_picker.skill_selected.connect(self._on_skill_selected)
-            self._skill_picker.command_selected.connect(self._on_command_selected)
-            self._skill_picker.terminal_selected.connect(self._on_terminal_hint_selected)
+        self._ensure_skill_picker(text)
         self._skill_picker.filter(text)
         if self._skill_picker.count() == 0:
             self._skill_picker.hide()
@@ -1422,23 +1846,149 @@ class ChatPanel(QWidget):
         self._skill_picker.show()
         self._skill_picker.raise_()
 
+    def _ensure_skill_picker(self, query: str):
+        self._skill_picker_query = str(query or "")
+        if self._skill_picker is None:
+            self._skill_picker = SkillPicker(
+                [],
+                [],
+                include_terminal=True,
+                parent=self,
+            )
+            self._skill_picker.skill_selected.connect(self._on_skill_selected)
+            self._skill_picker.command_selected.connect(self._on_command_selected)
+            self._skill_picker.terminal_selected.connect(self._on_terminal_hint_selected)
+            self._start_skill_picker_load()
+
+    def _start_skill_picker_load(self):
+        if self._skill_picker_loading:
+            return
+        self._skill_picker_loading = True
+        self._skill_picker_generation += 1
+        generation = self._skill_picker_generation
+        worker = _SkillPickerLoadWorker(generation, self.cwd)
+        worker.signals.done.connect(self._on_skill_picker_loaded)
+        self._skill_picker_pool.start(worker)
+
+    def _on_skill_picker_loaded(self, generation: int, cwd: str, skills, commands, error: str):
+        if generation != self._skill_picker_generation or cwd != self.cwd:
+            return
+        self._skill_picker_loading = False
+        if error:
+            self._add_notice(f"Slash command load failed: {error}")
+            return
+        self._slash_commands = list(commands or [])
+        self._slash_commands_cwd = cwd
+        if not self._skill_picker:
+            return
+        query = self._skill_picker_query
+        self._skill_picker.set_items(list(skills or []), list(commands or []), query=query)
+        if self._skill_picker.count() == 0:
+            self._skill_picker.hide()
+            return
+        self._position_skill_picker()
+        self._skill_picker.show()
+        self._skill_picker.raise_()
+
+    def _loaded_extension_command(self, text: str):
+        invocation = slash_invocation(text)
+        if not invocation or self._slash_commands_cwd != self.cwd:
+            return None
+        name, _args = invocation
+        wanted = name.casefold()
+        for command in self._slash_commands:
+            if getattr(command, "source", "builtin") == "builtin":
+                continue
+            if str(getattr(command, "name", "")).casefold() == wanted:
+                return command
+        return None
+
+    def _loaded_builtin_prompt_command(self, text: str):
+        invocation = slash_invocation(text)
+        if not invocation or self._slash_commands_cwd != self.cwd:
+            return None
+        name, _args = invocation
+        wanted = name.casefold()
+        for command in self._slash_commands:
+            if getattr(command, "source", "builtin") != "builtin":
+                continue
+            if getattr(command, "executable", False):
+                continue
+            if str(getattr(command, "name", "")).casefold() == wanted:
+                return command
+        return None
+
+    def _slash_command_snapshot_needed(self, text: str, images: list) -> bool:
+        if images or not slash_invocation(text):
+            return False
+        if self._skill_picker_loading:
+            return True
+        return self._slash_commands_cwd != self.cwd
+
     def _on_file_mention_changed(self, text: str):
+        self._file_mention_text = text
         if not text:
             if self._file_picker:
                 self._file_picker.hide()
             return
+        self._ensure_mention_files_loading()
+        files = self._mention_file_candidates()
         if self._file_picker is None:
             self._file_picker = FileMentionPicker(
-                _list_mention_files(self.cwd),
+                files,
                 crew=_enabled_crew(self._settings.load()),
                 parent=self,
             )
             self._file_picker.file_selected.connect(self._on_file_mention_selected)
             self._file_picker.crew_selected.connect(self._on_crew_mention_selected)
         else:
-            self._file_picker.set_files(_list_mention_files(self.cwd))
+            self._file_picker.set_files(files)
             self._file_picker.set_crew(_enabled_crew(self._settings.load()))
         self._file_picker.filter(text)
+        if self._file_picker.count() == 0:
+            self._file_picker.hide()
+            return
+        self._position_file_picker()
+        self._file_picker.show()
+        self._file_picker.raise_()
+
+    def _invalidate_mention_files(self):
+        self._mention_files_generation += 1
+        self._mention_files_loading = False
+        self._mention_files_cwd = ""
+        self._mention_files = []
+        if self._file_picker:
+            self._file_picker.set_files([])
+
+    def _ensure_mention_files_loading(self):
+        if self._mention_files_cwd == self.cwd:
+            return
+        if self._mention_files_loading:
+            return
+        self._mention_files_generation += 1
+        generation = self._mention_files_generation
+        self._mention_files_loading = True
+        worker = _MentionFilesWorker(generation, self.cwd)
+        worker.signals.done.connect(self._on_mention_files_ready)
+        self._mention_files_pool.start(worker)
+
+    def _mention_file_candidates(self) -> list[tuple[str, str]]:
+        if self._mention_files_cwd == self.cwd:
+            return self._mention_files
+        return []
+
+    def _on_mention_files_ready(self, generation: int, cwd: str, files: object):
+        if generation != self._mention_files_generation:
+            return
+        self._mention_files_loading = False
+        if cwd != self.cwd:
+            return
+        self._mention_files_cwd = cwd
+        self._mention_files = list(files or [])
+        if not self._file_picker or not self._file_mention_text:
+            return
+        self._file_picker.set_files(self._mention_files)
+        self._file_picker.filter(self._file_mention_text)
         if self._file_picker.count() == 0:
             self._file_picker.hide()
             return
@@ -1546,24 +2096,63 @@ class ChatPanel(QWidget):
         elif name == "reload":
             self._skill_picker = None
             self._file_picker = None
+            self._invalidate_mention_files()
             self._update_context_ui()
             self._refresh_extension_ui()
-            errors = extension_errors(self.cwd)
-            if errors:
-                self._add_notice(f"Reloaded with {len(errors)} extension error(s). Check the extension file.")
-            else:
-                self._add_notice("Reloaded skills and extensions.")
+            self._start_extension_reload_check()
+
+    def _start_extension_reload_check(self) -> None:
+        self._extension_reload_generation += 1
+        generation = self._extension_reload_generation
+        worker = _ExtensionReloadWorker(generation, self.cwd)
+        worker.signals.done.connect(self._on_extension_reload_done)
+        self._extension_reload_pool.start(worker)
+
+    def _on_extension_reload_done(self, generation: int, cwd: str, errors) -> None:
+        if generation != self._extension_reload_generation or cwd != self.cwd:
+            return
+        errors = list(errors or [])
+        if errors:
+            self._add_notice(f"Reloaded with {len(errors)} extension error(s). Check the extension file.")
+        else:
+            self._add_notice("Reloaded skills and extensions.")
 
     def _run_extension_command(self, name: str, args: str):
-        result, errors = run_extension_command(
+        worker = _ExtensionCommandWorker(
             self.cwd,
             name,
             args,
             model=self.model_combo.currentText(),
             history=copy.deepcopy(self.history),
             conversation_id=self.conv_id or "",
-            runtime=self._runtime_command_api(),
+            approve_start=self._extension_command_approval.request_start,
         )
+        worker.signals.done.connect(self._on_extension_command_done)
+        self._extension_command_pool.start(worker)
+
+    def _on_extension_process_approval_requested(self, request, pending) -> None:
+        done, result = pending
+        try:
+            result["approved"] = confirm_process_start(self.window(), request)
+        finally:
+            done.set()
+
+    def _on_extension_command_done(
+        self,
+        cwd: str,
+        conversation_id: str,
+        _name: str,
+        result,
+        payload,
+    ):
+        if cwd != self.cwd:
+            return
+        if conversation_id and self.conv_id and conversation_id != self.conv_id:
+            return
+        details = payload if isinstance(payload, dict) else {}
+        for action, value in details.get("directives", []) or []:
+            self._apply_extension_command_directive(str(action), value)
+        errors = list(details.get("errors", []) or [])
         if errors:
             self._add_notice(f"Extension command failed: {errors[-1].splitlines()[-1]}")
             return
@@ -1573,6 +2162,19 @@ class ChatPanel(QWidget):
             notice = str(result.get("notice") or result.get("message") or "").strip()
             if notice:
                 self._add_notice(notice)
+
+    def _apply_extension_command_directive(self, action: str, value) -> None:
+        if action == "notice":
+            self._add_notice(str(value or ""))
+        elif action == "send":
+            self._send_or_queue_text(str(value or ""), prefer_queue=False)
+        elif action == "enqueue":
+            self._send_or_queue_text(str(value or ""), prefer_queue=True)
+        elif action == "compact":
+            self.compact_conversation(force=bool(value))
+        elif action == "continue_after_compact":
+            prompt, force = value if isinstance(value, tuple) else ("", True)
+            self._compact_and_resume_from_command(str(prompt or ""), bool(force))
 
     def _runtime_command_api(self) -> RuntimeCommandApi:
         return RuntimeCommandApi(
@@ -1633,6 +2235,11 @@ class ChatPanel(QWidget):
             return
         model = self.model_combo.currentText()
         budget = self._context_budget()
+        if budget is None:
+            self._update_context_ui(immediate=True)
+            if not force:
+                self._add_notice("Context usage is still calculating. Try compact again in a moment.")
+                return
         if not force and not should_compact(
             model, self.history, context_tokens=budget.used_tokens,
         ):
@@ -1865,8 +2472,7 @@ class ChatPanel(QWidget):
             history.append(msg)
             data["messages"] = prepare_for_storage(history)
             data["updated_at"] = now
-            self.store.save(conv_id, data)
-            self.saved.emit()
+            self._queue_conversation_save(conv_id, data)
 
     def _on_user_terminal_line(self, conv_id: str | None, card: TerminalCard, line: str):
         if conv_id != self.conv_id:
@@ -1934,8 +2540,7 @@ class ChatPanel(QWidget):
             if run.conv_id and run_data:
                 run_data["messages"] = run_history
                 run_data["updated_at"] = now
-                self.store.save(run.conv_id, run_data)
-                self.saved.emit()
+                self._queue_conversation_save(run.conv_id, run_data)
             asst_idx = -1
 
         bubble = run.bubble if is_current else None
@@ -1951,6 +2556,8 @@ class ChatPanel(QWidget):
         if is_current and bubble:
             bubble._history_index = asst_idx
             self._bubbles[asst_idx] = bubble
+            self._track_history_widget(asst_idx, bubble)
+            self._render_end_index = max(self._render_end_index, asst_idx + 1)
             bubble.set_usage(assistant_msg.get("usage"))
             bubble_idx = self.msg_layout.indexOf(bubble)
             offset = [1]
@@ -1984,7 +2591,7 @@ class ChatPanel(QWidget):
             self._maybe_auto_title()
             model = self.model_combo.currentText()
             budget = self._context_budget()
-            if should_compact(model, self.history, context_tokens=budget.used_tokens):
+            if budget and should_compact(model, self.history, context_tokens=budget.used_tokens):
                 self.compact_conversation(force=False)
             else:
                 self._save(touch_updated=True)
@@ -2016,8 +2623,7 @@ class ChatPanel(QWidget):
             data = copy.deepcopy(compaction.data_snapshot)
             data["messages"] = prepare_for_storage(compacted)
             data["updated_at"] = datetime.now().isoformat()
-            self.store.save(conv_id, data)
-            self.saved.emit()
+            self._queue_conversation_save(conv_id, data)
             self._refresh_runtime_controls()
             self._start_next_queued_for(conv_id, data)
         self._keep_thread_until_finished(completed_thread)
@@ -2076,8 +2682,7 @@ class ChatPanel(QWidget):
                 return
             self.conv_data["title"] = title
             self.conv_data["title_auto"] = False
-            self.store.save(self.conv_id, self.conv_data)
-            self.saved.emit()
+            self._queue_conversation_save(self.conv_id, self.conv_data)
             self._sync_header_title()
         finally:
             self._keep_thread_until_finished(completed_thread)
@@ -2156,25 +2761,75 @@ class ChatPanel(QWidget):
             self.conv_data["messages"]   = prepare_for_storage(self.history)
             if touch_updated or not self.conv_data.get("updated_at"):
                 self.conv_data["updated_at"] = datetime.now().isoformat()
-            self.store.save(self.conv_id, self.conv_data)
-            self.saved.emit()
+            self._queue_conversation_save(self.conv_id, self.conv_data)
         self._update_context_ui()
 
-    def _context_budget(self):
-        custom = self._settings.load().get("system_prompt", "").strip()
-        return analyze_context(
-            self.model_combo.currentText(),
-            self.cwd,
-            self.history,
-            custom_system=custom,
-        )
+    def _queue_conversation_save(self, conv_id: str, data: dict):
+        worker = _ConversationSaveWorker(self.store, conv_id, copy.deepcopy(data))
+        worker.signals.done.connect(self._on_conversation_save_done)
+        self._conversation_save_pool.start(worker)
 
-    def _update_context_ui(self):
+    def _on_conversation_save_done(self, conv_id: str, ok: bool, error: str):
+        if ok:
+            self.saved.emit()
+            return
+        if conv_id == self.conv_id:
+            self._add_notice(f"Conversation save failed: {error}")
+
+    def _context_budget(self):
+        return self._context_budget_cache
+
+    def _update_context_ui(self, *, immediate: bool = False):
         if getattr(self, "_context_ui_suspended", False):
             return
-        budget = self._context_budget()
-        self.context_ring.set_budget(budget)
-        self._refresh_extension_ui()
+        if immediate:
+            self._context_update_timer.stop()
+            self._start_context_budget_analysis()
+            return
+        self._context_update_timer.start()
+
+    def _apply_context_ui(self):
+        self._start_context_budget_analysis()
+
+    def _start_context_budget_analysis(self):
+        if getattr(self, "_context_ui_suspended", False):
+            return
+        if self._context_budget_running:
+            self._context_budget_pending = True
+            return
+        self._context_budget_running = True
+        self._context_budget_pending = False
+        self._context_budget_generation += 1
+        generation = self._context_budget_generation
+        model = self.model_combo.currentText()
+        worker = _ContextBudgetWorker(
+            generation,
+            self.cwd,
+            model,
+            self.history,
+            self._settings,
+            self.composer.active_skill() if hasattr(self, "composer") else None,
+        )
+        worker.signals.done.connect(self._on_context_budget_ready)
+        self._context_budget_pool.start(worker)
+
+    def _on_context_budget_ready(self, generation: int, cwd: str, model: str, budget, error: str):
+        if generation != self._context_budget_generation:
+            return
+        self._context_budget_running = False
+        if cwd != self.cwd or model != self.model_combo.currentText():
+            if self._context_budget_pending:
+                self._start_context_budget_analysis()
+            return
+        if error:
+            self._add_notice(f"Context analysis failed: {error}")
+        elif budget is not None:
+            self._context_budget_cache = budget
+            self._context_budget_model = model
+            self.context_ring.set_budget(budget)
+            self._refresh_extension_ui()
+        if self._context_budget_pending:
+            self._start_context_budget_analysis()
 
     def _flush_stream_buffer(self):
         run = self._visible_run()
@@ -2198,8 +2853,12 @@ class ChatPanel(QWidget):
             self._bottom()
 
     def _show_context_breakdown(self):
+        budget = self._context_budget()
+        if budget is None:
+            self._start_context_budget_analysis()
+            return
         ContextBreakdownDialog(
-            self._context_budget(),
+            budget,
             self.model_combo.currentText(),
             parent=self.window(),
         ).exec()
@@ -2219,7 +2878,7 @@ class ChatPanel(QWidget):
         self._bottom()
         return card
 
-    def _add_terminal_result_card(self, msg: dict, *, at_top: bool = False) -> TerminalCard:
+    def _add_terminal_result_card(self, msg: dict, *, at_top: bool = False) -> QWidget:
         result = msg.get("terminal") if isinstance(msg.get("terminal"), dict) else {}
         card = TerminalCard()
         card.set_output(str(result.get("output") or ""))
@@ -2228,10 +2887,11 @@ class ChatPanel(QWidget):
             detail=_terminal_status_detail(result),
             ref=_terminal_result_ref(result),
         )
-        insert_at = 1 if at_top and self._older_btn else 0 if at_top else self.msg_layout.count() - 1
-        self.msg_layout.insertWidget(insert_at, self._wrap_artifact(card))
+        wrapper = self._wrap_artifact(card)
+        insert_at = self._history_insert_index(at_top=at_top)
+        self.msg_layout.insertWidget(insert_at, wrapper)
         self._bottom()
-        return card
+        return wrapper
 
     def _add_file_card(self, file_path: str):
         abs_path = str(
@@ -2301,9 +2961,10 @@ class ChatPanel(QWidget):
         )
         row.addWidget(lbl, 1)
         row.addStretch()
-        insert_at = 1 if at_top and self._older_btn else 0 if at_top else self.msg_layout.count() - 1
+        insert_at = self._history_insert_index(at_top=at_top)
         self.msg_layout.insertWidget(insert_at, wrapper)
         self._bottom()
+        return wrapper
 
     def _add_tool_notice(self, text: str, debug_text: str = ""):
         self._insert_tool_notice(text, debug_text, emit_activity=True)
@@ -2349,6 +3010,8 @@ class ChatPanel(QWidget):
         self.msg_layout.insertWidget(self.msg_layout.count() - 1, bubble)
         if history_index >= 0:
             self._bubbles[history_index] = bubble
+            self._track_history_widget(history_index, bubble)
+            self._render_end_index = max(self._render_end_index, history_index + 1)
         self._bottom()
         return bubble
 
@@ -2404,6 +3067,12 @@ class ChatPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
+    def _ensure_tail_rendered_for_append(self, next_index: int):
+        if self._render_end_index >= next_index:
+            return False
+        self._render_history_tail()
+        return True
+
     def _sync_header_title(self):
         title = "New chat"
         if self.conv_data:
@@ -2423,8 +3092,7 @@ class ChatPanel(QWidget):
             f"border-bottom:1px solid {sep}; }}"
             f"QLabel#chatHeaderTitle {{ color:{p['TEXT']};"
             f"font-size:{max(13, self.font().pointSize())}px; font-weight:700; }}"
-            f"QLabel#chatHeaderSubtitle {{ color:{p['TEXT_DIM']};"
-            f"font-size:{max(10, self.font().pointSize() - 3)}px; }}"
+            f"{hint_label_style(selector='QLabel#chatHeaderSubtitle', font_pt=max(10, self.font().pointSize() - 3))}"
         )
         self.extensions_btn.setStyleSheet(icon_button_style(34))
         self._sep.setStyleSheet(
@@ -2469,28 +3137,97 @@ class ChatPanel(QWidget):
 
     def set_cwd(self, cwd: str):
         self.cwd = cwd
+        self._invalidate_mention_files()
         self._update_context_ui()
 
     def _clear_bubbles(self):
+        self._history_render_timer.stop()
+        self._pending_history_render_target = None
+        self._pending_history_render_next = -1
         self._bubbles = {}
+        self._history_widgets = {}
+        self._render_start_index = 0
+        self._render_end_index = 0
         self._older_btn = None
+        self._newer_btn = None
         while self.msg_layout.count() > 1:
             item = self.msg_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
+    @contextmanager
+    def _batch_message_layout(self):
+        outermost = self._message_layout_batch_depth == 0
+        if outermost:
+            updates_enabled = self.msg_container.updatesEnabled()
+            self.msg_container.setUpdatesEnabled(False)
+        self._message_layout_batch_depth += 1
+        try:
+            yield
+        finally:
+            self._message_layout_batch_depth -= 1
+            if outermost:
+                self.msg_container.setUpdatesEnabled(updates_enabled)
+                self.msg_container.update()
+
     def _render_history_tail(self):
-        self._clear_bubbles()
-        self._render_start_index = _window_start(
-            self.history,
-            len(self.history),
-            _INITIAL_RENDER_BYTES,
-            _INITIAL_RENDER_MESSAGES,
-        )
-        self._sync_older_button()
-        for i in range(self._render_start_index, len(self.history)):
-            self._insert_history_bubble(i)
-        self._sync_regenerate_flags()
+        with time_operation(
+            "chat.render.tail",
+            detail=f"messages={len(self.history)}",
+        ):
+            with self._batch_message_layout():
+                self._clear_bubbles()
+                target_start = _window_start(
+                    self.history,
+                    len(self.history),
+                    _INITIAL_RENDER_BYTES,
+                    _INITIAL_RENDER_MESSAGES,
+                )
+                sync_start = max(
+                    target_start,
+                    len(self.history) - _INITIAL_RENDER_SYNC_MESSAGES,
+                )
+                self._render_start_index = sync_start
+                self._render_end_index = len(self.history)
+                for i in range(sync_start, len(self.history)):
+                    self._insert_history_bubble(i)
+                self._sync_regenerate_flags()
+                if target_start == sync_start:
+                    self._sync_history_paging_buttons()
+        if target_start < sync_start:
+            self._pending_history_render_target = target_start
+            self._pending_history_render_next = sync_start - 1
+            self._history_render_timer.start()
+
+    def _render_pending_history_batch(self):
+        target = self._pending_history_render_target
+        if target is None:
+            return
+        next_index = self._pending_history_render_next
+        if next_index < target:
+            self._finish_pending_history_render()
+            return
+        chunk_start = max(target, next_index - _HISTORY_RENDER_BATCH_MESSAGES + 1)
+        with time_operation(
+            "chat.render.prepend_batch",
+            detail=f"start={chunk_start} end={next_index + 1}",
+        ):
+            with self._batch_message_layout():
+                for i in range(next_index, chunk_start - 1, -1):
+                    self._insert_history_bubble(i, at_top=True)
+                self._render_start_index = chunk_start
+                self._sync_regenerate_flags()
+        self._pending_history_render_next = chunk_start - 1
+        if self._pending_history_render_next >= target:
+            self._history_render_timer.start()
+        else:
+            self._finish_pending_history_render()
+
+    def _finish_pending_history_render(self):
+        self._pending_history_render_target = None
+        self._pending_history_render_next = -1
+        self._trim_rendered_history_from_bottom()
+        self._sync_history_paging_buttons()
 
     def _render_visible_run(self):
         run = self._visible_run()
@@ -2516,6 +3253,8 @@ class ChatPanel(QWidget):
             self._exit_streaming()
 
     def _prepend_history_page(self):
+        if self._pending_history_render_target is not None:
+            return
         if self._render_start_index <= 0:
             self._sync_older_button()
             return
@@ -2534,19 +3273,19 @@ class ChatPanel(QWidget):
         old_max = bar.maximum()
         old_value = bar.value()
 
-        if self._older_btn:
-            idx = self.msg_layout.indexOf(self._older_btn)
-            if idx >= 0:
-                item = self.msg_layout.takeAt(idx)
-                if item.widget():
-                    item.widget().deleteLater()
-            self._older_btn = None
+        with time_operation(
+            "chat.render.prepend_page",
+            detail=f"start={new_start} end={old_start}",
+        ):
+            with self._batch_message_layout():
+                self._remove_paging_button("_older_btn")
 
-        for i in range(old_start - 1, new_start - 1, -1):
-            self._insert_history_bubble(i, at_top=True)
+                for i in range(old_start - 1, new_start - 1, -1):
+                    self._insert_history_bubble(i, at_top=True)
 
-        self._render_start_index = new_start
-        self._sync_older_button()
+                self._render_start_index = new_start
+                self._trim_rendered_history_from_bottom()
+                self._sync_history_paging_buttons()
 
         self._prepend_restore = (old_value, old_max)
         self._prepend_restore_timer.start()
@@ -2561,18 +3300,49 @@ class ChatPanel(QWidget):
         bar.setValue(old_value + (bar.maximum() - old_max))
         self._programmatic_scroll = False
 
+    def _append_history_page(self):
+        if self._render_end_index >= len(self.history):
+            self._sync_history_paging_buttons()
+            return
+
+        old_end = self._render_end_index
+        new_end = _window_end(
+            self.history,
+            old_end,
+            _NEWER_RENDER_BYTES,
+            _NEWER_RENDER_MESSAGES,
+        )
+        if new_end <= old_end:
+            return
+
+        with time_operation(
+            "chat.render.append_page",
+            detail=f"start={old_end} end={new_end}",
+        ):
+            with self._batch_message_layout():
+                self._remove_paging_button("_newer_btn")
+                for i in range(old_end, new_end):
+                    self._insert_history_bubble(i)
+                self._render_end_index = new_end
+                self._trim_rendered_history_from_top()
+                self._sync_regenerate_flags()
+                self._sync_history_paging_buttons()
+
     def _insert_history_bubble(self, history_index: int, *, at_top: bool = False):
         msg = self.history[history_index]
         if msg.get("synthetic") == "terminal_result":
-            return self._add_terminal_result_card(msg, at_top=at_top)
+            widget = self._add_terminal_result_card(msg, at_top=at_top)
+            self._track_history_widget(history_index, widget)
+            return widget
         tool_calls = _saved_tool_calls(msg)
         if tool_calls and not content_preview(msg.get("content")).strip():
             for name, inputs in (reversed(tool_calls) if at_top else tool_calls):
-                self._insert_tool_notice(
+                widget = self._insert_tool_notice(
                     _tool_call_notice(name, inputs, self.cwd),
                     _tool_debug_text(name, inputs, "", self.cwd),
                     at_top=at_top,
                 )
+                self._track_history_widget(history_index, widget)
             return None
         if not is_visible_message(msg):
             return None
@@ -2584,21 +3354,77 @@ class ChatPanel(QWidget):
             crew=msg.get("crew"),
             usage=msg.get("usage"),
         )
-        insert_at = 1 if at_top and self._older_btn else 0 if at_top else self.msg_layout.count() - 1
+        insert_at = self._history_insert_index(at_top=at_top)
         self.msg_layout.insertWidget(insert_at, bubble)
         self._bubbles[history_index] = bubble
+        self._track_history_widget(history_index, bubble)
         bubble.set_regenerable(history_index == _latest_regenerable_assistant_index(self.history))
         return bubble
 
+    def _history_insert_index(self, *, at_top: bool) -> int:
+        if at_top:
+            return 1 if self._older_btn else 0
+        if self._newer_btn:
+            idx = self.msg_layout.indexOf(self._newer_btn)
+            if idx >= 0:
+                return idx
+        return self.msg_layout.count() - 1
+
+    def _track_history_widget(self, history_index: int, widget: QWidget | None):
+        if widget is None:
+            return
+        self._history_widgets.setdefault(history_index, []).append(widget)
+
+    def _remove_layout_widget(self, widget: QWidget | None):
+        if widget is None:
+            return
+        idx = self.msg_layout.indexOf(widget)
+        if idx < 0:
+            return
+        item = self.msg_layout.takeAt(idx)
+        if item.widget():
+            item.widget().deleteLater()
+
+    def _remove_history_index_widgets(self, history_index: int):
+        widgets = self._history_widgets.pop(history_index, [])
+        bubble = self._bubbles.pop(history_index, None)
+        if bubble is not None and bubble not in widgets:
+            widgets.append(bubble)
+        for widget in widgets:
+            self._remove_layout_widget(widget)
+
+    def _trim_rendered_history_from_bottom(self):
+        max_end = self._render_start_index + _MAX_RENDERED_HISTORY_MESSAGES
+        if self._render_end_index <= max_end:
+            return
+        for idx in range(max_end, self._render_end_index):
+            self._remove_history_index_widgets(idx)
+        self._render_end_index = max_end
+
+    def _trim_rendered_history_from_top(self):
+        min_start = max(0, self._render_end_index - _MAX_RENDERED_HISTORY_MESSAGES)
+        if self._render_start_index >= min_start:
+            return
+        for idx in range(self._render_start_index, min_start):
+            self._remove_history_index_widgets(idx)
+        self._render_start_index = min_start
+
+    def _remove_paging_button(self, attr: str):
+        button = getattr(self, attr)
+        if button is None:
+            return
+        self._remove_layout_widget(button)
+        setattr(self, attr, None)
+
+    def _sync_history_paging_buttons(self):
+        self._sync_older_button()
+        self._sync_newer_button()
+
     def _sync_older_button(self):
+        if self._pending_history_render_target is not None:
+            return
         if self._render_start_index <= 0:
-            if self._older_btn:
-                idx = self.msg_layout.indexOf(self._older_btn)
-                if idx >= 0:
-                    item = self.msg_layout.takeAt(idx)
-                    if item.widget():
-                        item.widget().deleteLater()
-                self._older_btn = None
+            self._remove_paging_button("_older_btn")
             return
 
         if self._older_btn is None:
@@ -2609,13 +3435,31 @@ class ChatPanel(QWidget):
         self._older_btn.setText(f"Load older messages ({self._render_start_index} hidden)")
         self._older_btn.setStyleSheet(self._older_button_style())
 
+    def _sync_newer_button(self):
+        hidden = max(0, len(self.history) - self._render_end_index)
+        if hidden <= 0:
+            self._remove_paging_button("_newer_btn")
+            return
+        if self._newer_btn is None:
+            self._newer_btn = QPushButton()
+            self._newer_btn.setStyleSheet(self._older_button_style())
+            self._newer_btn.clicked.connect(self._append_history_page)
+            self.msg_layout.insertWidget(
+                self.msg_layout.count() - 1,
+                self._newer_btn,
+                0,
+                Qt.AlignmentFlag.AlignHCenter,
+            )
+        self._newer_btn.setText(f"Load newer messages ({hidden} hidden)")
+        self._newer_btn.setStyleSheet(self._older_button_style())
+
     def _older_button_style(self) -> str:
         p = palette()
-        return (
-            f"QPushButton {{ background:{p['BG3']}; color:{p['TEXT_DIM']};"
-            f"border:1px solid {p['BORDER']}; border-radius:8px;"
-            "padding:6px 12px; margin:8px 0; }}"
-            f"QPushButton:hover {{ color:{p['TEXT']}; background:{p['BORDER']}; }}"
+        return secondary_button_style(
+            border_radius=8,
+            padding="6px 12px",
+            margin="8px 0",
+            text_color=p["TEXT_DIM"],
         )
 
     def _remove_empty_active_typing_bubble(self):
@@ -2726,6 +3570,8 @@ class ChatPanel(QWidget):
         self._programmatic_scroll = False
 
     def _bottom(self):
+        if self._message_layout_batch_depth:
+            return
         if not self._auto_scroll:
             return
         self._pin_to_bottom()
@@ -2801,8 +3647,7 @@ class ChatPanel(QWidget):
         model = data.get("model") or self.model_combo.currentText()
         persisted = copy.deepcopy(data)
         persisted["messages"] = prepare_for_storage(history)
-        self.store.save(conv_id, persisted)
-        self.saved.emit()
+        self._queue_conversation_save(conv_id, persisted)
         self._start_assistant_run(
             conv_id,
             model,
@@ -2811,6 +3656,8 @@ class ChatPanel(QWidget):
             skill=draft.get("skill"),
             crew=draft.get("crew"),
             visible=False,
+            deferred_file_refs=draft.get("file_refs") or [],
+            deferred_file_target=len(history) - 1 - (1 if chat_ref_context else 0),
         )
 
     def _next_queued_index_for_current_chat(self) -> int | None:
@@ -2856,11 +3703,8 @@ class ChatPanel(QWidget):
         layout.addWidget(cancel)
 
         p = palette()
-        row.setStyleSheet(
-            f"QFrame#queueItem {{ background-color: {p['BG3']};"
-            f" border: 1px solid {p['BORDER']}; border-radius: 8px; }}"
-        )
-        label.setStyleSheet(f"color: {p['TEXT_DIM']}; background: transparent;")
+        row.setStyleSheet(surface_frame_style(selector="QFrame#queueItem"))
+        label.setStyleSheet(hint_label_style())
         cancel.setStyleSheet(icon_button_style(24))
         return row
 
@@ -3011,47 +3855,41 @@ def _window_start(history: list[dict], end: int, byte_limit: int, message_limit:
     return start
 
 
-_MENTION_RE = re.compile(r'@(?:"([^"]+)"|([^\s@]*[^\s@.,:;!?)\]}]))')
+def _window_end(history: list[dict], start: int, byte_limit: int, message_limit: int) -> int:
+    total = 0
+    end = start
+    limit = len(history)
+    while end < limit and end - start < message_limit:
+        size = _message_render_bytes(history[end])
+        if end > start and total + size > byte_limit:
+            break
+        total += size
+        end += 1
+    return end
+
+
+_MENTION_RE = MENTION_RE
 
 
 def _list_mention_files(cwd: str, limit: int = 800) -> list[tuple[str, str]]:
     root = Path(cwd).resolve()
     out: list[tuple[str, str]] = []
-    try:
-        walker = os.walk(root)
-        for dirpath, dirnames, filenames in walker:
-            dirnames[:] = [
-                d for d in dirnames
-                if d not in IGNORED and not d.startswith(".")
-            ]
-            for name in sorted(filenames, key=str.lower):
-                if name in IGNORED or name.startswith("."):
-                    continue
-                abs_path = Path(dirpath) / name
-                rel = abs_path.relative_to(root).as_posix()
-                out.append((rel, str(abs_path)))
-                if len(out) >= limit:
-                    return out
-    except OSError:
-        return out
+    for file_path in list_workspace_files(root, limit=limit):
+        abs_path = Path(file_path)
+        try:
+            rel = abs_path.resolve().relative_to(root).as_posix()
+        except (OSError, ValueError):
+            continue
+        out.append((rel, str(abs_path)))
     return out
 
 
 def _mentioned_files(cwd: str, text: str) -> list[dict]:
-    refs = [
-        (match.group(1) or match.group(2) or "").strip()
-        for match in _MENTION_RE.finditer(text)
-    ]
-    return _files_for_refs(cwd, refs)
+    return files_for_refs(cwd, message_file_refs(text))
 
 
 def _message_files(cwd: str, text: str, hidden_refs: list[str] | None = None) -> list[dict]:
-    refs = [
-        (match.group(1) or match.group(2) or "").strip()
-        for match in _MENTION_RE.finditer(text)
-    ]
-    refs.extend(hidden_refs or [])
-    return _files_for_refs(cwd, refs)
+    return files_for_refs(cwd, message_file_refs(text, hidden_refs))
 
 
 def _chat_ref_context(refs: list[dict] | None) -> str:
@@ -3078,36 +3916,4 @@ def _chat_ref_context(refs: list[dict] | None) -> str:
 
 
 def _files_for_refs(cwd: str, refs: list[str]) -> list[dict]:
-    root = Path(cwd).resolve()
-    seen: set[str] = set()
-    files: list[dict] = []
-    for raw in refs:
-        lookup = str(raw or "").replace("\\", "/")
-        if not lookup:
-            continue
-        key = lookup.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        try:
-            path = (root / lookup).resolve()
-            path.relative_to(root)
-        except (OSError, ValueError):
-            continue
-        if not path.is_file():
-            continue
-        try:
-            size = path.stat().st_size
-            with path.open("rb") as f:
-                data = f.read(MAX_TOOL_READ_BYTES + 1)
-        except OSError:
-            continue
-        truncated = len(data) > MAX_TOOL_READ_BYTES
-        content = data[:MAX_TOOL_READ_BYTES].decode("utf-8", errors="replace")
-        files.append({
-            "path": raw,
-            "content": content,
-            "truncated": truncated,
-            "size": size,
-        })
-    return files
+    return files_for_refs(cwd, refs)

@@ -2,9 +2,17 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import os
 from pathlib import Path
 
 import pytest
+
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+def pytest_configure(config):
+    config.option.tbstyle = "short"
 
 
 def write_extension(workspace: Path, filename: str, source: str) -> Path:
@@ -35,10 +43,32 @@ def close_qt_windows():
     app = QApplication.instance()
     if app is None:
         return
+    from PyQt6.QtCore import QEvent
+
     for widget in app.topLevelWidgets():
         widget.close()
         widget.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     app.processEvents()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+@pytest.fixture(autouse=True)
+def clear_service_caches():
+    from services.file_search import clear_workspace_file_cache
+    from services.git_snapshot import clear_git_snapshot_cache
+    from services.language_snapshot import clear_language_status_cache
+    from services.tool_registry import clear_all_extension_caches
+
+    clear_workspace_file_cache()
+    clear_git_snapshot_cache()
+    clear_language_status_cache()
+    clear_all_extension_caches()
+    yield
+    clear_workspace_file_cache()
+    clear_git_snapshot_cache()
+    clear_language_status_cache()
+    clear_all_extension_caches()
 
 
 @pytest.fixture
@@ -59,12 +89,13 @@ def store(conv_dir):
 
 @pytest.fixture(autouse=True)
 def isolate_aichs_home(monkeypatch, tmp_path):
-    """Keep extension loading deterministic (ignore real ~/.aichs/extensions)."""
+    """Keep app-owned user data deterministic and out of the real home profile."""
     home = tmp_path / "fake_home"
     home.mkdir()
     monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
     settings_dir = home / ".aichs"
     settings_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AICHS_HOME", str(settings_dir))
     monkeypatch.setattr("config.AICHS_HOME", settings_dir)
     monkeypatch.setattr("config.SETTINGS_PATH", settings_dir / "settings.json")
     monkeypatch.setattr("config.CONV_DIR", settings_dir / "conversations")

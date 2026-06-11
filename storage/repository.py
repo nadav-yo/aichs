@@ -6,12 +6,18 @@ import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import config
 from config import AICHS_HOME, CONV_DIR, WORKSPACES_PATH
 from services.content import is_visible_message
+from services.performance import time_operation
 from storage.settings import SettingsStore, trash_retention_days
 
 
 _last_workspace_updated_at: datetime | None = None
+_CONVERSATION_INDEX_NAME = "conversation_index.v1"
+_IMPORTED_AICHS_HOME = AICHS_HOME
+_IMPORTED_CONV_DIR = CONV_DIR
+_IMPORTED_WORKSPACES_PATH = WORKSPACES_PATH
 
 
 class ConversationStore:
@@ -21,12 +27,12 @@ class ConversationStore:
         self.conv_dir = (
             workspace_conversations_dir(self.workspace)
             if self.workspace
-            else CONV_DIR
+            else _conv_dir()
         )
         self.trash_dir = (
             workspace_trash_dir(self.workspace)
             if self.workspace
-            else AICHS_HOME / "trash"
+            else _aichs_home() / "trash"
         )
         self.conv_dir.mkdir(parents=True, exist_ok=True)
         self.trash_dir.mkdir(parents=True, exist_ok=True)
@@ -37,8 +43,9 @@ class ConversationStore:
 
     def list_all(self) -> list[tuple[Path, dict]]:
         by_id: dict[str, tuple[Path, dict]] = {}
-        for p, data in self.iter_records():
-            summary = _summary(data)
+        with time_operation("conversation.list", detail=f"dir={self.conv_dir}"):
+            records = self._index_records()
+        for p, summary in records:
             conv_id = summary.get("id") or p.stem
             summary["id"] = conv_id
             prev = by_id.get(conv_id)
@@ -58,7 +65,8 @@ class ConversationStore:
         return pinned + rest
 
     def load(self, path: str) -> dict:
-        return json.loads(Path(path).read_text())
+        with time_operation("conversation.load", detail=f"path={path}"):
+            return json.loads(Path(path).read_text(encoding="utf-8"))
 
     def delete(self, path: str) -> None:
         source = Path(path)
@@ -73,6 +81,7 @@ class ConversationStore:
         target = _available_path(self.trash_dir / f"{conv_id}.json")
         target.write_text(json.dumps(data, indent=2), encoding="utf-8")
         source.unlink(missing_ok=True)
+        self._remove_index_path(source)
 
     def list_trash(self) -> list[tuple[Path, dict]]:
         self.prune_trash()
@@ -124,15 +133,22 @@ class ConversationStore:
             data["workspace_id"] = self.workspace_id
             data.setdefault("cwd", str(self.workspace))
         path = self.conv_dir / f"{conv_id}.json"
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        self._drop_duplicate_files(conv_id, keep=path)
+        with time_operation("conversation.save", detail=f"id={conv_id}"):
+            _write_json_atomic(path, data)
+            self._upsert_index_path(path, _summary(data))
+            self._drop_duplicate_files(conv_id, keep=path)
         return path
 
     def load_by_id(self, conv_id: str) -> dict:
         wanted = str(conv_id or "").strip()
-        for path, data in self.iter_records():
-            if str(data.get("id") or path.stem) == wanted or path.stem == wanted:
-                return data
+        with time_operation("conversation.load_by_id", detail=f"id={wanted}"):
+            return self.load(str(self.path_for_id(wanted)))
+
+    def path_for_id(self, conv_id: str) -> Path:
+        wanted = str(conv_id or "").strip()
+        for path, summary in self._index_records():
+            if str(summary.get("id") or path.stem) == wanted or path.stem == wanted:
+                return path
         raise FileNotFoundError(wanted)
 
     def rename(self, path: str, title: str) -> str:
@@ -145,16 +161,16 @@ class ConversationStore:
 
     def _drop_duplicate_files(self, conv_id: str, *, keep: Path) -> None:
         keep_resolved = keep.resolve()
-        for p in self.conv_dir.glob("*.json"):
+        removed: list[Path] = []
+        for p, summary in self._index_records():
             if p.resolve() == keep_resolved:
                 continue
-            try:
-                other = json.loads(p.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            other_id = other.get("id") or p.stem
+            other_id = summary.get("id") or p.stem
             if other_id == conv_id:
                 p.unlink(missing_ok=True)
+                removed.append(p)
+        for p in removed:
+            self._remove_index_path(p)
 
     def toggle_pin(self, path: str) -> bool:
         data = self.load(path)
@@ -174,16 +190,8 @@ class ConversationStore:
         q = query.casefold()
         if q in summary.get("title", "").casefold():
             return True
-        try:
-            data = self.load(str(path))
-        except Exception:
-            return False
-        for msg in data.get("messages", []):
-            if not is_visible_message(msg):
-                continue
-            if q in _message_text(msg.get("content", "")).casefold():
-                return True
-        return False
+        search_text = summary.get("search_text", "")
+        return isinstance(search_text, str) and q in search_text.casefold()
 
     def iter_records(self) -> list[tuple[Path, dict]]:
         records: list[tuple[Path, dict]] = []
@@ -193,6 +201,87 @@ class ConversationStore:
                 continue
             records.append((path, data))
         return records
+
+    def _index_path(self) -> Path:
+        return self.conv_dir / _CONVERSATION_INDEX_NAME
+
+    def _index_records(self) -> list[tuple[Path, dict]]:
+        index = self._read_index()
+        rows = index.get("rows") if isinstance(index, dict) else None
+        if not isinstance(rows, dict):
+            rows = {}
+        changed = not rows
+        next_rows: dict[str, dict] = {}
+
+        for path in sorted(self.conv_dir.glob("*.json")):
+            try:
+                stat = path.stat()
+            except OSError:
+                changed = True
+                continue
+            key = path.name
+            row = rows.get(key)
+            if (
+                isinstance(row, dict)
+                and row.get("mtime_ns") == stat.st_mtime_ns
+                and row.get("size") == stat.st_size
+                and isinstance(row.get("summary"), dict)
+                and "workspace_id" in row["summary"]
+                and isinstance(row["summary"].get("search_text"), str)
+                and isinstance(row["summary"].get("search_messages"), list)
+            ):
+                next_rows[key] = row
+                continue
+            data = _load_json(path)
+            changed = True
+            if data is None:
+                continue
+            summary = _summary(data)
+            summary["id"] = summary.get("id") or path.stem
+            next_rows[key] = _index_row(path, summary, stat)
+
+        if set(rows) != set(next_rows):
+            changed = True
+        if changed:
+            self._write_index(next_rows)
+
+        return [
+            (self.conv_dir / name, dict(row["summary"]))
+            for name, row in next_rows.items()
+            if isinstance(row.get("summary"), dict)
+        ]
+
+    def _read_index(self) -> dict:
+        data = _load_json(self._index_path())
+        if isinstance(data, dict) and data.get("version") == 1:
+            return data
+        return {"version": 1, "rows": {}}
+
+    def _write_index(self, rows: dict[str, dict]) -> None:
+        self.conv_dir.mkdir(parents=True, exist_ok=True)
+        _write_json_atomic(self._index_path(), {"version": 1, "rows": rows})
+
+    def _upsert_index_path(self, path: Path, summary: dict) -> None:
+        index = self._read_index()
+        rows = index.get("rows")
+        if not isinstance(rows, dict):
+            rows = {}
+        try:
+            stat = path.stat()
+        except OSError:
+            return
+        summary = dict(summary)
+        summary["id"] = summary.get("id") or path.stem
+        rows[path.name] = _index_row(path, summary, stat)
+        self._write_index(rows)
+
+    def _remove_index_path(self, path: Path) -> None:
+        index = self._read_index()
+        rows = index.get("rows")
+        if not isinstance(rows, dict) or path.name not in rows:
+            return
+        rows.pop(path.name, None)
+        self._write_index(rows)
 
 def workspace_id(workspace: str | Path) -> str:
     path = Path(workspace).expanduser().resolve()
@@ -204,7 +293,7 @@ def workspace_id(workspace: str | Path) -> str:
 
 
 def workspace_data_dir(workspace: str | Path) -> Path:
-    return AICHS_HOME / workspace_id(workspace)
+    return _aichs_home() / workspace_id(workspace)
 
 
 def workspace_conversations_dir(workspace: str | Path) -> Path:
@@ -230,7 +319,7 @@ def register_workspace(workspace: str | Path) -> dict:
 
 
 def list_workspaces(limit: int | None = None) -> list[dict]:
-    data = _load_json(WORKSPACES_PATH)
+    data = _load_json(_workspaces_path())
     if not isinstance(data, dict):
         return []
     raw_workspaces = data.get("workspaces")
@@ -261,8 +350,53 @@ def list_workspaces(limit: int | None = None) -> list[dict]:
     return rows
 
 
+def remove_workspace(workspace: str | Path) -> bool:
+    raw_path = str(workspace or "").strip()
+    if not raw_path:
+        return False
+    path = Path(raw_path).expanduser().resolve()
+    target_id = workspace_id(path)
+    target_path = os.path.normcase(str(path))
+    registry_path = _workspaces_path()
+    data = _load_json(registry_path)
+    if not isinstance(data, dict):
+        return False
+    workspaces = data.get("workspaces")
+    if not isinstance(workspaces, dict):
+        return False
+
+    removed = False
+    kept = {}
+    for key, value in workspaces.items():
+        if not isinstance(value, dict):
+            kept[key] = value
+            continue
+        row_id = str(value.get("id") or key)
+        row_path_raw = str(value.get("path") or "").strip()
+        try:
+            row_path = os.path.normcase(str(Path(row_path_raw).expanduser().resolve()))
+        except OSError:
+            row_path = os.path.normcase(row_path_raw)
+        if row_id == target_id or row_path == target_path:
+            removed = True
+            continue
+        kept[key] = value
+
+    if not removed:
+        return False
+    data["version"] = 1
+    data["workspaces"] = kept
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return True
+
+
 def project_conversation_records(cwd: str) -> list[tuple[Path, dict]]:
     return ConversationStore(cwd).iter_records()
+
+
+def project_conversation_summaries(cwd: str) -> list[tuple[Path, dict]]:
+    return ConversationStore(cwd).list_all()
 
 
 def _message_text(content) -> str:
@@ -284,6 +418,24 @@ def _message_text(content) -> str:
     return str(content)
 
 
+def _search_text(data: dict) -> str:
+    return "\n".join(message["text"] for message in _search_messages(data))
+
+
+def _search_messages(data: dict) -> list[dict]:
+    parts = []
+    for msg in data.get("messages", []):
+        if not is_visible_message(msg):
+            continue
+        text = _message_text(msg.get("content", "")).strip()
+        if text:
+            parts.append({
+                "role": str(msg.get("role") or "message"),
+                "text": text,
+            })
+    return parts
+
+
 def _resolve_workspace(workspace: str | None) -> Path | None:
     if not workspace:
         return None
@@ -295,6 +447,54 @@ def _load_json(path: Path) -> dict | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def _aichs_home() -> Path:
+    current = Path(AICHS_HOME)
+    if current != Path(_IMPORTED_AICHS_HOME):
+        return current
+    return Path(config.AICHS_HOME)
+
+
+def _conv_dir() -> Path:
+    current = Path(CONV_DIR)
+    if current != Path(_IMPORTED_CONV_DIR):
+        return current
+    return Path(config.CONV_DIR)
+
+
+def _workspaces_path() -> Path:
+    current = Path(WORKSPACES_PATH)
+    if current != Path(_IMPORTED_WORKSPACES_PATH):
+        return current
+    return Path(config.WORKSPACES_PATH)
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data, indent=2)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+        text=True,
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        os.replace(tmp_path, path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _index_row(path: Path, summary: dict, stat_result: os.stat_result) -> dict:
+    return {
+        "mtime_ns": stat_result.st_mtime_ns,
+        "size": stat_result.st_size,
+        "summary": dict(summary),
+    }
 
 
 def _available_path(path: Path) -> Path:
@@ -319,8 +519,9 @@ def _parse_datetime(value) -> datetime | None:
 def _register_workspace(workspace: Path, wid: str, *, updated_at: str | None = None) -> None:
     if _skip_workspace_registration(workspace):
         return
-    WORKSPACES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    data = _load_json(WORKSPACES_PATH)
+    registry_path = _workspaces_path()
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    data = _load_json(registry_path)
     if not isinstance(data, dict):
         data = {}
     workspaces = data.get("workspaces")
@@ -339,7 +540,7 @@ def _register_workspace(workspace: Path, wid: str, *, updated_at: str | None = N
     }
     data["version"] = 1
     data["workspaces"] = workspaces
-    WORKSPACES_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    registry_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def _workspace_updated_at() -> str:
@@ -353,7 +554,7 @@ def _workspace_updated_at() -> str:
 
 def _prune_leaked_test_conversations() -> None:
     """Remove c1/First fixture files if pytest ever wrote them to the real ~/.aichs dir."""
-    for p in list(CONV_DIR.glob("*.json")):
+    for p in list(_conv_dir().glob("*.json")):
         data = _load_json(p)
         if data is None:
             continue
@@ -370,8 +571,7 @@ def _skip_workspace_registration(workspace: Path) -> bool:
     if not os.environ.get("PYTEST_CURRENT_TEST"):
         return False
     if _is_inside_path(workspace, Path(tempfile.gettempdir())):
-        registry_text = str(WORKSPACES_PATH)
-        return "fake_home" not in registry_text
+        return not _is_inside_path(_workspaces_path(), Path(tempfile.gettempdir()))
     return False
 
 
@@ -410,6 +610,7 @@ def _is_newer(summary: dict, prev_summary: dict, path: Path, prev_path: Path) ->
 
 
 def _summary(data: dict) -> dict:
+    search_messages = _search_messages(data)
     return {
         "id": data.get("id", ""),
         "title": data.get("title", "Untitled"),
@@ -417,7 +618,10 @@ def _summary(data: dict) -> dict:
         "created_at": data.get("created_at", ""),
         "updated_at": data.get("updated_at", ""),
         "model": data.get("model", ""),
+        "workspace_id": data.get("workspace_id", ""),
         "cwd": data.get("cwd", ""),
         "pinned": data.get("pinned", False),
         "message_count": len(data.get("messages", [])),
+        "search_text": "\n".join(message["text"] for message in search_messages),
+        "search_messages": search_messages,
     }

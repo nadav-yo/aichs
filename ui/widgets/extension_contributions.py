@@ -3,14 +3,47 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 from PyQt6.QtWidgets import QHBoxLayout, QPushButton, QWidget
 
 from services.tool_registry import (
     extension_panel_data,
     extension_status_badges,
 )
-from ui.theme import ACCENT, meta_font_pt, palette
+from ui.theme import ACCENT, meta_font_pt, palette, tone_badge_button_style
 from ui.widgets.extension_panel_dialog import ExtensionPanelDialog
+
+
+class _ExtensionBadgeSignals(QObject):
+    done = pyqtSignal(int, object, object, str)
+
+
+class _ExtensionBadgeWorker(QRunnable):
+    def __init__(
+        self,
+        generation: int,
+        cwd: str,
+        model: str,
+        history: list[dict],
+    ):
+        super().__init__()
+        self.signals = _ExtensionBadgeSignals()
+        self._generation = generation
+        self._cwd = cwd
+        self._model = model
+        self._history = history
+
+    def run(self) -> None:
+        try:
+            badges, errors = extension_status_badges(
+                self._cwd,
+                model=self._model,
+                history=self._history,
+            )
+        except BaseException as exc:
+            self.signals.done.emit(self._generation, [], [], str(exc))
+            return
+        self.signals.done.emit(self._generation, badges, errors, "")
 
 
 class ExtensionContributionsBar(QWidget):
@@ -26,6 +59,11 @@ class ExtensionContributionsBar(QWidget):
         self._model = ""
         self._history: list[dict] = []
         self._on_action = on_action
+        self._badge_generation = 0
+        self._badge_active = False
+        self._badge_errors: list[str] = []
+        self._badge_pool = QThreadPool(self)
+        self._badge_pool.setMaxThreadCount(1)
 
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -36,22 +74,43 @@ class ExtensionContributionsBar(QWidget):
         self._badges_layout.setContentsMargins(0, 0, 0, 0)
         self._badges_layout.setSpacing(4)
         self._layout.addWidget(self._badges)
+        self._badges.setVisible(False)
+        self.setVisible(False)
 
         self.refresh()
 
     def set_context(self, *, cwd: str, model: str, history: list[dict]) -> None:
         self._cwd = cwd
         self._model = model
-        self._history = history
+        self._history = [dict(item) for item in history]
         self.refresh()
 
     def refresh(self) -> list[str]:
-        self._clear_badges()
-        badges, errors = extension_status_badges(
+        self._badge_generation += 1
+        generation = self._badge_generation
+        self._badge_active = True
+        worker = _ExtensionBadgeWorker(
+            generation,
             self._cwd,
-            model=self._model,
-            history=self._history,
+            self._model,
+            [dict(item) for item in self._history],
         )
+        worker.signals.done.connect(self._on_badges_done)
+        self._badge_pool.start(worker)
+        return list(self._badge_errors)
+
+    def _on_badges_done(self, generation: int, badges, errors, error: str) -> None:
+        if generation != self._badge_generation:
+            return
+        self._badge_active = False
+        self._badge_errors = [str(item) for item in (errors or [])]
+        if error:
+            self._badge_errors.append(error)
+            badges = []
+        self._render_badges(list(badges or []))
+
+    def _render_badges(self, badges) -> None:
+        self._clear_badges()
         for badge, raw in badges:
             data = _badge_data(badge.name, raw)
             if data is None:
@@ -67,7 +126,6 @@ class ExtensionContributionsBar(QWidget):
         has_badges = self._badges_layout.count() > 0
         self._badges.setVisible(has_badges)
         self.setVisible(has_badges)
-        return errors
 
     def apply_appearance(self) -> None:
         for i in range(self._badges_layout.count()):
@@ -91,19 +149,14 @@ class ExtensionContributionsBar(QWidget):
             )
             return panel_title, panel_data
 
-        title, data, _errors = extension_panel_data(
-            self._cwd,
-            name,
-            model=self._model,
-            history=self._history,
-        )
         dialog = ExtensionPanelDialog(
-            title,
-            data,
+            name,
+            {"title": name, "body": "Loading panel..."},
             on_action=self._on_action,
             parent=self.window(),
         )
         dialog.set_refresh_callback(load_panel)
+        dialog.refresh_panel()
         dialog.exec()
 
 
@@ -142,17 +195,4 @@ def _badge_data(name: str, raw) -> _BadgeData | None:
 
 
 def _badge_style(tone: str = "") -> str:
-    p = palette()
-    colors = {
-        "success": (p["SUCCESS_BG"], p["SUCCESS"], p["SUCCESS_BORDER"]),
-        "danger": ("#35191d", "#f87171", "#5f252d"),
-        "warning": ("#32260f", "#fbbf24", "#5a4319"),
-        "accent": ("#172341", ACCENT, "#2d477c"),
-    }
-    bg, fg, border = colors.get(tone, (p["BG3"], p["TEXT_DIM"], p["BORDER"]))
-    return (
-        f"QPushButton {{ background-color:{bg}; color:{fg}; border:1px solid {border};"
-        "border-radius:8px; padding-left:8px; padding-right:8px;"
-        f"font-size:{meta_font_pt()}px; }}"
-        f"QPushButton:hover {{ color:{p['TEXT']}; border-color:{p['TEXT_DIM']}; }}"
-    )
+    return tone_badge_button_style(tone)

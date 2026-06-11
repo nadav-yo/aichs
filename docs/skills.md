@@ -1,6 +1,6 @@
 # Skills (slash commands)
 
-aichs skills follow the ideas behind **[Agent Skills](https://agentskills.io/)** - an open format for giving agents specialized instructions ([overview](https://agentskills.io/home), [specification](https://agentskills.io/specification)). Here each skill is a single Markdown file with YAML frontmatter (not a `SKILL.md` folder), loaded from `~/.aichs/skills/` and `.aichs/skills/`.
+aichs skills follow the ideas behind **[Agent Skills](https://agentskills.io/)** - an open format for giving agents specialized instructions ([overview](https://agentskills.io/home), [specification](https://agentskills.io/specification)). Here each skill is a single Markdown file with YAML frontmatter (not a `SKILL.md` folder), loaded from `AICHS_HOME/skills/` (default `~/.aichs/skills/`) and `.aichs/skills/`.
 
 Type `/` in the composer to pick a skill. It replaces the base system prompt for that turn. You can optionally restrict which tools the model may call.
 
@@ -8,7 +8,7 @@ Type `/` in the composer to pick a skill. It replaces the base system prompt for
 
 | Path | Scope |
 |---|---|
-| `~/.aichs/skills/*.md` | User-global |
+| `AICHS_HOME/skills/*.md` | User-global |
 | `.aichs/skills/*.md` | Project-local (same name overrides global) |
 
 ## File format

@@ -8,6 +8,7 @@ from storage.settings import (
     DEFAULT_COMPACT_RESUME_PROMPT,
     DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE,
     DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
+    DEFAULT_GIT_FIX_PROMPT_TEMPLATE,
     SettingsStore,
     archivist_prompt,
     auto_title_prompt_instructions,
@@ -16,6 +17,7 @@ from storage.settings import (
     diagnostic_fix_prompt_template,
     file_editor_tab_spaces,
     file_review_prompt_template,
+    git_fix_prompt_template,
 )
 
 
@@ -84,6 +86,7 @@ def test_file_editor_tab_spaces_defaults_and_clamps():
 def test_file_prompt_templates_default_and_strip():
     assert file_review_prompt_template({}) == DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE
     assert diagnostic_fix_prompt_template({}) == DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE
+    assert git_fix_prompt_template({}) == DEFAULT_GIT_FIX_PROMPT_TEMPLATE
     assert auto_title_prompt_instructions({}) == DEFAULT_AUTO_TITLE_PROMPT_INSTRUCTIONS
     assert compact_resume_prompt({}) == DEFAULT_COMPACT_RESUME_PROMPT
     assert compaction_summary_guidance({}) == ""
@@ -97,6 +100,12 @@ def test_file_prompt_templates_default_and_strip():
             "diagnostic_fix_prompt_template": "  Fix {mention}  ",
         })
         == "Fix {mention}"
+    )
+    assert (
+        git_fix_prompt_template({
+            "git_fix_prompt_template": "  Debug git {action} in {repo}  ",
+        })
+        == "Debug git {action} in {repo}"
     )
     assert (
         auto_title_prompt_instructions({

@@ -3,7 +3,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 
 from services.skills import Skill
 from services.slash_commands import SlashCommand
-from ui.theme import palette, ACCENT
+from ui.theme import popover_frame_style, popover_list_style
 
 _ROLE_KIND = Qt.ItemDataRole.UserRole
 _ROLE_DATA = Qt.ItemDataRole.UserRole + 1
@@ -29,11 +29,7 @@ class SkillPicker(QFrame):
         self._include_terminal = include_terminal
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
-        p = palette()
-        self.setStyleSheet(
-            f"QFrame {{ background:{p['BG2']}; border:1px solid {p['BORDER']};"
-            "border-radius:8px; }"
-        )
+        self.setStyleSheet(popover_frame_style())
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -41,17 +37,23 @@ class SkillPicker(QFrame):
 
         self._list = QListWidget()
         self._list.setFrameShape(QFrame.Shape.NoFrame)
-        self._list.setStyleSheet(
-            f"QListWidget {{ background:transparent; border:none; }}"
-            f"QListWidget::item {{ padding:8px 10px; border-radius:4px; }}"
-            f"QListWidget::item:hover {{ background:{p['BG3']}; }}"
-            f"QListWidget::item:selected {{ background:{ACCENT}; color:white; }}"
-        )
+        self._list.setStyleSheet(popover_list_style())
         self._list.itemActivated.connect(self._on_activated)
         self._list.itemClicked.connect(self._on_activated)
         layout.addWidget(self._list)
 
         self.filter("")
+
+    def set_items(
+        self,
+        skills: list[Skill],
+        commands: list[SlashCommand] | None = None,
+        *,
+        query: str = "",
+    ) -> None:
+        self._all = list(skills or [])
+        self._commands = list(commands or [])
+        self.filter(query)
 
     def filter(self, query: str):
         if query == "!" and self._include_terminal:

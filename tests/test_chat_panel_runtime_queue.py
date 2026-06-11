@@ -1,6 +1,8 @@
 from types import SimpleNamespace
+import time
 
 from storage.settings import COMPACT_RESUME_PROMPT_KEY, SettingsStore
+from services.slash_commands import SlashCommand
 from ui.widgets.chat_panel import (
     ChatPanel,
     _chat_ref_context,
@@ -36,6 +38,7 @@ class _Composer:
         self.focused = False
         self.cleared = False
         self.skill_cleared = False
+        self.skill = None
         self.strip = SimpleNamespace(images=lambda: [])
         self.input = SimpleNamespace(
             exit_mention_mode=lambda: None,
@@ -52,13 +55,17 @@ class _Composer:
         self.focused = True
 
     def active_skill(self):
-        return None
+        return self.skill
+
+    def set_skill(self, skill):
+        self.skill = skill
 
     def clear(self):
         self.cleared = True
 
     def clear_skill(self):
         self.skill_cleared = True
+        self.skill = None
 
 
 class _DraftCursor:
@@ -182,6 +189,157 @@ def test_send_queues_during_compaction(workspace):
     assert runtime.queued[0]["title_text"] == "write this next"
 
 
+def test_send_runs_loaded_extension_command_without_sync_file_refs(workspace, monkeypatch):
+    command = SlashCommand(
+        "demo_cmd",
+        "Demo command",
+        source="extension:demo",
+        executable=True,
+    )
+    ran = []
+    panel = SimpleNamespace()
+    panel.cwd = str(workspace)
+    panel.composer = _Composer("/demo_cmd run this")
+    panel._slash_commands = [command]
+    panel._slash_commands_cwd = str(workspace)
+    panel._skill_picker = None
+    panel._file_picker = None
+    panel._visible_run = lambda: None
+    panel._visible_compaction = lambda: None
+    panel._run_extension_command = lambda name, args: ran.append((name, args))
+    monkeypatch.setattr(
+        "ui.widgets.chat_panel._message_files",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not read message files")),
+    )
+
+    ChatPanel.send(panel)
+
+    assert ran == [("demo_cmd", "run this")]
+    assert panel.composer.cleared is True
+
+
+def test_send_waits_for_slash_command_snapshot_before_unknown_slash(workspace, monkeypatch):
+    notices = []
+    loads = []
+    panel = SimpleNamespace()
+    panel.cwd = str(workspace)
+    panel.composer = _Composer("/demo_cmd run this")
+    panel._slash_commands = []
+    panel._slash_commands_cwd = ""
+    panel._skill_picker_loading = False
+    panel._skill_picker = None
+    panel._file_picker = None
+    panel._visible_run = lambda: None
+    panel._visible_compaction = lambda: None
+    panel._start_skill_picker_load = lambda: loads.append("load")
+    panel._add_notice = notices.append
+    monkeypatch.setattr(
+        "ui.widgets.chat_panel._message_files",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not read message files")),
+    )
+
+    ChatPanel.send(panel)
+
+    assert loads == ["load"]
+    assert notices == ["Slash commands are still loading. Try again in a moment."]
+    assert panel.composer.cleared is False
+
+
+def test_send_uses_loaded_builtin_prompt_command_without_sync_settings(workspace, monkeypatch):
+    from services.slash_commands import SlashCommand
+
+    drafts = []
+    command = SlashCommand(
+        "archivist",
+        "Memory",
+        prompt="Use project memory.",
+        tools=["search_project_chats", "read_project_chat"],
+    )
+    panel = SimpleNamespace()
+    panel.cwd = str(workspace)
+    panel.composer = _Composer("/archivist find the plan")
+    panel._slash_commands = [command]
+    panel._slash_commands_cwd = str(workspace)
+    panel._skill_picker = None
+    panel._file_picker = None
+    panel._settings = SimpleNamespace(load=lambda: {})
+    panel._visible_run = lambda: None
+    panel._visible_compaction = lambda: None
+    panel._skill_from_command = lambda cmd: ChatPanel._skill_from_command(panel, cmd)
+    panel._send_draft = drafts.append
+    monkeypatch.setattr(
+        "ui.widgets.chat_panel.SettingsStore.load",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("settings should not load")),
+    )
+
+    ChatPanel.send(panel)
+
+    assert drafts[0]["title_text"] == "find the plan"
+    assert drafts[0]["skill"].name == "archivist"
+    assert drafts[0]["skill"].prompt == "Use project memory."
+    assert drafts[0]["skill"].tools == ["search_project_chats", "read_project_chat"]
+
+
+def test_send_carries_file_refs_without_reading_files_on_ui_thread(workspace, monkeypatch):
+    drafts = []
+    panel = SimpleNamespace()
+    panel.cwd = str(workspace)
+    panel.composer = _Composer("please read @services\\chat.py.")
+    panel._slash_commands = []
+    panel._slash_commands_cwd = str(workspace)
+    panel._skill_picker = None
+    panel._file_picker = None
+    panel._settings = SimpleNamespace(load=lambda: {})
+    panel._visible_run = lambda: None
+    panel._visible_compaction = lambda: None
+    panel._send_draft = drafts.append
+    monkeypatch.setattr(
+        "ui.widgets.chat_panel.files_for_refs",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should resolve in ChatThread")),
+    )
+
+    ChatPanel.send(panel)
+
+    assert drafts[0]["content"] == "please read @services\\chat.py."
+    assert drafts[0]["file_refs"] == ["services\\chat.py"]
+
+
+def test_send_draft_passes_deferred_file_refs_to_assistant_start(qapp):
+    starts = []
+    bubbles = []
+    panel = SimpleNamespace()
+    panel.history = []
+    panel.conv_data = {"id": "c1"}
+    panel._bubbles = {}
+    panel._settings = SimpleNamespace(load=lambda: {})
+    panel._model_for_crew = lambda _crew: "claude-sonnet-4-6"
+    panel._ensure_conversation = lambda _title, _model: None
+    panel._enter_streaming = lambda: None
+    panel._ensure_tail_rendered_for_append = lambda _idx: False
+    panel._add_bubble = lambda *args, **kwargs: bubbles.append((args, kwargs))
+    panel._save = lambda touch_updated=True: None
+    panel._maybe_auto_title = lambda: None
+    panel._start_assistant = lambda **kwargs: starts.append(kwargs)
+    panel._pin_to_bottom = lambda: None
+
+    ChatPanel._send_draft(panel, {
+        "content": "read @src/main.py",
+        "title_text": "read @src/main.py",
+        "skill": None,
+        "crew": None,
+        "file_refs": ["src/main.py"],
+    })
+
+    assert starts == [{
+        "skill": None,
+        "crew": None,
+        "deferred_file_refs": ["src/main.py"],
+        "deferred_file_target": 0,
+    }]
+    assert panel.history[0]["content"] == "read @src/main.py"
+    assert bubbles
+
+
 def test_runtime_text_queue_marks_draft_synthetic(workspace):
     runtime = SimpleNamespace(queued=[])
     panel = SimpleNamespace()
@@ -285,6 +443,10 @@ def test_chat_panel_initializes_context_ui(qapp, store, workspace):
     panel = ChatPanel(store, cwd=str(workspace))
 
     assert panel._context_ui_suspended is False
+    deadline = time.monotonic() + 2
+    while panel.context_ring._budget is None and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
     assert panel.context_ring._budget is not None
     panel.close()
     panel.deleteLater()

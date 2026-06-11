@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import stat
 
+import config
 from services.tool_registry import (
     ExtensionPermissions,
     ExtensionRequirements,
@@ -143,7 +144,7 @@ def install_extension_candidates(
 
 def extension_install_root(scope: str, cwd: str | None = None) -> Path:
     if scope == "global":
-        return Path.home() / ".aichs" / "extensions"
+        return config.AICHS_HOME / "extensions"
     if scope != "local":
         raise ValueError("scope must be 'local' or 'global'")
     if not cwd:

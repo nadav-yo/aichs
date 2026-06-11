@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from services.performance import time_operation
 from services.subprocess_utils import run_no_window
 
 
@@ -32,39 +33,41 @@ class GitFileChange:
 
 
 def run_git(cmd: list[str], cwd: str, timeout: float = 5) -> str:
-    try:
-        r = run_no_window(
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-        )
-        return (r.stdout or "").rstrip()
-    except Exception:
-        return ""
+    with time_operation("git.run", detail=" ".join(cmd)):
+        try:
+            r = run_no_window(
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+            return (r.stdout or "").rstrip()
+        except Exception:
+            return ""
 
 
 def run_git_command(cmd: list[str], cwd: str, timeout: float = 60) -> GitCommandResult:
-    try:
-        r = run_no_window(
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-        )
-        return GitCommandResult(
-            returncode=r.returncode,
-            stdout=(r.stdout or "").strip(),
-            stderr=(r.stderr or "").strip(),
-        )
-    except Exception as e:
-        return GitCommandResult(returncode=1, stdout="", stderr=str(e))
+    with time_operation("git.command", detail=" ".join(cmd)):
+        try:
+            r = run_no_window(
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+            return GitCommandResult(
+                returncode=r.returncode,
+                stdout=(r.stdout or "").strip(),
+                stderr=(r.stderr or "").strip(),
+            )
+        except Exception as e:
+            return GitCommandResult(returncode=1, stdout="", stderr=str(e))
 
 
 def count_commits_to_push(repo_path: str) -> int:

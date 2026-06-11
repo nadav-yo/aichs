@@ -1,4 +1,5 @@
 import pytest
+import time
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence
@@ -16,14 +17,17 @@ from services.chat_drag import (
     parse_commit_drop,
     parse_file_drop,
 )
+from services.file_search import clear_workspace_file_cache, list_workspace_files
 from PyQt6.QtWidgets import QLabel, QListWidget, QLineEdit, QTextBrowser
 from PyQt6.QtWidgets import QMessageBox
 
+from services.file_tree_snapshot import FileTreeSnapshot
+from services.git_snapshot import GitSnapshot
 from services.git_status import GitCommandResult
 from storage.settings import SettingsStore
 from ui.theme import palette
 from ui.widgets.git_panel import GitPanel, _CommitDiffDialog
-from ui.widgets.left_panel import FileTree, _FilesHeader, _path_key
+from ui.widgets.left_panel import FileTree, _FileTreeActionThread, _FileTreeRefreshThread, _FilesHeader, _path_key
 from ui.widgets.conversation_panel import ConversationPanel
 
 
@@ -35,10 +39,29 @@ def _has_shortcut(widget, sequence: str) -> bool:
     )
 
 
+def _wait_until(qapp, predicate, timeout_s: float = 2.0):
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        if predicate():
+            return
+        time.sleep(0.01)
+    qapp.processEvents()
+    assert predicate()
+
+
+def _wait_for_loaded_children(qapp, item):
+    _wait_until(
+        qapp,
+        lambda: item.childCount() > 0 and bool(item.child(0).data(0, Qt.ItemDataRole.UserRole)),
+    )
+
+
 def test_files_tree_drags_file_mentions(qapp, workspace):
     tree = FileTree(str(workspace))
     src = tree.topLevelItem(0)
     tree._on_item_expanded(src)
+    _wait_for_loaded_children(qapp, src)
     item = src.child(0)
 
     mime = tree.mimeData([item])
@@ -61,6 +84,84 @@ def test_files_tree_reveals_nested_file(qapp, workspace):
     assert item is not None
     assert item.data(0, Qt.ItemDataRole.UserRole) == str(target)
     assert item.text(0).endswith("api.py")
+
+
+def test_files_tree_reveal_nested_file_does_not_scan_directories(qapp, workspace, monkeypatch):
+    nested_dir = workspace / "src" / "pkg"
+    nested_dir.mkdir()
+    target = nested_dir / "api.py"
+    target.write_text("API = True\n", encoding="utf-8")
+    tree = FileTree(str(workspace), defer_git_status=True)
+    _wait_until(qapp, lambda: not tree._children_threads)
+    child_generation = tree._children_generation
+
+    assert tree.reveal_file(str(target)) is True
+
+    assert tree.currentItem().data(0, Qt.ItemDataRole.UserRole) == str(target)
+    assert tree._children_generation == child_generation
+
+
+def test_files_tree_refresh_preserves_expanded_folders_and_selection(qapp, workspace, monkeypatch):
+    nested_dir = workspace / "src" / "pkg"
+    nested_dir.mkdir()
+    target = nested_dir / "api.py"
+    target.write_text("API = True\n", encoding="utf-8")
+    monkeypatch.setattr("services.file_tree_snapshot.list_file_changes", lambda _root: [])
+    tree = FileTree(str(workspace), defer_git_status=True)
+    src = tree.topLevelItem(0)
+    tree._on_item_expanded(src)
+    _wait_for_loaded_children(qapp, src)
+    src.setExpanded(True)
+    pkg = tree._find_child_for_path(src, str(nested_dir))
+    assert pkg is not None
+    tree._on_item_expanded(pkg)
+    _wait_for_loaded_children(qapp, pkg)
+    pkg.setExpanded(True)
+    selected = tree._find_child_for_path(pkg, str(target))
+    assert selected is not None
+    tree.setCurrentItem(selected)
+
+    tree.refresh()
+    _wait_until(qapp, lambda: not tree._refresh_threads and not tree._children_threads)
+
+    src_after = tree._find_child_for_path(tree.invisibleRootItem(), str(workspace / "src"))
+    assert src_after is not None
+    pkg_after = tree._find_child_for_path(src_after, str(nested_dir))
+    assert pkg_after is not None
+    assert src_after.isExpanded()
+    assert pkg_after.isExpanded()
+    assert tree.currentItem().data(0, Qt.ItemDataRole.UserRole) == str(target)
+
+
+def test_files_tree_watcher_refresh_is_debounced(qapp, workspace, monkeypatch):
+    tree = FileTree(str(workspace), defer_git_status=True)
+    calls = []
+    monkeypatch.setattr(tree, "_request_refresh", lambda: calls.append(True))
+
+    tree._schedule_refresh(delay_ms=1)
+    tree._schedule_refresh(delay_ms=1)
+
+    assert calls == []
+    _wait_until(qapp, lambda: calls == [True])
+
+
+def test_files_tree_refresh_thread_drops_cancelled_result(qapp, workspace, monkeypatch):
+    calls = []
+
+    def fake_build(root_path, *, filter_text="", cancelled=None, **_kwargs):
+        calls.append((root_path, filter_text, cancelled()))
+        return FileTreeSnapshot(root_path=root_path, filter_text=filter_text)
+
+    monkeypatch.setattr("ui.widgets.left_panel.build_file_tree_snapshot", fake_build)
+    thread = _FileTreeRefreshThread(1, str(workspace), "main")
+    emitted = []
+    thread.done.connect(lambda *args: emitted.append(args))
+
+    thread.cancel()
+    thread.run()
+
+    assert calls == [(str(workspace), "main", True)]
+    assert emitted == []
 
 
 def test_files_tree_registers_keyboard_shortcuts(qapp, workspace):
@@ -121,6 +222,7 @@ def test_files_tree_uses_icons_for_folders_and_known_files(qapp, workspace):
     tree = FileTree(str(workspace))
     src = tree.topLevelItem(0)
     tree._on_item_expanded(src)
+    _wait_for_loaded_children(qapp, src)
     item = src.child(0)
 
     assert not src.icon(0).isNull()
@@ -132,6 +234,7 @@ def test_files_tree_filters_by_relative_path(qapp, workspace):
     tree = FileTree(str(workspace))
 
     tree.set_filter_text("main")
+    _wait_until(qapp, lambda: tree.topLevelItemCount() == 1)
 
     assert tree.topLevelItemCount() == 1
     item = tree.topLevelItem(0)
@@ -140,6 +243,7 @@ def test_files_tree_filters_by_relative_path(qapp, workspace):
     assert tree.mimeData([item]).text() == "@src/main.py"
 
     tree.set_filter_text("")
+    _wait_until(qapp, lambda: tree.topLevelItemCount() > 0 and tree.topLevelItem(0).text(0) == "src")
 
     assert tree.topLevelItem(0).text(0) == "src"
 
@@ -159,6 +263,7 @@ def test_files_tree_shows_project_dot_folders(qapp, workspace):
     assert ".env" not in names
 
     tree.set_filter_text("demo")
+    _wait_until(qapp, lambda: tree.topLevelItemCount() == 1)
 
     assert tree.topLevelItemCount() == 1
     assert tree.topLevelItem(0).text(0) == ".aichs/skills/demo.md"
@@ -169,6 +274,7 @@ def test_files_tree_marks_dirty_files_and_parent_folders(qapp, workspace):
     tree = FileTree(str(workspace))
     src = tree.topLevelItem(0)
     tree._on_item_expanded(src)
+    _wait_for_loaded_children(qapp, src)
 
     tree.set_file_dirty(str(path), True)
 
@@ -200,17 +306,51 @@ def test_files_tree_creates_file_in_folder(qapp, workspace):
     assert created.read_text(encoding="utf-8") == ""
 
 
+def test_files_tree_create_file_invalidates_workspace_file_cache(qapp, workspace):
+    clear_workspace_file_cache()
+    tree = FileTree(str(workspace))
+    cached = list_workspace_files(workspace)
+
+    created = tree.create_file(str(workspace / "src"), "notes.txt")
+    refreshed = list_workspace_files(workspace)
+
+    assert str(created) not in cached
+    assert str(created) in refreshed
+
+
+def test_files_tree_refresh_invalidates_workspace_file_cache(qapp, workspace, monkeypatch):
+    clear_workspace_file_cache()
+    tree = FileTree(str(workspace), defer_git_status=True)
+    monkeypatch.setattr(tree, "_request_refresh", lambda: None)
+    cached = list_workspace_files(workspace)
+    created = workspace / "src" / "external.txt"
+    created.write_text("outside tree action\n", encoding="utf-8")
+
+    tree.refresh()
+    refreshed = list_workspace_files(workspace)
+
+    assert str(created) not in cached
+    assert str(created) in refreshed
+
+
 def test_files_tree_new_file_shortcut_uses_selected_file_parent(qapp, workspace, monkeypatch):
     tree = FileTree(str(workspace))
     assert tree.reveal_file(str(workspace / "src" / "main.py"))
+    actions = []
     monkeypatch.setattr(
         "ui.widgets.left_panel.QInputDialog.getText",
         lambda *args, **kwargs: ("notes.txt", True),
     )
+    monkeypatch.setattr(
+        tree,
+        "_start_action",
+        lambda action, path, **kwargs: actions.append((action, path, kwargs)),
+    )
 
     tree._new_file_selected()
 
-    assert (workspace / "src" / "notes.txt").exists()
+    assert actions == [("create_file", str(workspace / "src"), {"name": "notes.txt"})]
+    assert not (workspace / "src" / "notes.txt").exists()
 
 
 def test_files_tree_creates_folder_in_folder(qapp, workspace):
@@ -285,6 +425,42 @@ def test_files_tree_deletes_folder_recursively(qapp, workspace):
     assert not folder.exists()
 
 
+def test_files_tree_action_thread_creates_file_and_emits_path(qapp, workspace):
+    done = []
+    thread = _FileTreeActionThread(
+        str(workspace),
+        "create_file",
+        str(workspace / "src"),
+        name="queued.txt",
+    )
+    thread.done.connect(lambda *args: done.append(args))
+
+    thread.run()
+
+    assert done == [("create_file", str(workspace / "src" / "queued.txt"), "")]
+    assert (workspace / "src" / "queued.txt").exists()
+
+
+def test_files_tree_action_thread_discards_with_error_data(qapp, workspace, monkeypatch):
+    done = []
+    path = workspace / "src" / "main.py"
+    monkeypatch.setattr(
+        "ui.widgets.left_panel.discard_files",
+        lambda *_args, **_kwargs: GitCommandResult(1, "", "nope"),
+    )
+    thread = _FileTreeActionThread(
+        str(workspace),
+        "discard",
+        str(path),
+        rel_path="src/main.py",
+    )
+    thread.done.connect(lambda *args: done.append(args))
+
+    thread.run()
+
+    assert done == [("discard", "", "nope")]
+
+
 def test_files_tree_delete_rejects_workspace_root(qapp, workspace):
     tree = FileTree(str(workspace))
 
@@ -308,14 +484,21 @@ def test_files_tree_delete_dialog_requires_confirmation(qapp, workspace, monkeyp
 def test_files_tree_delete_dialog_removes_confirmed_path(qapp, workspace, monkeypatch):
     tree = FileTree(str(workspace))
     path = workspace / "src" / "main.py"
+    actions = []
     monkeypatch.setattr(
         "ui.widgets.left_panel.QMessageBox.question",
         lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
     )
+    monkeypatch.setattr(
+        tree,
+        "_start_action",
+        lambda action, queued_path, **kwargs: actions.append((action, queued_path, kwargs)),
+    )
 
     tree._delete_path_dialog(str(path))
 
-    assert not path.exists()
+    assert actions == [("delete", str(path), {})]
+    assert path.exists()
 
 
 def test_files_tree_discard_option_only_for_modified_files(qapp, workspace):
@@ -339,14 +522,12 @@ def test_files_tree_discard_dialog_restores_modified_file(qapp, workspace, monke
     path.write_text("print('discard from files tab')\n", encoding="utf-8")
     tree = FileTree(str(workspace))
     tree._git_by_path = {_path_key(str(path)): (" M", "M")}
-    calls = []
-    refreshes = []
+    actions = []
     monkeypatch.setattr(
-        "ui.widgets.left_panel.discard_files",
-        lambda repo_path, paths, staged=False: calls.append((repo_path, paths, staged))
-        or GitCommandResult(0, "discarded", ""),
+        tree,
+        "_start_action",
+        lambda action, queued_path, **kwargs: actions.append((action, queued_path, kwargs)),
     )
-    monkeypatch.setattr(tree, "refresh", lambda: refreshes.append(True))
     questions = []
     monkeypatch.setattr(
         "ui.widgets.left_panel.QMessageBox.question",
@@ -358,8 +539,9 @@ def test_files_tree_discard_dialog_restores_modified_file(qapp, workspace, monke
 
     tree._discard_file_dialog(str(path))
 
-    assert calls == [(str(workspace), ["src/main.py"], False)]
-    assert refreshes == [True]
+    assert actions == [
+        ("discard", str(path), {"rel_path": "src/main.py", "staged": False})
+    ]
     assert questions
     assert questions[0][0] is tree
     assert questions[0][1] == "Discard changes?"
@@ -371,13 +553,12 @@ def test_files_tree_discard_dialog_restores_staged_modified_file(qapp, workspace
     path.write_text("print('discard staged from files tab')\n", encoding="utf-8")
     tree = FileTree(str(workspace))
     tree._git_by_path = {_path_key(str(path)): ("M ", "M")}
-    calls = []
+    actions = []
     monkeypatch.setattr(
-        "ui.widgets.left_panel.discard_files",
-        lambda repo_path, paths, staged=False: calls.append((repo_path, paths, staged))
-        or GitCommandResult(0, "discarded", ""),
+        tree,
+        "_start_action",
+        lambda action, queued_path, **kwargs: actions.append((action, queued_path, kwargs)),
     )
-    monkeypatch.setattr(tree, "refresh", lambda: None)
     monkeypatch.setattr(
         "ui.widgets.left_panel.QMessageBox.question",
         lambda *args, **kwargs: QMessageBox.StandardButton.Discard,
@@ -385,7 +566,9 @@ def test_files_tree_discard_dialog_restores_staged_modified_file(qapp, workspace
 
     tree._discard_file_dialog(str(path))
 
-    assert calls == [(str(workspace), ["src/main.py"], True)]
+    assert actions == [
+        ("discard", str(path), {"rel_path": "src/main.py", "staged": True})
+    ]
 
 
 def test_files_tree_discard_cancel_keeps_modified_file(qapp, workspace, monkeypatch):
@@ -393,11 +576,11 @@ def test_files_tree_discard_cancel_keeps_modified_file(qapp, workspace, monkeypa
     path.write_text("print('keep files tab change')\n", encoding="utf-8")
     tree = FileTree(str(workspace))
     tree._git_by_path = {_path_key(str(path)): (" M", "M")}
-    calls = []
+    actions = []
     monkeypatch.setattr(
-        "ui.widgets.left_panel.discard_files",
-        lambda repo_path, paths, staged=False: calls.append((repo_path, paths, staged))
-        or GitCommandResult(0, "discarded", ""),
+        tree,
+        "_start_action",
+        lambda action, queued_path, **kwargs: actions.append((action, queued_path, kwargs)),
     )
     monkeypatch.setattr(
         "ui.widgets.left_panel.QMessageBox.question",
@@ -406,7 +589,7 @@ def test_files_tree_discard_cancel_keeps_modified_file(qapp, workspace, monkeypa
 
     tree._discard_file_dialog(str(path))
 
-    assert calls == []
+    assert actions == []
     assert path.read_text(encoding="utf-8") == "print('keep files tab change')\n"
 
 
@@ -417,6 +600,7 @@ def test_files_tree_combines_git_and_dirty_markers(qapp, workspace):
     tree._git_by_path = {_path_key(str(path)): (" M", "M")}
     src = tree.topLevelItem(0)
     tree._on_item_expanded(src)
+    _wait_for_loaded_children(qapp, src)
 
     tree.set_file_dirty(str(path), True)
 
@@ -427,17 +611,16 @@ def test_files_tree_combines_git_and_dirty_markers(qapp, workspace):
 
 
 def test_git_log_drags_commit_reference(qapp, workspace, monkeypatch):
-    import ui.widgets.git_panel as git_panel
-
-    monkeypatch.setattr(git_panel, "is_git_repo", lambda _path: True)
-    monkeypatch.setattr(git_panel, "count_commits_to_pull", lambda _path: 0)
-    monkeypatch.setattr(git_panel, "count_commits_to_push", lambda _path: 0)
     monkeypatch.setattr(
-        git_panel,
-        "run_git",
-        lambda _cmd, _path: "abcdef123456\x1fabcdef1\x1finitial",
+        "ui.widgets.git_panel.build_git_snapshot",
+        lambda repo_path: GitSnapshot(
+            repo_path=repo_path,
+            is_repo=True,
+            log_lines=("abcdef123456\x1fabcdef1\x1finitial",),
+        ),
     )
     panel = GitPanel(str(workspace))
+    _wait_until(qapp, lambda: panel.log.count() == 1)
     item = panel.log.item(0)
 
     mime = panel.log.mimeData([item])
@@ -451,17 +634,16 @@ def test_git_log_drags_commit_reference(qapp, workspace, monkeypatch):
 
 
 def test_git_log_double_click_opens_commit_diff(qapp, workspace, monkeypatch):
-    import ui.widgets.git_panel as git_panel
-
-    monkeypatch.setattr(git_panel, "is_git_repo", lambda _path: True)
-    monkeypatch.setattr(git_panel, "count_commits_to_pull", lambda _path: 0)
-    monkeypatch.setattr(git_panel, "count_commits_to_push", lambda _path: 0)
     monkeypatch.setattr(
-        git_panel,
-        "run_git",
-        lambda _cmd, _path: "abcdef123456\x1fabcdef1\x1finitial",
+        "ui.widgets.git_panel.build_git_snapshot",
+        lambda repo_path: GitSnapshot(
+            repo_path=repo_path,
+            is_repo=True,
+            log_lines=("abcdef123456\x1fabcdef1\x1finitial",),
+        ),
     )
     panel = GitPanel(str(workspace))
+    _wait_until(qapp, lambda: panel.log.count() == 1)
     item = panel.log.item(0)
     calls = []
 

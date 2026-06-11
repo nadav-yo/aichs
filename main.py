@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import QApplication
 
 from ui.theme import apply_app_theme
 from ui.main_window import MainWindow
+from ui.performance_monitor import EventLoopStallMonitor
 from storage.settings import SettingsStore
 
 APP_USER_MODEL_ID = "studio.aichs.desktop"
@@ -87,6 +88,7 @@ def main():
     app.setWindowIcon(icon)
     app.setStyle("Fusion")
     apply_app_theme(app)
+    app._aichs_stall_monitor = EventLoopStallMonitor(app)
     w = MainWindow(startup_workspace=workspace, prefer_saved_workspace=last_workspace)
     w.setWindowIcon(icon)
     w.show()

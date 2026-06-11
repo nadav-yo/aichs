@@ -1,9 +1,8 @@
 import os
-from datetime import datetime
 from pathlib import Path
 
-import markdown as _md
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -12,28 +11,106 @@ from PyQt6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
-from services.git_status import is_git_repo, list_file_changes, run_git
-from storage.repository import ConversationStore, list_workspaces
+from services.workspace_snapshot import (
+    README_NAMES,
+    WorkspaceSnapshot,
+    build_workspace_snapshot,
+    display_chat_time,
+    display_updated_at,
+)
+from storage.repository import remove_workspace
 from ui.theme import (
     ACCENT,
     chat_font_pt,
+    contained_list_style,
     markdown_css,
+    hint_label_style,
     meta_font_pt,
     palette,
     primary_button_style,
+    section_label_style,
+    secondary_button_style,
+    status_pill_style,
 )
+from ui.markdown_html import markdown_body
 from ui.widgets.markdown_browser import RemoteImageTextBrowser
 
 _ROLE_PATH = Qt.ItemDataRole.UserRole
 _ROLE_EXISTS = Qt.ItemDataRole.UserRole + 1
 _ROLE_CONVERSATION_PATH = Qt.ItemDataRole.UserRole + 2
-_PREVIEW_LIMIT = 18_000
+
+
+class _WorkspaceRefreshThread(QThread):
+    done = pyqtSignal(int, object)
+
+    def __init__(
+        self,
+        generation: int,
+        root: str,
+        *,
+        git_snapshot=None,
+        git_changes=None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._generation = generation
+        self._root = root
+        self._git_snapshot = git_snapshot
+        self._git_changes = list(git_changes) if git_changes is not None else None
+
+    def run(self):
+        self.done.emit(
+            self._generation,
+            build_workspace_snapshot(
+                self._root,
+                git_snapshot=self._git_snapshot,
+                git_changes=self._git_changes,
+            ),
+        )
+
+
+class _DashboardListRow(QWidget):
+    def __init__(
+        self,
+        title: str,
+        details: list[str] | tuple[str, ...] = (),
+        *,
+        empty: bool = False,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._empty = empty
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(5)
+        self.title = QLabel(title)
+        self.title.setWordWrap(False)
+        layout.addWidget(self.title)
+        self.details = QLabel("\n".join(str(line) for line in details if str(line)))
+        self.details.setWordWrap(False)
+        if self.details.text():
+            layout.addWidget(self.details)
+        else:
+            self.details.hide()
+        self.apply_appearance()
+
+    def apply_appearance(self):
+        p = palette()
+        fs = chat_font_pt()
+        meta = meta_font_pt()
+        title_color = p["TEXT_DIM"] if self._empty else p["TEXT"]
+        self.setStyleSheet("background:transparent;")
+        self.title.setStyleSheet(
+            f"color:{title_color}; font-size:{fs}px; background:transparent;"
+        )
+        self.details.setStyleSheet(hint_label_style())
 
 
 class WorkspaceDashboard(QWidget):
@@ -49,6 +126,13 @@ class WorkspaceDashboard(QWidget):
         self.setObjectName("workspaceDashboard")
         self._current_workspace = os.path.abspath(current_workspace)
         self._has_loaded = False
+        self._refresh_generation = 0
+        self._refresh_threads: list[_WorkspaceRefreshThread] = []
+        self._readme_exists = False
+        self._readme_text = ""
+        self._agents_exists = False
+        self._agents_text = ""
+        self._snapshot_applied = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
@@ -166,10 +250,13 @@ class WorkspaceDashboard(QWidget):
         self._open_agents_btn.clicked.connect(self._open_agents)
         instructions_header.addWidget(self._open_agents_btn)
         instructions_layout.addLayout(instructions_header)
-        self._instructions_preview = QLabel()
+        self._instructions_preview = RemoteImageTextBrowser()
         self._instructions_preview.setObjectName("workspaceInstructionsPreview")
-        self._instructions_preview.setWordWrap(True)
-        self._instructions_preview.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._instructions_preview.setOpenExternalLinks(False)
+        self._instructions_preview.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse |
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
         instructions_layout.addWidget(self._instructions_preview, 1)
         grid.addWidget(self._instructions_card, 2, 0)
 
@@ -194,6 +281,8 @@ class WorkspaceDashboard(QWidget):
         self._recent.setObjectName("workspaceRecentList")
         self._recent.itemActivated.connect(self._activate_item)
         self._recent.itemClicked.connect(self._activate_item)
+        self._recent.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._recent.customContextMenuRequested.connect(self._show_recent_menu)
         workspaces_layout.addWidget(self._recent, 1)
         grid.addWidget(self._workspaces_card, 2, 1)
 
@@ -208,35 +297,30 @@ class WorkspaceDashboard(QWidget):
         self._current_workspace = os.path.abspath(path)
         self.refresh()
 
-    def refresh(self, git_changes=None):
+    def refresh(self, *, git_snapshot=None, git_changes=None):
         self._has_loaded = True
         current = self._current_workspace
         current_name = Path(current).name or current
         self._path.setText(current)
         self._current_name.setText(current_name)
         self._current_full_path.setText(current)
-        self._refresh_status(git_changes=git_changes)
-        self._refresh_readme()
-        self._refresh_agents()
-        self._refresh_chats()
-        self._recent.clear()
-
-        rows = list_workspaces()
-        current_key = os.path.normcase(os.path.abspath(current))
-        shown = 0
-        for row in rows:
-            path = str(row.get("path") or "")
-            if not path:
-                continue
-            if os.path.normcase(os.path.abspath(path)) == current_key:
-                continue
-            self._add_workspace_item(row)
-            shown += 1
-
-        if shown == 0:
-            item = QListWidgetItem("No recent workspaces yet")
-            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-            self._recent.addItem(item)
+        if not self._snapshot_applied:
+            self._set_placeholders()
+        self._git_status.setText("Git pending")
+        self._branch_status.setText("Branch pending")
+        self._refresh_generation += 1
+        thread = _WorkspaceRefreshThread(
+            self._refresh_generation,
+            current,
+            git_snapshot=git_snapshot,
+            git_changes=git_changes,
+            parent=self,
+        )
+        self._refresh_threads.append(thread)
+        thread.done.connect(self._apply_snapshot)
+        thread.finished.connect(lambda t=thread: self._release_refresh_thread(t))
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
 
     def apply_appearance(self):
         p = palette()
@@ -247,58 +331,91 @@ class WorkspaceDashboard(QWidget):
             border_radius=7,
             padding="9px 14px",
         )
-        secondary = _secondary_button_style(p, meta)
+        secondary = secondary_button_style(
+            padding="6px 10px",
+            font_size=meta,
+            font_weight="600",
+            text_color=p["TEXT_DIM"],
+            border_color=p["BORDER_SUBTLE"],
+        )
+        recent_list_style = contained_list_style(
+            selector="QListWidget#workspaceRecentList, QListWidget#workspaceRecentChats",
+            item_padding="10px 12px",
+            item_radius=6,
+            item_margin="0px",
+            border_radius=8,
+        )
+        section_style = section_label_style(
+            selector="QLabel#workspaceSectionLabel",
+            text_color=p["TEXT"],
+            font_weight="650",
+        )
+        status_style = status_pill_style(
+            selector="QLabel#workspaceStatusPill",
+            padding="4px 7px",
+            border_radius=6,
+            font_pt=meta,
+        )
         self.setStyleSheet(
             f"QWidget#workspaceDashboard {{ background:{p['BG']}; color:{p['TEXT']}; }}"
             "QLabel { background:transparent; }"
             f"QLabel#workspaceDashboardTitle {{ font-size:{max(20, fs + 8)}px;"
             "font-weight:700; }"
-            f"QLabel#workspaceDashboardPath {{ color:{p['TEXT_DIM']};"
-            f"font-size:{meta}px; }}"
-            f"QLabel#workspaceSectionLabel {{ color:{ACCENT}; font-size:{meta}px;"
-            "font-weight:700; }"
+            f"{hint_label_style(selector='QLabel#workspaceDashboardPath')}"
+            f"{section_style}"
             f"QLabel#workspaceCurrentName {{ color:{p['TEXT']};"
             f"font-size:{max(14, fs + 1)}px; font-weight:650; }}"
-            f"QLabel#workspaceCurrentPath {{ color:{p['TEXT_DIM']};"
-            f"font-size:{meta}px; }}"
+            f"{hint_label_style(selector='QLabel#workspaceCurrentPath')}"
             f"QFrame#workspaceHomeCard {{ background:{p['BG2']};"
             f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:8px; }}"
-            f"QLabel#workspaceStatusPill {{ background:{p['BG3']}; color:{p['TEXT_DIM']};"
-            f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:6px;"
-            f"padding:4px 7px; font-size:{meta}px; }}"
-            f"QLabel#workspaceInstructionsPreview {{ color:{p['TEXT_DIM']};"
-            f"font-size:{meta}px; line-height:1.45; }}"
-            f"QTextBrowser#workspacePreview {{ background:{p['BG3']}; color:{p['TEXT']};"
+            f"{status_style}"
+            f"QTextBrowser#workspacePreview, QTextBrowser#workspaceInstructionsPreview {{"
+            f"background:{p['BG3']}; color:{p['TEXT']};"
             f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:7px;"
             f"padding:8px; font-size:{meta}px; }}"
-            f"QPushButton {{ {secondary} }}"
-            f"QPushButton:hover {{ background:{p['BORDER']}; color:{p['TEXT']}; }}"
+            f"{secondary}"
             f"{primary}"
-            f"QListWidget#workspaceRecentList, QListWidget#workspaceRecentChats {{ background:{p['BG2']};"
-            f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:8px;"
-            "outline:none; padding:4px; }"
-            "QListWidget#workspaceRecentList::item, QListWidget#workspaceRecentChats::item { padding:10px 12px;"
-            "border-radius:6px; }"
-            f"QListWidget#workspaceRecentList::item:hover, QListWidget#workspaceRecentChats::item:hover {{ background:{p['BG3']}; }}"
-            f"QListWidget#workspaceRecentList::item:selected, QListWidget#workspaceRecentChats::item:selected {{"
-            f"background:{p['SELECTION']}; color:{p['SELECTION_TEXT']}; }}"
+            f"{recent_list_style}"
         )
-        if self._has_loaded:
-            self._readme_preview.setHtml(_preview_html(_read_readme(self._current_workspace)))
+        if self._snapshot_applied:
+            self._readme_preview.setHtml(
+                _markdown_panel_html(
+                    self._readme_text,
+                    empty_text=(
+                        "README is empty."
+                        if self._readme_exists
+                        else "No README found in this workspace."
+                    ),
+                )
+            )
+            self._instructions_preview.setHtml(
+                _markdown_panel_html(
+                    self._agents_text,
+                    empty_text=(
+                        "Project instructions are empty."
+                        if self._agents_exists
+                        else "No project instructions found."
+                    ),
+                )
+            )
+        for widget in self.findChildren(_DashboardListRow):
+            widget.apply_appearance()
 
-    def _add_workspace_item(self, row: dict):
-        path = str(row.get("path") or "")
-        exists = bool(row.get("exists"))
-        name = str(row.get("name") or Path(path).name or path)
-        when = _display_updated_at(str(row.get("updated_at") or ""))
+    def _add_workspace_item(self, row):
+        path = str(row.path or "")
+        exists = bool(row.exists)
+        name = str(row.name or Path(path).name or path)
+        when = display_updated_at(str(row.updated_at or ""))
         suffix = when if exists else "Missing folder"
-        item = QListWidgetItem(f"{name}\n{path}\n{suffix}")
+        item = QListWidgetItem()
+        item.setSizeHint(_dashboard_row_size(3))
         item.setToolTip(path)
         item.setData(_ROLE_PATH, path)
         item.setData(_ROLE_EXISTS, exists)
         if not exists:
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
         self._recent.addItem(item)
+        self._recent.setItemWidget(item, _DashboardListRow(name, [path, suffix]))
 
     def _activate_item(self, item: QListWidgetItem):
         if not bool(item.data(_ROLE_EXISTS)):
@@ -312,6 +429,31 @@ class WorkspaceDashboard(QWidget):
         if path:
             self.conversation_requested.emit(path)
 
+    def _show_recent_menu(self, pos):
+        item = self._recent.itemAt(pos)
+        if item is None:
+            return
+        path = str(item.data(_ROLE_PATH) or "")
+        if not path:
+            return
+        menu = QMenu(self)
+        remove = QAction("Remove from Recent", self)
+        menu.addAction(remove)
+        chosen = menu.exec(self._recent.mapToGlobal(pos))
+        if chosen is remove:
+            self._remove_recent_workspace(path)
+
+    def _remove_recent_workspace(self, path: str):
+        if not remove_workspace(path):
+            return
+        target = _path_key(path)
+        for index in range(self._recent.count() - 1, -1, -1):
+            item = self._recent.item(index)
+            if _path_key(str(item.data(_ROLE_PATH) or "")) == target:
+                self._recent.takeItem(index)
+        if self._recent.count() == 0:
+            self._add_empty_workspace_item()
+
     def _open_folder(self):
         path = QFileDialog.getExistingDirectory(
             self,
@@ -323,7 +465,7 @@ class WorkspaceDashboard(QWidget):
             self.switch_requested.emit(path)
 
     def _open_readme(self):
-        path = _first_existing(self._current_workspace, _README_NAMES)
+        path = _first_existing(self._current_workspace, README_NAMES)
         if path:
             self.open_file_requested.emit(str(path))
 
@@ -344,78 +486,131 @@ class WorkspaceDashboard(QWidget):
         self._skills_status.setText("Skills pending")
         self._extensions_status.setText("Extensions pending")
         self._readme_preview.setHtml(_empty_html("Workspace preview pending."))
-        self._instructions_preview.setText("Project instructions pending.")
+        self._instructions_preview.setHtml(_empty_html("Project instructions pending."))
         self._recent_chats.clear()
         self._recent.clear()
 
-    def _refresh_status(self, *, git_changes=None):
-        root = self._current_workspace
-        agents = (Path(root) / "AGENTS.md").is_file()
-        self._agents_status.setText("AGENTS.md" if agents else "No AGENTS.md")
-        skill_count = _skill_count(root)
+    def _apply_snapshot(self, generation: int, snapshot: WorkspaceSnapshot):
+        if generation != self._refresh_generation:
+            return
+        if os.path.normcase(os.path.abspath(snapshot.root)) != os.path.normcase(os.path.abspath(self._current_workspace)):
+            return
+        self._snapshot_applied = True
+        self._path.setText(snapshot.root)
+        self._current_name.setText(snapshot.name)
+        self._current_full_path.setText(snapshot.root)
+        self._apply_status(snapshot)
+        self._apply_readme(snapshot)
+        self._apply_agents(snapshot)
+        self._apply_chats(snapshot)
+        self._apply_recent_workspaces(snapshot)
+
+    def _release_refresh_thread(self, thread: _WorkspaceRefreshThread):
+        if thread in self._refresh_threads:
+            self._refresh_threads.remove(thread)
+
+    def shutdown(self):
+        self._refresh_generation += 1
+        for thread in list(self._refresh_threads):
+            try:
+                thread.done.disconnect()
+            except TypeError:
+                pass
+            try:
+                thread.finished.disconnect()
+            except TypeError:
+                pass
+            if thread.isRunning():
+                thread.wait(3000)
+            thread.deleteLater()
+        self._refresh_threads.clear()
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
+
+    def _apply_status(self, snapshot: WorkspaceSnapshot):
+        self._agents_status.setText("AGENTS.md" if snapshot.agents_exists else "No AGENTS.md")
+        skill_count = snapshot.skills_count
         skill_word = "skill" if skill_count == 1 else "skills"
         self._skills_status.setText(f"{skill_count} {skill_word}" if skill_count else "No skills")
-        ext_count = _extension_count(root)
+        ext_count = snapshot.extensions_count
         ext_word = "extension" if ext_count == 1 else "extensions"
         self._extensions_status.setText(f"{ext_count} {ext_word}" if ext_count else "No extensions")
-        if not is_git_repo(root):
+        if not snapshot.git_repo:
             self._git_status.setText("No git repo")
             self._branch_status.setText("No branch")
             return
-        changes = list_file_changes(root) if git_changes is None else git_changes
         self._git_status.setText(
-            "Clean git" if not changes else f"{len(changes)} changed file{'s' if len(changes) != 1 else ''}"
+            "Clean git"
+            if not snapshot.changed_count
+            else f"{snapshot.changed_count} changed file{'s' if snapshot.changed_count != 1 else ''}"
         )
-        branch = run_git(["git", "branch", "--show-current"], root).strip()
-        self._branch_status.setText(branch or "Detached HEAD")
+        self._branch_status.setText(snapshot.branch or "Detached HEAD")
 
-    def _refresh_readme(self):
-        path = _first_existing(self._current_workspace, _README_NAMES)
-        has_readme = path is not None
-        self._open_readme_btn.setVisible(has_readme)
-        if not has_readme:
+    def _apply_readme(self, snapshot: WorkspaceSnapshot):
+        self._open_readme_btn.setVisible(snapshot.readme_exists)
+        self._readme_exists = snapshot.readme_exists
+        self._readme_text = snapshot.readme_text
+        if not snapshot.readme_exists:
             self._readme_preview.setHtml(_empty_html("No README found in this workspace."))
             return
-        text = _read_text(path)
-        self._readme_preview.setHtml(_preview_html(text))
+        self._readme_preview.setHtml(_preview_html(snapshot.readme_text))
 
-    def _refresh_agents(self):
-        path = Path(self._current_workspace) / "AGENTS.md"
-        has_agents = path.is_file()
-        self._open_agents_btn.setVisible(has_agents)
-        if not has_agents:
-            self._instructions_preview.setText("No project instructions found.")
+    def _apply_agents(self, snapshot: WorkspaceSnapshot):
+        self._open_agents_btn.setVisible(snapshot.agents_exists)
+        self._agents_exists = snapshot.agents_exists
+        self._agents_text = snapshot.agents_text
+        if not snapshot.agents_exists:
+            self._instructions_preview.setHtml(_empty_html("No project instructions found."))
             return
-        self._instructions_preview.setText(_plain_preview(_read_text(path), limit=900))
+        self._instructions_preview.setHtml(
+            _markdown_panel_html(
+                snapshot.agents_text,
+                empty_text="Project instructions are empty.",
+            )
+        )
 
-    def _refresh_chats(self):
+    def _apply_chats(self, snapshot: WorkspaceSnapshot):
         self._recent_chats.clear()
-        rows = ConversationStore(self._current_workspace).list_all()[:5]
-        for path, summary in rows:
-            title = str(summary.get("title") or "Untitled")
-            updated = _display_chat_time(str(summary.get("updated_at") or ""))
-            count = int(summary.get("message_count") or 0)
-            item = QListWidgetItem(f"{title}\n{updated} - {count} messages")
-            item.setData(_ROLE_CONVERSATION_PATH, str(path))
-            item.setToolTip(str(path))
+        for chat in snapshot.recent_chats:
+            title = str(chat.title or "Untitled")
+            updated = display_chat_time(str(chat.updated_at or ""))
+            count = int(chat.message_count or 0)
+            message_word = "message" if count == 1 else "messages"
+            meta = f"{updated} - {count} {message_word}"
+            item = QListWidgetItem()
+            item.setSizeHint(_dashboard_row_size(2))
+            item.setData(_ROLE_CONVERSATION_PATH, str(chat.path))
+            item.setToolTip(str(chat.path))
             self._recent_chats.addItem(item)
-        if not rows:
-            item = QListWidgetItem("No chats in this workspace yet")
+            self._recent_chats.setItemWidget(item, _DashboardListRow(title, [meta]))
+        if not snapshot.recent_chats:
+            item = QListWidgetItem()
+            item.setSizeHint(_dashboard_row_size(1))
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
             self._recent_chats.addItem(item)
+            self._recent_chats.setItemWidget(
+                item,
+                _DashboardListRow("No chats in this workspace yet", empty=True),
+            )
 
+    def _apply_recent_workspaces(self, snapshot: WorkspaceSnapshot):
+        self._recent.clear()
+        for row in snapshot.recent_workspaces:
+            self._add_workspace_item(row)
+        if not snapshot.recent_workspaces:
+            self._add_empty_workspace_item()
 
-def _display_updated_at(value: str) -> str:
-    if not value:
-        return "Recent"
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError:
-        return "Recent"
-    return dt.strftime("Last opened %b %d, %Y %H:%M")
-
-
-_README_NAMES = ("README.md", "README.markdown", "README.txt", "README")
+    def _add_empty_workspace_item(self):
+        item = QListWidgetItem()
+        item.setSizeHint(_dashboard_row_size(1))
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        self._recent.addItem(item)
+        self._recent.setItemWidget(
+            item,
+            _DashboardListRow("No recent workspaces yet", empty=True),
+        )
 
 
 def _card() -> QFrame:
@@ -437,12 +632,9 @@ def _status_pill() -> QLabel:
     return label
 
 
-def _secondary_button_style(p: dict, meta: int) -> str:
-    return (
-        f"background:{p['BG3']}; color:{p['TEXT_DIM']};"
-        f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:6px;"
-        f"padding:6px 10px; font-size:{meta}px; font-weight:600;"
-    )
+def _dashboard_row_size(lines: int):
+    height = 28 + max(1, int(lines)) * 22
+    return QSize(0, height)
 
 
 def _first_existing(root: str, names: tuple[str, ...]) -> Path | None:
@@ -454,76 +646,33 @@ def _first_existing(root: str, names: tuple[str, ...]) -> Path | None:
     return None
 
 
-def _read_readme(root: str) -> str:
-    path = _first_existing(root, _README_NAMES)
-    return _read_text(path) if path else ""
-
-
-def _read_text(path: Path | None, limit: int = _PREVIEW_LIMIT) -> str:
-    if path is None:
+def _path_key(path: str) -> str:
+    if not path:
         return ""
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    return text[:limit]
+    return os.path.normcase(os.path.abspath(path))
 
 
 def _preview_html(text: str) -> str:
+    return _markdown_panel_html(text, empty_text="README is empty.")
+
+
+def _markdown_panel_html(text: str, *, empty_text: str) -> str:
     if not text.strip():
-        return _empty_html("README is empty.")
-    body = _md.markdown(text, extensions=["fenced_code", "tables", "toc"])
-    return f"<style>{markdown_css()}</style>{body}"
+        return _empty_html(empty_text)
+    body = markdown_body(text, extensions=["fenced_code", "tables", "toc"])
+    p = palette()
+    css = (
+        markdown_css()
+        + f"body {{ background:{p['BG3']}; padding:6px 8px 12px 8px; }}"
+    )
+    return f"<style>{css}</style>{body}"
 
 
 def _empty_html(text: str) -> str:
     p = palette()
     return (
         f"<style>body {{ color:{p['TEXT_DIM']}; font-family:sans-serif;"
-        "margin:0; padding:0; }}</style>"
+        "margin:0; padding:6px 8px; }}</style>"
         f"<p>{text}</p>"
     )
 
-
-def _plain_preview(text: str, limit: int = 900) -> str:
-    lines = [line.strip() for line in str(text or "").splitlines()]
-    compact = "\n".join(line for line in lines if line)
-    if len(compact) <= limit:
-        return compact
-    return compact[: limit - 1].rstrip() + "..."
-
-
-def _display_chat_time(value: str) -> str:
-    if not value:
-        return "Recent"
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError:
-        return "Recent"
-    return dt.strftime("%b %d, %Y %H:%M")
-
-
-def _extension_count(root: str) -> int:
-    ext_dir = Path(root) / ".aichs" / "extensions"
-    if not ext_dir.is_dir():
-        return 0
-    count = 0
-    for child in ext_dir.iterdir():
-        if child.name.startswith("."):
-            continue
-        if child.is_file() and child.suffix == ".py":
-            count += 1
-        elif child.is_dir() and (child / "extension.py").is_file():
-            count += 1
-    return count
-
-
-def _skill_count(root: str) -> int:
-    skills_dir = Path(root) / ".aichs" / "skills"
-    if not skills_dir.is_dir():
-        return 0
-    return sum(
-        1
-        for child in skills_dir.glob("*.md")
-        if child.is_file() and not child.name.startswith(".")
-    )

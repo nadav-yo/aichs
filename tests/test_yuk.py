@@ -18,6 +18,7 @@ from storage.settings import (
     DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
     DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY,
     FILE_REVIEW_PROMPT_TEMPLATE_KEY,
+    GIT_FIX_PROMPT_TEMPLATE_KEY,
 )
 from services.tool_registry import is_extension_disabled, set_extension_enabled
 from services.yuk import (
@@ -37,7 +38,7 @@ def test_export_yuk_selected_items_excludes_models_and_secrets(workspace, tmp_pa
         "provider_api_keys": {"openai": "secret"},
         "default_models": {"openai": "gpt-test"},
     })
-    global_skills = Path.home() / ".aichs" / "skills"
+    global_skills = config.AICHS_HOME / "skills"
     global_skills.mkdir(parents=True)
     (global_skills / "global.md").write_text("---\nname: global\n---\nGlobal\n", encoding="utf-8")
     project_skills = workspace / ".aichs" / "skills"
@@ -71,6 +72,7 @@ def test_export_yuk_prompt_items_only_include_non_defaults(workspace, tmp_path):
         "system_prompt": config.SYSTEM_PROMPT,
         FILE_REVIEW_PROMPT_TEMPLATE_KEY: DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
         DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY: "Please fix {mention} with tests.",
+        GIT_FIX_PROMPT_TEMPLATE_KEY: "Debug git {action}: {command}.",
         COMPACT_RESUME_PROMPT_KEY: DEFAULT_COMPACT_RESUME_PROMPT,
         AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY: DEFAULT_AUTO_TITLE_PROMPT_INSTRUCTIONS,
         COMPACTION_SUMMARY_GUIDANCE_KEY: "",
@@ -83,10 +85,12 @@ def test_export_yuk_prompt_items_only_include_non_defaults(workspace, tmp_path):
     manifest = export_yuk(package, str(workspace))
 
     assert f"setting:{DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY}" in item_ids
+    assert f"setting:{GIT_FIX_PROMPT_TEMPLATE_KEY}" in item_ids
     assert "setting:system_prompt" not in item_ids
     assert f"setting:{FILE_REVIEW_PROMPT_TEMPLATE_KEY}" not in item_ids
     assert manifest["settings"] == {
-        DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY: "Please fix {mention} with tests."
+        DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY: "Please fix {mention} with tests.",
+        GIT_FIX_PROMPT_TEMPLATE_KEY: "Debug git {action}: {command}.",
     }
 
 
@@ -116,7 +120,7 @@ def test_yuk_round_trips_project_extension_disabled_state(workspace, tmp_path):
 
 
 def test_yuk_uses_workspace_disabled_state_for_global_extensions(workspace, tmp_path):
-    global_extensions = Path.home() / ".aichs" / "extensions"
+    global_extensions = config.AICHS_HOME / "extensions"
     global_extensions.mkdir(parents=True)
     disabled = global_extensions / "global_disabled.py"
     disabled.write_text("def register(registry): pass\n", encoding="utf-8")
@@ -135,7 +139,7 @@ def test_yuk_uses_workspace_disabled_state_for_global_extensions(workspace, tmp_
     target.mkdir()
     apply_yuk(package, str(target), {exported.id: "overwrite"})
 
-    imported = Path.home() / ".aichs" / "extensions" / "global_disabled.py"
+    imported = config.AICHS_HOME / "extensions" / "global_disabled.py"
     assert imported.exists()
     assert is_extension_disabled(imported, str(target))
 

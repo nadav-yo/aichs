@@ -6,6 +6,7 @@ def test_file_mention_picker_includes_crew(qapp):
     picker = FileMentionPicker([], crew=list(all_crew()))
     picker.filter("@sc")
     assert picker.count() >= 1
+    assert "QListWidget::item:selected:focus" in picker._list.styleSheet()
 
     selected = []
     picker.crew_selected.connect(selected.append)

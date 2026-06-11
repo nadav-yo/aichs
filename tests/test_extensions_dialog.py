@@ -1,6 +1,7 @@
-from PyQt6.QtWidgets import QLabel, QPushButton
+from PyQt6.QtGui import QCloseEvent
+from PyQt6.QtWidgets import QCheckBox, QLabel, QPushButton
 
-from services.extension_installer import ExtensionInstallCandidate
+from services.extension_installer import ExtensionInstallCandidate, ExtensionInstallSource
 from services.tool_registry import (
     ExtensionFileSummary,
     ExtensionOverview,
@@ -11,10 +12,24 @@ from ui.widgets.extensions_dialog import (
     ExtensionInstallDialog,
     ExtensionsDialog,
     _ExtensionDetailPane,
+    _ExtensionListRow,
+    _ExtensionOverviewWorker,
+    _ExtensionInstallApplyWorker,
+    _ExtensionInstallFetchWorker,
+    _enabled_checkbox_style,
+    _extension_error_text,
+    _install_scope_combo_style,
+    _list_meta_style,
+    _list_name_style,
+    _list_path_style,
+    _list_row_style,
+    _queue_toggle,
     _list_subtitle,
+    _status_label_style,
     _status_tone,
     _summary_text,
 )
+from ui.theme import palette
 
 
 def _summary(
@@ -63,6 +78,39 @@ def test_extensions_dialog_status_helpers():
     assert _status_tone(_summary()) == "success"
     assert _status_tone(_summary(status="Disabled")) == "disabled"
     assert _status_tone(_summary(status="Failed", errors=["boom"])) == "danger"
+    assert "border-radius:8px" in _status_label_style("success")
+    assert "background:" in _status_label_style("success")
+
+
+def test_enabled_checkbox_style_keeps_label_background_transparent():
+    style = _enabled_checkbox_style()
+
+    assert "QCheckBox {" in style
+    assert "background-color: transparent" in style
+    assert "QCheckBox::indicator:checked" in style
+    assert "SUCCESS" not in style
+
+
+def test_extension_list_row_keeps_child_text_surfaces_transparent():
+    selected = _list_row_style(selected=True, tone="success")
+
+    assert "background-color:" in selected
+    assert "QFrame#extensionListRow QLabel { background-color:transparent; border:none; }" in selected
+    assert "transparent" in _list_name_style()
+    assert "transparent" in _list_meta_style("success")
+    assert "transparent" in _list_path_style()
+
+
+def test_install_scope_combo_styles_dropdown_with_theme_palette():
+    p = palette()
+    style = _install_scope_combo_style()
+
+    assert "QComboBox QAbstractItemView" in style
+    assert "QComboBoxPrivateContainer" in style
+    assert "QComboBox QAbstractItemView::item" in style
+    assert p["BG3"] in style
+    assert p["SELECTION"] in style
+    assert p["SELECTION_TEXT"] in style
 
 
 def test_extensions_dialog_uses_docs_for_api_reference(qapp):
@@ -127,6 +175,212 @@ def test_extensions_dialog_shows_permissions_and_risk(qapp):
     assert "Loaded · blocked" in labels
 
 
+def test_extension_checkbox_toggles_are_deferred(qapp, monkeypatch):
+    scheduled = []
+    calls = []
+
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.QTimer.singleShot",
+        lambda delay, callback: scheduled.append((delay, callback)),
+    )
+    row = _ExtensionListRow(
+        _summary("disabled.py", status="Disabled"),
+        selected=True,
+        on_toggle=lambda path, enabled: calls.append((path, enabled)),
+    )
+    checkbox = row.findChildren(QCheckBox)[0]
+
+    checkbox.setChecked(True)
+
+    assert calls == []
+    assert len(scheduled) == 1
+    assert scheduled[0][0] == 0
+
+    scheduled[0][1]()
+
+    assert calls == [("disabled.py", True)]
+
+
+def test_extension_detail_checkbox_toggles_are_deferred(qapp, monkeypatch):
+    scheduled = []
+    calls = []
+
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.QTimer.singleShot",
+        lambda delay, callback: scheduled.append((delay, callback)),
+    )
+    pane = _ExtensionDetailPane(
+        _summary("enabled.py", status="Loaded"),
+        on_toggle=lambda path, enabled: calls.append((path, enabled)),
+    )
+    checkbox = pane.findChildren(QCheckBox)[0]
+
+    checkbox.setChecked(False)
+
+    assert calls == []
+    assert len(scheduled) == 1
+
+    scheduled[0][1]()
+
+    assert calls == [("enabled.py", False)]
+
+
+def test_queue_toggle_ignores_missing_handler(monkeypatch):
+    scheduled = []
+
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.QTimer.singleShot",
+        lambda delay, callback: scheduled.append((delay, callback)),
+    )
+
+    _queue_toggle(None, "extension.py", True)
+
+    assert scheduled == []
+
+
+def test_extension_overview_worker_emits_overview(qapp, monkeypatch):
+    overview = ExtensionOverview(files=[_summary("runtime.py")])
+    done = []
+
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.extension_overview",
+        lambda cwd: overview,
+    )
+    worker = _ExtensionOverviewWorker(4, "C:/repo")
+    worker.signals.done.connect(lambda *args: done.append(args))
+    worker.run()
+
+    assert done == [(4, overview, "")]
+
+
+def test_extensions_dialog_defers_cwd_overview_to_worker(qapp, monkeypatch):
+    started = []
+
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.extension_overview",
+        lambda _cwd: (_ for _ in ()).throw(AssertionError("should run in worker")),
+    )
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.QThreadPool.start",
+        lambda _pool, worker: started.append(worker),
+    )
+
+    dialog = ExtensionsDialog("C:/repo")
+
+    assert dialog._summary.text() == "Loading extensions..."
+    assert isinstance(started[0], _ExtensionOverviewWorker)
+
+
+def test_extensions_dialog_applies_current_overview_result(qapp):
+    overview = ExtensionOverview(files=[_summary("runtime.py")])
+    calls = []
+    dialog = ExtensionsDialog(ExtensionOverview(files=[]), on_reload=lambda: calls.append("reload"))
+    dialog._cwd = "C:/repo"
+    dialog._overview_generation = 2
+
+    dialog._on_overview_ready(2, overview, "")
+
+    assert dialog._overview is overview
+    assert dialog._selected_path == "runtime.py"
+    assert calls == ["reload"]
+
+
+def test_extensions_dialog_ignores_stale_overview_result(qapp):
+    overview = ExtensionOverview(files=[_summary("runtime.py")])
+    dialog = ExtensionsDialog(ExtensionOverview(files=[]))
+    dialog._overview_generation = 2
+
+    dialog._on_overview_ready(1, overview, "")
+
+    assert dialog._overview.files == []
+    assert dialog._selected_path == ""
+
+
+def test_extensions_dialog_close_invalidates_overview_without_waiting(qapp, monkeypatch):
+    waited = []
+    dialog = ExtensionsDialog(ExtensionOverview(files=[]))
+    dialog._overview_generation = 2
+    monkeypatch.setattr(
+        dialog._overview_pool,
+        "waitForDone",
+        lambda *_args: waited.append("wait"),
+    )
+
+    dialog.closeEvent(QCloseEvent())
+
+    assert dialog._overview_generation == 3
+    assert waited == []
+
+
+def test_extensions_dialog_enable_warns_when_extension_load_fails(qapp, monkeypatch):
+    path = "broken.py"
+    overviews = [
+        ExtensionOverview(files=[_summary(path, status="Disabled")]),
+        ExtensionOverview(files=[_summary(path, status="Failed", errors=["boom"])]),
+    ]
+    warnings = []
+    toggles = []
+
+    def fake_overview(_cwd):
+        return overviews[min(len(toggles), len(overviews) - 1)]
+
+    monkeypatch.setattr("ui.widgets.extensions_dialog.extension_overview", fake_overview)
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.set_extension_enabled",
+        lambda changed_path, enabled, _cwd: toggles.append((changed_path, enabled)),
+    )
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.QMessageBox.warning",
+        lambda _parent, title, text: warnings.append((title, text)),
+    )
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.QThreadPool.start",
+        lambda _pool, worker: worker.run(),
+    )
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.QTimer.singleShot",
+        lambda _delay, callback: callback(),
+    )
+    dialog = ExtensionsDialog("C:/repo")
+
+    checkbox = dialog.findChildren(QCheckBox)[0]
+    checkbox.setChecked(True)
+
+    assert toggles == [(path, True)]
+    assert warnings == [("Extension failed to load", "boom")]
+
+
+def test_extensions_dialog_enable_exception_warns_and_rolls_back(qapp, monkeypatch):
+    path = "broken.py"
+    calls = []
+    warnings = []
+    dialog = ExtensionsDialog(ExtensionOverview(files=[_summary(path, status="Disabled")]))
+    dialog._cwd = "C:/repo"
+    dialog._reload = lambda: None
+
+    def fake_set_enabled(changed_path, enabled, cwd):
+        calls.append((changed_path, enabled, cwd))
+        if enabled:
+            raise SystemExit("extension stopped")
+
+    monkeypatch.setattr("ui.widgets.extensions_dialog.set_extension_enabled", fake_set_enabled)
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.QMessageBox.warning",
+        lambda _parent, title, text: warnings.append((title, text)),
+    )
+
+    dialog._set_enabled(path, True)
+
+    assert calls == [(path, True, "C:/repo"), (path, False, "C:/repo")]
+    assert warnings == [("Extension enable failed", "extension stopped")]
+
+
+def test_extension_error_text_limits_long_error_lists():
+    file = _summary("broken.py", status="Failed", errors=["one", "two", "three"])
+
+    assert _extension_error_text(file) == "one\n\ntwo\n\n... and 1 more error(s)."
+
+
 def test_extension_install_dialog_selects_candidates(qapp, tmp_path):
     dialog = ExtensionInstallDialog(str(tmp_path))
     candidate = ExtensionInstallCandidate(
@@ -147,3 +401,323 @@ def test_extension_install_dialog_selects_candidates(qapp, tmp_path):
     checkbox.setChecked(False)
     assert dialog.selected_candidates() == []
     assert not dialog.install_btn.isEnabled()
+
+
+def test_extension_install_fetch_starts_worker_without_preparing_on_ui_thread(qapp, tmp_path, monkeypatch):
+    dialog = ExtensionInstallDialog(str(tmp_path))
+    started = []
+
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.prepare_extension_install_source",
+        lambda _url: (_ for _ in ()).throw(AssertionError("should run in worker")),
+    )
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.QThreadPool.start",
+        lambda _pool, worker: started.append(worker),
+    )
+
+    dialog.url_edit.setText("https://example.test/ext.git")
+    dialog._fetch()
+
+    assert dialog._fetch_active
+    assert dialog._source is None
+    assert not dialog.fetch_btn.isEnabled()
+    assert not dialog.install_btn.isEnabled()
+    assert isinstance(started[0], _ExtensionInstallFetchWorker)
+
+
+def test_extension_install_fetch_worker_emits_source_and_cleans_previous(qapp, tmp_path, monkeypatch):
+    previous = ExtensionInstallSource(
+        url="old",
+        kind="git",
+        checkout_path=tmp_path / "old-checkout",
+        temp_dir=tmp_path / "old-temp",
+        candidates=[],
+    )
+    source = ExtensionInstallSource(
+        url="new",
+        kind="git",
+        checkout_path=tmp_path / "new-checkout",
+        temp_dir=tmp_path / "new-temp",
+        candidates=[],
+    )
+    cleaned = []
+    done = []
+
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.cleanup_extension_install_source",
+        lambda item: cleaned.append(item),
+    )
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.prepare_extension_install_source",
+        lambda url: source,
+    )
+
+    worker = _ExtensionInstallFetchWorker(7, "https://example.test/ext.git", previous)
+    worker.signals.done.connect(lambda *args: done.append(args))
+    worker.run()
+
+    assert cleaned == [previous]
+    assert done == [(7, source, "")]
+
+
+def test_extension_install_dialog_applies_current_fetch_result(qapp, tmp_path):
+    candidate = ExtensionInstallCandidate(
+        name="python-lang",
+        source_path=tmp_path / "python-lang",
+        entrypoint=tmp_path / "python-lang" / "extension.py",
+        kind="folder",
+        description="Python support",
+    )
+    source = ExtensionInstallSource(
+        url="url",
+        kind="git",
+        checkout_path=tmp_path / "checkout",
+        temp_dir=tmp_path / "temp",
+        candidates=[candidate],
+    )
+    dialog = ExtensionInstallDialog(str(tmp_path))
+    dialog._fetch_generation = 3
+    dialog._fetch_active = True
+    dialog.fetch_btn.setEnabled(False)
+
+    dialog._on_fetch_done(3, source, "")
+
+    assert not dialog._fetch_active
+    assert dialog._source is source
+    assert dialog.fetch_btn.isEnabled()
+    assert dialog.install_btn.isEnabled()
+    assert [item.name for item in dialog.selected_candidates()] == ["python-lang"]
+    assert dialog.status_label.text() == "Found 1 installable extension."
+
+
+def test_extension_install_dialog_ignores_stale_fetch_result_and_cleans_source(qapp, tmp_path, monkeypatch):
+    source = ExtensionInstallSource(
+        url="stale",
+        kind="git",
+        checkout_path=tmp_path / "checkout",
+        temp_dir=tmp_path / "temp",
+        candidates=[],
+    )
+    cleaned = []
+    dialog = ExtensionInstallDialog(str(tmp_path))
+    dialog._fetch_generation = 4
+    dialog._fetch_active = True
+
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.cleanup_extension_install_source",
+        lambda item: cleaned.append(item),
+    )
+
+    dialog._on_fetch_done(3, source, "")
+
+    assert dialog._fetch_active
+    assert dialog._source is None
+    assert cleaned == [source]
+
+
+def test_extension_install_apply_worker_installs_and_cleans_source(qapp, tmp_path, monkeypatch):
+    candidate = ExtensionInstallCandidate(
+        name="python-lang",
+        source_path=tmp_path / "python-lang",
+        entrypoint=tmp_path / "python-lang" / "extension.py",
+        kind="folder",
+    )
+    source = ExtensionInstallSource(
+        url="url",
+        kind="git",
+        checkout_path=tmp_path / "checkout",
+        temp_dir=tmp_path / "temp",
+        candidates=[candidate],
+    )
+    calls = []
+    cleaned = []
+    done = []
+
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.install_extension_candidates",
+        lambda candidates, *, scope, cwd: calls.append((candidates, scope, cwd)) or ["ok"],
+    )
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.cleanup_extension_install_source",
+        lambda item: cleaned.append(item),
+    )
+
+    worker = _ExtensionInstallApplyWorker(8, [candidate], "local", str(tmp_path), source)
+    worker.signals.done.connect(lambda *args: done.append(args))
+    worker.run()
+
+    assert calls == [([candidate], "local", str(tmp_path))]
+    assert cleaned == [source]
+    assert done == [(8, ["ok"], "")]
+
+
+def test_extension_install_apply_worker_cleans_source_on_install_error(qapp, tmp_path, monkeypatch):
+    candidate = ExtensionInstallCandidate(
+        name="python-lang",
+        source_path=tmp_path / "python-lang",
+        entrypoint=tmp_path / "python-lang" / "extension.py",
+        kind="folder",
+    )
+    source = ExtensionInstallSource(
+        url="url",
+        kind="git",
+        checkout_path=tmp_path / "checkout",
+        temp_dir=tmp_path / "temp",
+        candidates=[candidate],
+    )
+    cleaned = []
+    done = []
+
+    def fail_install(_candidates, *, scope, cwd):
+        raise RuntimeError(f"copy failed for {scope}:{cwd}")
+
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.install_extension_candidates",
+        fail_install,
+    )
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.cleanup_extension_install_source",
+        lambda item: cleaned.append(item),
+    )
+
+    worker = _ExtensionInstallApplyWorker(9, [candidate], "local", str(tmp_path), source)
+    worker.signals.done.connect(lambda *args: done.append(args))
+    worker.run()
+
+    assert cleaned == [source]
+    assert done == [(9, [], f"copy failed for local:{tmp_path}")]
+
+
+def test_extension_install_apply_worker_reports_cleanup_error(qapp, tmp_path, monkeypatch):
+    candidate = ExtensionInstallCandidate(
+        name="python-lang",
+        source_path=tmp_path / "python-lang",
+        entrypoint=tmp_path / "python-lang" / "extension.py",
+        kind="folder",
+    )
+    source = ExtensionInstallSource(
+        url="url",
+        kind="git",
+        checkout_path=tmp_path / "checkout",
+        temp_dir=tmp_path / "temp",
+        candidates=[candidate],
+    )
+    done = []
+
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.install_extension_candidates",
+        lambda _candidates, *, scope, cwd: ["ok"],
+    )
+
+    def fail_cleanup(_source):
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.cleanup_extension_install_source",
+        fail_cleanup,
+    )
+
+    worker = _ExtensionInstallApplyWorker(10, [candidate], "local", str(tmp_path), source)
+    worker.signals.done.connect(lambda *args: done.append(args))
+    worker.run()
+
+    assert done == [(10, [], "cleanup failed")]
+
+
+def test_extension_install_click_starts_worker_without_copying_on_ui_thread(qapp, tmp_path, monkeypatch):
+    candidate = ExtensionInstallCandidate(
+        name="python-lang",
+        source_path=tmp_path / "python-lang",
+        entrypoint=tmp_path / "python-lang" / "extension.py",
+        kind="folder",
+    )
+    source = ExtensionInstallSource(
+        url="url",
+        kind="git",
+        checkout_path=tmp_path / "checkout",
+        temp_dir=tmp_path / "temp",
+        candidates=[candidate],
+    )
+    dialog = ExtensionInstallDialog(str(tmp_path))
+    dialog._source = source
+    dialog._set_candidates([candidate])
+    started = []
+
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.install_extension_candidates",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should run in worker")),
+    )
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.QThreadPool.start",
+        lambda _pool, worker: started.append(worker),
+    )
+
+    dialog._install()
+
+    assert dialog._install_active
+    assert not dialog.fetch_btn.isEnabled()
+    assert not dialog.install_btn.isEnabled()
+    assert dialog.status_label.text() == "Installing extensions..."
+    assert isinstance(started[0], _ExtensionInstallApplyWorker)
+
+
+def test_extension_install_dialog_applies_install_success(qapp, tmp_path, monkeypatch):
+    infos = []
+    source = ExtensionInstallSource(
+        url="url",
+        kind="git",
+        checkout_path=tmp_path / "checkout",
+        temp_dir=tmp_path / "temp",
+        candidates=[],
+    )
+    dialog = ExtensionInstallDialog(str(tmp_path))
+    dialog._source = source
+    dialog._install_generation = 2
+    dialog._install_active = True
+    dialog.fetch_btn.setEnabled(False)
+
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.QMessageBox.information",
+        lambda _parent, title, text: infos.append((title, text)),
+    )
+
+    dialog._on_install_done(2, ["ok"], "")
+
+    assert not dialog._install_active
+    assert dialog._source is None
+    assert dialog.fetch_btn.isEnabled()
+    assert dialog.result() == ExtensionInstallDialog.DialogCode.Accepted
+    assert infos == [(
+        "Extensions installed",
+        "Installed extensions are disabled until you review and enable them.",
+    )]
+
+
+def test_extension_install_dialog_applies_install_error(qapp, tmp_path, monkeypatch):
+    candidate = ExtensionInstallCandidate(
+        name="python-lang",
+        source_path=tmp_path / "python-lang",
+        entrypoint=tmp_path / "python-lang" / "extension.py",
+        kind="folder",
+    )
+    warnings = []
+    dialog = ExtensionInstallDialog(str(tmp_path))
+    dialog._set_candidates([candidate])
+    dialog._install_generation = 5
+    dialog._install_active = True
+    dialog.fetch_btn.setEnabled(False)
+    dialog.install_btn.setEnabled(False)
+
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.QMessageBox.warning",
+        lambda _parent, title, text: warnings.append((title, text)),
+    )
+
+    dialog._on_install_done(5, [], "copy failed")
+
+    assert not dialog._install_active
+    assert dialog.fetch_btn.isEnabled()
+    assert dialog.install_btn.isEnabled()
+    assert dialog.status_label.text() == "Install failed."
+    assert warnings == [("Install failed", "copy failed")]

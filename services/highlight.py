@@ -4,13 +4,13 @@ from pygments.lexers import (
     get_lexer_for_filename, get_lexer_by_name, guess_lexer, TextLexer,
 )
 
-from ui.theme import current_theme, palette, mono_font_pt, MONO_FONT_CSS
+from ui.theme import current_theme, code_surface_colors, mono_font_pt, MONO_FONT_CSS
 
 
 def _formatter() -> HtmlFormatter:
     theme = current_theme()
     style = "default" if theme == "light" else "monokai"
-    bg = palette(theme)["BG3"]
+    bg = code_surface_colors(theme)["background"]
     fs = mono_font_pt()
     return HtmlFormatter(
         style=style,

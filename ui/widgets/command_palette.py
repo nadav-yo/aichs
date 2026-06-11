@@ -6,7 +6,16 @@ from PyQt6.QtCore import Qt, QSize, QEvent
 from PyQt6.QtGui import QKeyEvent
 
 from services.palette import PaletteItem, filter_items
-from ui.theme import palette, ACCENT, meta_font_pt, chat_font_pt, separator_color
+from ui.theme import (
+    chat_font_pt,
+    hint_label_style,
+    overlay_dialog_style,
+    overlay_results_list_style,
+    overlay_search_input_style,
+    overlay_separator_style,
+    palette,
+    title_label_style,
+)
 
 
 class _QueryInput(QLineEdit):
@@ -38,21 +47,18 @@ class _ResultRow(QWidget):
         super().__init__(parent)
         p = palette()
         fs = chat_font_pt()
-        meta = meta_font_pt()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(2)
 
         title = QLabel(item.label)
-        title.setStyleSheet(f"color:{p['TEXT']}; font-size:{fs}px; background:transparent;")
+        title.setStyleSheet(title_label_style(font_pt=fs))
         layout.addWidget(title)
 
         if item.subtitle:
             sub = QLabel(item.subtitle)
-            sub.setStyleSheet(
-                f"color:{p['TEXT_DIM']}; font-size:{meta}px; background:transparent;"
-            )
+            sub.setStyleSheet(hint_label_style())
             layout.addWidget(sub)
 
 
@@ -67,10 +73,7 @@ class CommandPalette(QDialog):
         self.setMinimumWidth(520)
         self.resize(560, 360)
 
-        p = palette()
-        self.setStyleSheet(
-            f"QDialog {{ background:{p['BG2']}; border:1px solid {p['BORDER']}; border-radius:12px; }}"
-        )
+        self.setStyleSheet(overlay_dialog_style())
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -79,30 +82,18 @@ class CommandPalette(QDialog):
         self._query = _QueryInput(self)
         self._query.setPlaceholderText("Search conversations, files, /commands…")
         self._query.setClearButtonEnabled(True)
-        self._query.setStyleSheet(
-            f"QLineEdit {{ background:{p['BG3']}; color:{p['TEXT']};"
-            f"border:1px solid {p['BORDER']}; border-radius:10px;"
-            f"padding:10px 14px; font-size:{chat_font_pt()}px; }}"
-            f"QLineEdit:focus {{ border:1px solid {ACCENT}; }}"
-        )
+        self._query.setStyleSheet(overlay_search_input_style())
         self._query.textChanged.connect(self._refilter)
         self._query.returnPressed.connect(self._activate_current)
         root.addWidget(self._query)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep_color = separator_color()
-        sep.setStyleSheet(
-            f"background:{sep_color}; color:{sep_color}; border:none; max-height:1px;"
-        )
+        sep.setStyleSheet(overlay_separator_style())
         root.addWidget(sep)
 
         self._list = QListWidget()
-        self._list.setStyleSheet(
-            f"QListWidget {{ background:{p['BG2']}; border:none; outline:none; }}"
-            f"QListWidget::item {{ border:none; }}"
-            f"QListWidget::item:selected {{ background:{p['BG3']}; border-left:3px solid {ACCENT}; }}"
-        )
+        self._list.setStyleSheet(overlay_results_list_style())
         self._list.itemActivated.connect(self._on_activated)
         self._list.installEventFilter(self)
         root.addWidget(self._list, 1)

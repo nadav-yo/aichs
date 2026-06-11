@@ -34,8 +34,15 @@ from services.file_editor_refs import (
 from services.file_ref_clipboard import AICHS_MESSAGE_COPY_MIME, parse_file_refs_payload
 from services.terminal_refs import TERMINAL_REF_MIME
 from ui.theme import (
-    composer_reference_colors, composer_shell_style, composer_style,
-    chat_font_pt, palette, ACCENT,
+    attachment_remove_button_style,
+    attachment_thumbnail_style,
+    composer_reference_colors,
+    composer_shell_style,
+    composer_style,
+    skill_chip_style,
+    chat_font_pt,
+    palette,
+    ACCENT,
 )
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
@@ -104,6 +111,7 @@ class MessageInput(QTextEdit):
     send_requested      = pyqtSignal()
     edit_last_requested = pyqtSignal()
     image_pasted        = pyqtSignal(QImage)
+    focus_changed       = pyqtSignal(bool)
     slash_changed       = pyqtSignal(str)   # "/" + typed text, or "" when leaving slash mode
     terminal_changed    = pyqtSignal(str)   # "!" when showing terminal command help, or "" when leaving
     mention_changed     = pyqtSignal(str)   # "@" + typed text, or "" when leaving file mention mode
@@ -152,6 +160,14 @@ class MessageInput(QTextEdit):
 
     def set_enter_to_send(self, enabled: bool):
         self._enter_to_send = enabled
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self.focus_changed.emit(True)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self.focus_changed.emit(False)
 
     def _on_text_changed(self):
         text = self.toPlainText()
@@ -533,13 +549,8 @@ class _Thumb(QWidget):
         self.apply_appearance()
 
     def apply_appearance(self):
-        p = palette()
-        self._img.setStyleSheet(f"border:1px solid {p['BORDER']}; border-radius:6px;")
-        self._remove.setStyleSheet(
-            f"QPushButton {{ background:{p['BG3']}; color:{p['TEXT_DIM']};"
-            f"border:1px solid {p['BORDER']}; border-radius:9px; font-size:10px; padding:0; }}"
-            f"QPushButton:hover {{ color:#ff5555; }}"
-        )
+        self._img.setStyleSheet(attachment_thumbnail_style())
+        self._remove.setStyleSheet(attachment_remove_button_style())
 
 
 class ImageStrip(QWidget):
@@ -612,6 +623,7 @@ class ComposerWidget(QWidget):
 
         self._shell = QFrame()
         self._shell.setObjectName("composerShell")
+        self._shell.setProperty("composerFocused", "false")
         shell_layout = QHBoxLayout(self._shell)
         shell_layout.setContentsMargins(10, 6, 10, 6)
         shell_layout.setSpacing(10)
@@ -637,6 +649,7 @@ class ComposerWidget(QWidget):
         self.input = MessageInput()
         self.input.send_requested.connect(self.send_requested.emit)
         self.input.image_pasted.connect(self.strip.add_image)
+        self.input.focus_changed.connect(self._set_shell_focused)
 
         field_col.addWidget(self._skill_row)
         field_col.addWidget(self.strip)
@@ -675,14 +688,8 @@ class ComposerWidget(QWidget):
 
     def set_skill(self, skill) -> None:
         self._active_skill = skill
-        p = palette()
         self._skill_chip.setText(f"Mode: /{skill.name}  x")
-        self._skill_chip.setStyleSheet(
-            f"QPushButton {{ background-color:{p['BG3']}; color:{p['TEXT']};"
-            f"border:1px solid {p['BORDER']}; border-radius:8px;"
-            "font-size:11px; padding-left:8px; padding-right:8px; }}"
-            f"QPushButton:hover {{ color:{ACCENT}; border-color:{ACCENT}; }}"
-        )
+        self._skill_chip.setStyleSheet(skill_chip_style())
         self._skill_chip.setToolTip("Click to clear the active slash mode")
         self._skill_row.show()
 
@@ -704,11 +711,19 @@ class ComposerWidget(QWidget):
 
     def apply_appearance(self):
         self._shell.setStyleSheet(composer_shell_style())
+        self._set_shell_focused(self.input.hasFocus())
         self.input.apply_appearance()
         for item in self.strip._items:
             item["widget"].apply_appearance()
         if self._active_skill:
             self.set_skill(self._active_skill)
+
+    def _set_shell_focused(self, focused: bool) -> None:
+        self._shell.setProperty("composerFocused", "true" if focused else "false")
+        style = self._shell.style()
+        style.unpolish(self._shell)
+        style.polish(self._shell)
+        self._shell.update()
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if _mime_has_chat_refs(event.mimeData()) or _mime_has_attachments(event.mimeData()):
