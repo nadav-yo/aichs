@@ -1,4 +1,3 @@
-import json
 import os
 import re
 import shutil
@@ -14,7 +13,7 @@ _ANSI_ESCAPE_RE = re.compile(
 )
 _ORPHAN_SGR_RE = re.compile(r"(?m)^(?:\[[0-9;]*m)+")
 
-from config import (
+from config import (  # noqa: E402
     DEFAULT_READ_FILE_LINES,
     IGNORED,
     MAX_READ_FILE_LINES,
@@ -22,12 +21,12 @@ from config import (
     MAX_TOOL_OUTPUT_LINES,
     MAX_TOOL_READ_BYTES,
 )
-from services.shell_tool import shell_tool_name
-from services.content import is_visible_message
-from storage.repository import ConversationStore, project_conversation_summaries, workspace_id
-from services.subprocess_utils import popen_no_window, run_no_window
-from services.tool_policy import resolve_path, validate_tool_paths
-from services.tool_registry import ToolContext, ToolRegistry, load_extensions
+from services.shell_tool import shell_tool_name  # noqa: E402
+from services.content import is_visible_message  # noqa: E402
+from storage.repository import ConversationStore, project_conversation_summaries, workspace_id  # noqa: E402
+from services.subprocess_utils import popen_no_window, run_no_window  # noqa: E402
+from services.tool_policy import resolve_path, validate_tool_paths  # noqa: E402
+from services.tool_registry import ToolContext, ToolRegistry, load_extensions  # noqa: E402
 
 # ── Tool schemas ──────────────────────────────────────────────────────────────
 
@@ -713,19 +712,46 @@ def _list_files(directory: Path, glob: str, recursive: bool, limit: int, cwd: st
 
 
 def _iter_list_paths(directory: Path, glob: str, recursive: bool, cancel=None):
-    iterator = directory.rglob(glob) if recursive else directory.glob(glob)
-    for path in iterator:
+    if recursive:
+        stack = [directory]
+        while stack:
+            if _cancelled(cancel):
+                return
+            current = stack.pop()
+            try:
+                entries = sorted(current.iterdir(), key=lambda entry: entry.name.casefold())
+            except OSError:
+                continue
+            dirs: list[Path] = []
+            for entry in entries:
+                if _cancelled(cancel):
+                    return
+                if entry.name in IGNORED or entry.name.startswith("."):
+                    continue
+                try:
+                    rel_parts = entry.relative_to(directory).parts
+                except ValueError:
+                    continue
+                if any(part in IGNORED for part in rel_parts):
+                    continue
+                if entry.match(glob):
+                    yield entry
+                if entry.is_dir():
+                    dirs.append(entry)
+            stack.extend(reversed(dirs))
+        return
+
+    try:
+        entries = sorted(directory.iterdir(), key=lambda entry: entry.name.casefold())
+    except OSError:
+        return
+    for entry in entries:
         if _cancelled(cancel):
             return
-        if path == directory:
+        if entry.name in IGNORED or entry.name.startswith("."):
             continue
-        try:
-            rel_parts = path.relative_to(directory).parts
-        except ValueError:
-            continue
-        if any(part in IGNORED for part in rel_parts):
-            continue
-        yield path
+        if entry.match(glob):
+            yield entry
 
 
 def _search_files(directory: Path, glob: str, pattern: str, cwd: str, cancel=None) -> str:
@@ -984,13 +1010,32 @@ def _search_files_with_rg(directory: Path, glob: str, pattern: str, cwd: str, ca
 
 
 def _iter_search_paths(directory: Path, glob: str, cancel=None):
-    for path in directory.rglob(glob):
+    stack = [directory]
+    while stack:
         if _cancelled(cancel):
             return
-        if any(part in IGNORED for part in path.relative_to(directory).parts):
+        current = stack.pop()
+        try:
+            entries = sorted(current.iterdir(), key=lambda entry: entry.name.casefold())
+        except OSError:
             continue
-        if path.is_file():
-            yield path
+        dirs: list[Path] = []
+        for entry in entries:
+            if _cancelled(cancel):
+                return
+            if entry.name in IGNORED or entry.name.startswith("."):
+                continue
+            try:
+                rel_parts = entry.relative_to(directory).parts
+            except ValueError:
+                continue
+            if any(part in IGNORED for part in rel_parts):
+                continue
+            if entry.is_file() and entry.match(glob):
+                yield entry
+            if entry.is_dir():
+                dirs.append(entry)
+        stack.extend(reversed(dirs))
 
 
 def _cancelled(cancel) -> bool:

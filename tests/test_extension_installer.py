@@ -1,5 +1,6 @@
 from pathlib import Path
 import shutil
+import subprocess
 
 import pytest
 
@@ -10,14 +11,19 @@ from services.extension_installer import (
     discover_extension_candidates,
     extension_install_root,
     ExtensionInstallSource,
+    format_commit_date,
+    git_source_metadata,
     GitExtensionSourceResolver,
+    install_conflicts,
+    install_content_matches,
     install_extension_candidates,
+    lookup_existing_install,
     prepare_extension_install_source,
 )
 from services.tool_registry import is_extension_disabled
 
 
-def _write_folder_extension(root: Path, name: str, description: str = "") -> Path:
+def _write_folder_extension(root: Path, name: str, description: str = "", *, display_name: str = "") -> Path:
     folder = root / name
     folder.mkdir(parents=True)
     entry = folder / "extension.py"
@@ -27,10 +33,195 @@ def _write_folder_extension(root: Path, name: str, description: str = "") -> Pat
         "    pass\n",
         encoding="utf-8",
     )
+    if display_name:
+        import json
+        (folder / "aichs-extension.json").write_text(
+            json.dumps({"name": display_name, "description": description}),
+            encoding="utf-8",
+        )
     return folder
 
 
-def test_discover_extension_candidates_finds_folders_and_files(tmp_path):
+def _git_commit(repo: Path) -> None:
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    config = repo / ".git" / "config"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + "\n[user]\n\temail = test@example.com\n\tname = Test User\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init", "--author", "test <test@example.com>"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        env={
+            **__import__("os").environ,
+            "GIT_AUTHOR_DATE": "2026-06-11T12:00:00+00:00",
+            "GIT_COMMITTER_DATE": "2026-06-11T12:00:00+00:00",
+        },
+    )
+
+
+def test_git_source_metadata_reads_head_commit(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("demo", encoding="utf-8")
+    _git_commit(repo)
+
+    commit_hash, commit_date = git_source_metadata(repo)
+
+    assert len(commit_hash) == 12
+    assert commit_date.startswith("2026-06-11")
+    assert format_commit_date(commit_date) == "Jun 11, 2026"
+
+
+def test_lookup_existing_install_and_conflicts(workspace):
+    source = _write_folder_extension(workspace / "source", "demo")
+    candidate = discover_extension_candidates(source.parent)[0]
+    target = extension_install_root("local", str(workspace)) / "demo"
+    target.mkdir(parents=True)
+    entrypoint = target / "extension.py"
+    entrypoint.write_text("old", encoding="utf-8")
+
+    existing = lookup_existing_install("demo", scope="local", cwd=str(workspace))
+    conflicts = install_conflicts([candidate], scope="local", cwd=str(workspace))
+
+    assert existing is not None
+    assert existing.path == target
+    assert existing.modified_at is not None
+    assert conflicts["demo"].path == target
+    assert conflicts["demo"].replaces_target is True
+    assert lookup_existing_install("missing", scope="local", cwd=str(workspace)) is None
+
+
+def test_lookup_existing_install_is_case_insensitive(workspace):
+    source = _write_folder_extension(workspace / "source", "demo")
+    candidate = discover_extension_candidates(source.parent)[0]
+    target = extension_install_root("local", str(workspace)) / "Demo"
+    target.mkdir(parents=True)
+    (target / "extension.py").write_text("old", encoding="utf-8")
+
+    existing = lookup_existing_install("demo", scope="local", cwd=str(workspace))
+    conflicts = install_conflicts([candidate], scope="local", cwd=str(workspace))
+
+    assert existing is not None
+    assert existing.path == target
+    assert conflicts["demo"].path == target
+    assert conflicts["demo"].replaces_target is True
+
+
+def test_install_conflicts_detects_global_when_installing_local(workspace):
+    import config
+
+    _write_folder_extension(
+        config.AICHS_HOME / "extensions",
+        "context-resilience",
+        "Stored helpers",
+        display_name="Context Resilience",
+    )
+    source = _write_folder_extension(
+        workspace / "source",
+        "context-resilience",
+        "Incoming helpers",
+        display_name="Context Resilience",
+    )
+    candidate = discover_extension_candidates(source.parent)[0]
+
+    conflicts = install_conflicts([candidate], scope="local", cwd=str(workspace))
+
+    assert "context-resilience" in conflicts
+    assert conflicts["context-resilience"].scope == "global"
+    assert conflicts["context-resilience"].replaces_target is False
+
+
+def test_install_conflicts_detects_local_when_installing_global(workspace):
+
+    _write_folder_extension(
+        workspace / ".aichs" / "extensions",
+        "context-resilience",
+        "Stored helpers",
+        display_name="Context Resilience",
+    )
+    source = _write_folder_extension(
+        workspace / "source",
+        "context-resilience",
+        "Incoming helpers",
+        display_name="Context Resilience",
+    )
+    candidate = discover_extension_candidates(source.parent)[0]
+
+    conflicts = install_conflicts([candidate], scope="global", cwd=str(workspace))
+
+    assert "context-resilience" in conflicts
+    assert conflicts["context-resilience"].scope == "local"
+    assert conflicts["context-resilience"].replaces_target is False
+
+
+def test_install_content_matches_detects_identical_extensions(workspace):
+    import shutil
+
+    source = _write_folder_extension(workspace / "source", "demo", "Same body")
+    candidate = discover_extension_candidates(source.parent)[0]
+    target = extension_install_root("local", str(workspace)) / "demo"
+    shutil.copytree(source, target)
+
+    assert install_content_matches(candidate, target) is True
+
+    (target / "extension.py").write_text("different", encoding="utf-8")
+    assert install_content_matches(candidate, target) is False
+
+
+def test_install_conflicts_marks_same_content(workspace):
+    import shutil
+
+    source = _write_folder_extension(workspace / "source", "demo", "Same body")
+    candidate = discover_extension_candidates(source.parent)[0]
+    target = extension_install_root("local", str(workspace)) / "demo"
+    shutil.copytree(source, target)
+
+    conflict = install_conflicts([candidate], scope="local", cwd=str(workspace))["demo"]
+
+    assert conflict.same_content is True
+
+
+def test_install_conflicts_match_by_display_name(workspace):
+    _write_folder_extension(
+        workspace / ".aichs" / "extensions",
+        "context-resilience",
+        "Stored helpers",
+        display_name="Context Resilience",
+    )
+    source = _write_folder_extension(
+        workspace / "source",
+        "context-resilience",
+        "Incoming helpers",
+        display_name="Context Resilience",
+    )
+    candidate = discover_extension_candidates(source.parent)[0]
+
+    assert candidate.display_name == "Context Resilience"
+    conflicts = install_conflicts([candidate], scope="local", cwd=str(workspace))
+
+    assert "context-resilience" in conflicts
+
+
+def test_discover_extension_candidates_reads_display_name(tmp_path):
+    _write_folder_extension(
+        tmp_path,
+        "context-resilience",
+        "Compaction helpers",
+        display_name="Context Resilience",
+    )
+
+    candidate = discover_extension_candidates(tmp_path)[0]
+
+    assert candidate.name == "context-resilience"
+    assert candidate.display_name == "Context Resilience"
+
+
+def test_discover_extension_candidates_finds_folders_and_files_without_glob(tmp_path, monkeypatch):
     _write_folder_extension(tmp_path, "python-lang", "Python support")
     (tmp_path / "single.py").write_text(
         '"""Single-file extension."""\n\n'
@@ -39,6 +230,14 @@ def test_discover_extension_candidates_finds_folders_and_files(tmp_path):
         encoding="utf-8",
     )
     (tmp_path / "__init__.py").write_text("", encoding="utf-8")
+    nested = tmp_path / "nested" / "inner"
+    nested.mkdir(parents=True)
+    (nested / "extension.py").write_text("def register(registry):\n    pass\n", encoding="utf-8")
+
+    def fail_glob(self, pattern):
+        raise AssertionError(f"unexpected glob({pattern})")
+
+    monkeypatch.setattr(Path, "glob", fail_glob)
 
     candidates = discover_extension_candidates(tmp_path)
 

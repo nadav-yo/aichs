@@ -1,4 +1,3 @@
-import shutil
 
 from ui.avatars import clear_cache, list_builtin_avatars, persist_portrait, portrait_source
 

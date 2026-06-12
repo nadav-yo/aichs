@@ -1,4 +1,8 @@
+from contextlib import contextmanager
+from pathlib import Path
+
 import config
+import services.skills as skills_service
 
 
 def test_load_skill_from_project(workspace):
@@ -38,3 +42,43 @@ def test_load_skill_from_configured_user_home(workspace):
     skills = load_all(str(workspace))
 
     assert [skill.name for skill in skills] == ["global"]
+
+
+def test_load_skills_uses_top_level_iterdir_and_skips_hidden(workspace, monkeypatch):
+    skills_dir = workspace / ".aichs" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / ".hidden.md").write_text("---\nname: hidden\n---\nHidden prompt.\n", encoding="utf-8")
+    (skills_dir / "review.md").write_text("---\nname: review\n---\nReview prompt.\n", encoding="utf-8")
+    (skills_dir / "notes.txt").write_text("---\nname: notes\n---\nNotes prompt.\n", encoding="utf-8")
+    nested = skills_dir / "nested.md"
+    nested.mkdir()
+    monkeypatch.setattr(
+        Path,
+        "glob",
+        lambda self, pattern: (_ for _ in ()).throw(
+            AssertionError("skill discovery should not use glob")
+        ),
+    )
+
+    loaded = skills_service.load_all(str(workspace))
+
+    assert [skill.name for skill in loaded] == ["review"]
+
+
+def test_load_skills_records_operation(workspace, monkeypatch):
+    skills_dir = workspace / ".aichs" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "review.md").write_text("---\nname: review\n---\nReview prompt.\n", encoding="utf-8")
+    operations = []
+
+    @contextmanager
+    def fake_time_operation(operation, *, detail="", slow_ms=100.0):
+        operations.append((operation, detail, slow_ms))
+        yield
+
+    monkeypatch.setattr(skills_service, "time_operation", fake_time_operation)
+
+    loaded = skills_service.load_all(str(workspace))
+
+    assert [skill.name for skill in loaded] == ["review"]
+    assert operations == [("skills.load", f"cwd={workspace}", 100.0)]

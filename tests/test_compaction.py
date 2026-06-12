@@ -140,7 +140,7 @@ def test_compact_replaces_prefix(monkeypatch):
         out = compact("claude-sonnet-4-6", messages)
     assert call.call_args.args[2] == summary_max_tokens(180_000)
     assert "coding-agent conversation" in call.call_args.args[1]
-    assert "Files, symbols, commands, tests" in call.call_args.args[1]
+    assert "user goal, decisions" in call.call_args.args[1]
     assert out[0]["content"].startswith("[Conversation summary]")
     assert len(out) < len(messages)
 
@@ -154,7 +154,7 @@ def test_compact_appends_configured_summary_guidance():
         compact("claude-sonnet-4-6", messages, force=True)
 
     prompt = call.call_args.args[1]
-    assert "Preserve only durable" in prompt
+    assert "user goal, decisions" in prompt
     assert "Additional user guidance:" in prompt
     assert "Preserve exact test commands." in prompt
 

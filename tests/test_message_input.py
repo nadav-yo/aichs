@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QPointF, QMimeData, QUrl, Qt
 from PyQt6.QtGui import QDropEvent, QImage, QKeyEvent, QTextCursor

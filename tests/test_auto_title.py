@@ -14,12 +14,21 @@ class TestCleanTitle:
             ('"Quoted title"', "Quoted title"),
             ("Title: My Topic", "My Topic"),
             ("line one\nline two", "line one"),
-            ("x" * 80, "x" * 57 + "…"),
+            ("x" * 80, "x" * 42 + "…"),
             ("", "Untitled"),
         ],
     )
     def test_clean_title(self, raw, expected):
         assert clean_title(raw) == expected
+
+    def test_clean_title_trims_to_six_words(self):
+        assert clean_title("one two three four five six seven eight") == (
+            "one two three four five six"
+        )
+
+    def test_clean_title_strips_paths_and_trailing_punctuation(self):
+        assert clean_title("Review services/auto_title.py please?") == "Review please"
+        assert clean_title("Can you fix header.py layout") == "fix layout"
 
 
 def test_generate_title_anthropic(monkeypatch):
@@ -181,6 +190,26 @@ def test_generate_title_instruction_braces_are_literal(monkeypatch):
 def test_generate_title_empty_api_response_uses_fallback(monkeypatch):
     mock_resp = MagicMock()
     mock_resp.content = [MagicMock(text="")]
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_resp
+
+    with patch("services.auto_title.get_model_config") as cfg, patch(
+        "services.auto_title.resolve_api_key", return_value="key"
+    ), patch("services.auto_title._anthropic_client", return_value=mock_client):
+        cfg.return_value = MagicMock(
+            provider_id="claude",
+            api="anthropic",
+            api_key_spec="ANTHROPIC_API_KEY",
+            base_url=None,
+        )
+        title = generate_title("claude-sonnet-4-6", "why is my auth module broken?")
+
+    assert title == "Why Is My Auth Module Broken"
+
+
+def test_generate_title_rejects_help_with_title(monkeypatch):
+    mock_resp = MagicMock()
+    mock_resp.content = [MagicMock(text="Help with auth module")]
     mock_client = MagicMock()
     mock_client.messages.create.return_value = mock_resp
 

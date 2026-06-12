@@ -1,7 +1,12 @@
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import QCheckBox, QLabel, QPushButton
 
-from services.extension_installer import ExtensionInstallCandidate, ExtensionInstallSource
+from services.extension_installer import (
+    ExtensionInstallCandidate,
+    ExtensionInstallSource,
+    discover_extension_candidates,
+    install_conflicts,
+)
 from services.tool_registry import (
     ExtensionFileSummary,
     ExtensionOverview,
@@ -18,6 +23,8 @@ from ui.widgets.extensions_dialog import (
     _ExtensionInstallFetchWorker,
     _enabled_checkbox_style,
     _extension_error_text,
+    _filter_extensions,
+    _filter_install_candidates,
     _install_scope_combo_style,
     _list_meta_style,
     _list_name_style,
@@ -74,6 +81,61 @@ def test_extensions_summary_includes_disabled_count():
     assert _summary_text(overview) == "2 extension files · no errors · 1 disabled"
 
 
+def test_extensions_summary_shows_filtered_count():
+    overview = ExtensionOverview(files=[
+        _summary("loaded.py"),
+        _summary("disabled.py", status="Disabled"),
+    ])
+
+    assert _summary_text(overview, visible_count=1) == "1 of 2 extension files · no errors · 1 disabled"
+
+
+def test_filter_extensions_by_query_and_status():
+    files = [
+        _summary("runtime.py", description="Runtime controls"),
+        _summary("guard.py", description="Guardrails", status="Disabled"),
+        _summary(
+            "risky.py",
+            errors=["boom"],
+            reviewed=False,
+            review_required=True,
+        ),
+    ]
+
+    assert [file.path for file in _filter_extensions(files, query="guard")] == ["guard.py"]
+    assert [file.path for file in _filter_extensions(files, status="disabled")] == ["guard.py"]
+    assert [file.path for file in _filter_extensions(files, status="errors")] == ["risky.py"]
+    assert [file.path for file in _filter_extensions(files, status="review")] == ["risky.py"]
+
+
+def test_filter_install_candidates_matches_name_and_description(tmp_path):
+    candidates = [
+        ExtensionInstallCandidate(
+            name="context-resilience",
+            source_path=tmp_path / "context",
+            entrypoint=tmp_path / "context" / "extension.py",
+            kind="folder",
+            display_name="Context Resilience",
+            description="Compaction helpers",
+        ),
+        ExtensionInstallCandidate(
+            name="runtime-guard.py",
+            source_path=tmp_path / "guard.py",
+            entrypoint=tmp_path / "guard.py",
+            kind="file",
+            display_name="Runtime Guard",
+            description="Safety checks",
+        ),
+    ]
+
+    assert [item.name for item in _filter_install_candidates(candidates, "compaction")] == [
+        "context-resilience"
+    ]
+    assert [item.name for item in _filter_install_candidates(candidates, "context resilience")] == [
+        "context-resilience"
+    ]
+
+
 def test_extensions_dialog_status_helpers():
     assert _status_tone(_summary()) == "success"
     assert _status_tone(_summary(status="Disabled")) == "disabled"
@@ -113,6 +175,24 @@ def test_install_scope_combo_styles_dropdown_with_theme_palette():
     assert p["SELECTION_TEXT"] in style
 
 
+def test_extensions_dialog_status_filter(qapp):
+    overview = ExtensionOverview(files=[
+        _summary("enabled.py"),
+        _summary("disabled.py", status="Disabled"),
+    ])
+    dialog = ExtensionsDialog(overview)
+
+    assert len(dialog.findChildren(_ExtensionListRow)) == 2
+
+    dialog._set_status_filter("disabled")
+    qapp.processEvents()
+
+    rows = dialog.findChildren(_ExtensionListRow)
+    assert len(rows) == 1
+    assert rows[0]._file.path == "disabled.py"
+    assert dialog._status_filter_btn.toolTip() == "Status filter: Disabled"
+
+
 def test_extensions_dialog_uses_docs_for_api_reference(qapp):
     overview = ExtensionOverview(files=[
         _summary("runtime.py", description="Runtime controls"),
@@ -123,6 +203,15 @@ def test_extensions_dialog_uses_docs_for_api_reference(qapp):
     assert dialog._selected_path == "runtime.py"
     assert isinstance(dialog._detail_scroll.widget(), _ExtensionDetailPane)
     assert "API Reference" not in [button.text() for button in dialog.findChildren(QPushButton)]
+
+    dialog._filter_edit.setText("guard")
+    qapp.processEvents()
+
+    assert dialog._selected_path == "guard.py"
+    assert _summary_text(overview, visible_count=1) in dialog._summary.text()
+    rows = dialog.findChildren(_ExtensionListRow)
+    assert len(rows) == 1
+    assert rows[0]._file.path == "guard.py"
 
     dialog._show_file_detail(overview.files[1])
 
@@ -388,19 +477,239 @@ def test_extension_install_dialog_selects_candidates(qapp, tmp_path):
         source_path=tmp_path / "python-lang",
         entrypoint=tmp_path / "python-lang" / "extension.py",
         kind="folder",
+        display_name="Python Language",
         description="Python support",
+        source_commit="abc123def456",
+        source_commit_date="2026-06-11T12:00:00+00:00",
     )
 
     dialog._set_candidates([candidate])
 
     assert dialog.scope_combo.currentData() == "local"
     assert [item.name for item in dialog.selected_candidates()] == ["python-lang"]
-    labels = [label.text() for label in dialog.findChildren(QLabel)]
-    assert any("Installs disabled until reviewed" in text for text in labels)
     checkbox, _candidate = dialog._candidate_checks[0]
+    labels = [label.text() for label in dialog.findChildren(QLabel)]
+    assert "Python Language" in labels
+    assert not any("Incoming: commit" in text for text in labels)
+    assert "Installs disabled until reviewed" in checkbox.toolTip()
+    assert "Incoming:" not in checkbox.toolTip()
+    assert dialog._selection_label.text() == "1 of 1 selected"
     checkbox.setChecked(False)
     assert dialog.selected_candidates() == []
+    assert dialog._selection_label.text() == "None selected"
     assert not dialog.install_btn.isEnabled()
+
+
+def test_extension_install_dialog_select_all_and_deselect_all(qapp, tmp_path, monkeypatch):
+    calls = {"count": 0}
+    original = install_conflicts
+
+    def counting_conflicts(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "ui.widgets.extensions_dialog.install_conflicts",
+        counting_conflicts,
+    )
+    dialog = ExtensionInstallDialog(str(tmp_path))
+    dialog._set_candidates([
+        ExtensionInstallCandidate(
+            name="one",
+            source_path=tmp_path / "one",
+            entrypoint=tmp_path / "one" / "extension.py",
+            kind="folder",
+            display_name="One",
+            description="First",
+        ),
+        ExtensionInstallCandidate(
+            name="two",
+            source_path=tmp_path / "two",
+            entrypoint=tmp_path / "two" / "extension.py",
+            kind="folder",
+            display_name="Two",
+            description="Second",
+        ),
+    ])
+    calls["count"] = 0
+
+    dialog._deselect_all_btn.click()
+    qapp.processEvents()
+
+    assert dialog.selected_candidates() == []
+    assert dialog._selection_label.text() == "None selected"
+    assert calls["count"] == 0
+
+    dialog._select_all_btn.click()
+    qapp.processEvents()
+    assert [item.name for item in dialog.selected_candidates()] == ["one", "two"]
+    assert dialog._selection_label.text() == "2 of 2 selected"
+    assert calls["count"] == 0
+
+
+def test_extension_install_dialog_marks_conflicts_and_requires_overwrite(qapp, tmp_path):
+    installed = tmp_path / ".aichs" / "extensions" / "python-lang"
+    installed.mkdir(parents=True)
+    (installed / "extension.py").write_text("old", encoding="utf-8")
+    dialog = ExtensionInstallDialog(str(tmp_path))
+    candidate = ExtensionInstallCandidate(
+        name="python-lang",
+        source_path=tmp_path / "src" / "python-lang",
+        entrypoint=tmp_path / "src" / "python-lang" / "extension.py",
+        kind="folder",
+        display_name="Python Language",
+        description="Python support",
+        source_commit="abc123def456",
+        source_commit_date="2026-06-11T12:00:00+00:00",
+    )
+
+    dialog._set_candidates([candidate])
+
+    checkbox, _candidate = dialog._candidate_checks[0]
+    assert not checkbox.isChecked()
+    assert not dialog.install_btn.isEnabled()
+    labels = [label.text() for label in dialog.findChildren(QLabel)]
+    assert "Python Language" in labels
+    assert any("Already installed in local library" in text for text in labels)
+    assert any("current:" in text and "incoming:" in text and "abc123def456" in text for text in labels)
+    assert "Check to replace the installed extension" in checkbox.toolTip()
+
+    checkbox.setChecked(True)
+    assert dialog.selected_candidates()[0].name == "python-lang"
+    assert dialog.install_btn.text() == "Replace selected"
+
+
+def test_extension_install_dialog_shows_already_installed_for_matching_content(qapp, tmp_path):
+    import shutil
+
+    source = tmp_path / "source" / "python-lang"
+    source.mkdir(parents=True)
+    (source / "extension.py").write_text(
+        'EXTENSION_DESCRIPTION = "Python support"\n\n'
+        "def register(registry):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    installed = tmp_path / ".aichs" / "extensions" / "python-lang"
+    shutil.copytree(source, installed)
+    candidate = discover_extension_candidates(source.parent)[0]
+    dialog = ExtensionInstallDialog(str(tmp_path))
+    dialog._set_candidates([candidate])
+
+    checkbox, _candidate = dialog._candidate_checks[0]
+    assert not checkbox.isChecked()
+    assert not checkbox.isEnabled()
+    labels = [label.text() for label in dialog.findChildren(QLabel)]
+    assert any(text == "Already installed" for text in labels)
+    assert not any("current:" in text for text in labels)
+    assert "Check to replace" not in checkbox.toolTip()
+    assert (
+        dialog.status_label.text()
+        == "This extension is already installed."
+    )
+    assert dialog._selection_label.text() == "Already installed"
+
+    dialog._select_all_btn.click()
+    qapp.processEvents()
+    assert dialog.selected_candidates() == []
+    assert dialog._selection_label.text() == "Already installed"
+
+
+def test_extension_install_dialog_select_all_skips_already_installed(qapp, tmp_path):
+    import shutil
+
+    source = tmp_path / "source" / "python-lang"
+    source.mkdir(parents=True)
+    (source / "extension.py").write_text(
+        'EXTENSION_DESCRIPTION = "Python support"\n\n'
+        "def register(registry):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    installed = tmp_path / ".aichs" / "extensions" / "python-lang"
+    shutil.copytree(source, installed)
+    installed_candidate = discover_extension_candidates(source.parent)[0]
+    fresh = ExtensionInstallCandidate(
+        name="fresh-ext",
+        source_path=tmp_path / "fresh-ext",
+        entrypoint=tmp_path / "fresh-ext" / "extension.py",
+        kind="folder",
+        display_name="Fresh Ext",
+        description="New extension",
+    )
+    dialog = ExtensionInstallDialog(str(tmp_path))
+    dialog._set_candidates([installed_candidate, fresh])
+
+    installed_checkbox, _ = dialog._candidate_checks[0]
+    fresh_checkbox, _ = dialog._candidate_checks[1]
+    assert not installed_checkbox.isEnabled()
+    assert fresh_checkbox.isEnabled()
+
+    dialog._select_all_btn.click()
+    qapp.processEvents()
+    assert [item.name for item in dialog.selected_candidates()] == ["fresh-ext"]
+    assert not installed_checkbox.isChecked()
+    assert dialog._selection_label.text() == "1 of 1 selected"
+
+
+def test_extension_install_dialog_marks_global_conflicts_when_installing_local(qapp, tmp_path, monkeypatch):
+    import config
+
+    home = tmp_path / "home" / ".aichs"
+    home.mkdir(parents=True)
+    monkeypatch.setattr(config, "AICHS_HOME", home)
+    installed = home / "extensions" / "python-lang"
+    installed.mkdir(parents=True)
+    (installed / "extension.py").write_text("old", encoding="utf-8")
+
+    dialog = ExtensionInstallDialog(str(tmp_path / "project"))
+    candidate = ExtensionInstallCandidate(
+        name="python-lang",
+        source_path=tmp_path / "src" / "python-lang",
+        entrypoint=tmp_path / "src" / "python-lang" / "extension.py",
+        kind="folder",
+        display_name="Python Language",
+        description="Python support",
+        source_commit="abc123def456",
+        source_commit_date="2026-06-11T12:00:00+00:00",
+    )
+
+    dialog._set_candidates([candidate])
+
+    checkbox, _candidate = dialog._candidate_checks[0]
+    assert not checkbox.isChecked()
+    assert not dialog.install_btn.isEnabled()
+    labels = [label.text() for label in dialog.findChildren(QLabel)]
+    assert any("Already installed in global library" in text for text in labels)
+    assert any("current:" in text and "incoming:" in text for text in labels)
+    assert "Check to replace the installed extension" in checkbox.toolTip()
+    assert dialog.install_btn.text() == "Install selected"
+
+
+def test_extension_install_dialog_filters_candidates(qapp, tmp_path):
+    dialog = ExtensionInstallDialog(str(tmp_path))
+    dialog._set_candidates([
+        ExtensionInstallCandidate(
+            name="context-resilience",
+            source_path=tmp_path / "context",
+            entrypoint=tmp_path / "context" / "extension.py",
+            kind="folder",
+            description="Compaction helpers",
+        ),
+        ExtensionInstallCandidate(
+            name="runtime-guard",
+            source_path=tmp_path / "guard.py",
+            entrypoint=tmp_path / "guard.py",
+            kind="file",
+            description="Safety checks",
+        ),
+    ])
+
+    dialog._candidate_filter_edit.setText("compaction")
+    qapp.processEvents()
+
+    assert len(dialog._candidate_checks) == 1
+    assert dialog._candidate_checks[0][1].name == "context-resilience"
 
 
 def test_extension_install_fetch_starts_worker_without_preparing_on_ui_thread(qapp, tmp_path, monkeypatch):
@@ -488,7 +797,8 @@ def test_extension_install_dialog_applies_current_fetch_result(qapp, tmp_path):
     assert dialog.fetch_btn.isEnabled()
     assert dialog.install_btn.isEnabled()
     assert [item.name for item in dialog.selected_candidates()] == ["python-lang"]
-    assert dialog.status_label.text() == "Found 1 installable extension."
+    assert dialog.status_label.text() == ""
+    assert not dialog.status_label.isVisible()
 
 
 def test_extension_install_dialog_ignores_stale_fetch_result_and_cleans_source(qapp, tmp_path, monkeypatch):

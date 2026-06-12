@@ -1,4 +1,3 @@
-import shutil
 import subprocess
 
 import pytest
@@ -8,12 +7,16 @@ from services.git_status import (
     GitFileChange,
     GitCommandResult,
     commit_staged,
+    count_commits_ahead_behind,
     count_commits_to_pull,
     count_commits_to_push,
     discard_files,
     is_git_repo,
     list_file_changes,
+    parse_status_branch_line,
     parse_status_line,
+    parse_status_snapshot,
+    read_git_status_snapshot,
     repo_relative_paths,
     run_git,
     run_git_command,
@@ -40,6 +43,20 @@ class TestParseStatusLine:
     )
     def test_parse(self, line, code, label, path):
         assert parse_status_line(line) == (code, label, path)
+
+    @pytest.mark.parametrize(
+        "line,branch,ahead,behind",
+        [
+            ("## main", "main", 0, 0),
+            ("## main...origin/main [ahead 2]", "main", 2, 0),
+            ("## main...origin/main [behind 3]", "main", 0, 3),
+            ("## main...origin/main [ahead 2, behind 3]", "main", 2, 3),
+            ("## No commits yet on main", "main", 0, 0),
+            ("## HEAD (no branch)", "", 0, 0),
+        ],
+    )
+    def test_parse_status_branch_line(self, line, branch, ahead, behind):
+        assert parse_status_branch_line(line) == (branch, ahead, behind)
 
     @pytest.mark.parametrize(
         "code,staged,unstaged,staged_label,unstaged_label",
@@ -87,6 +104,35 @@ class TestGitRepo:
         assert ch.unstaged is True
         assert ch.staged is False
 
+    def test_read_git_status_snapshot_collects_branch_counts_and_changes(self, workspace, monkeypatch):
+        calls = []
+
+        def fake_run_git(cmd, repo_path):
+            calls.append((cmd, repo_path))
+            return "## main...origin/main [ahead 2, behind 3]\n M src/main.py\n"
+
+        monkeypatch.setattr("services.git_status.is_git_repo", lambda repo_path: True)
+        monkeypatch.setattr("services.git_status.run_git", fake_run_git)
+
+        snapshot = read_git_status_snapshot(str(workspace))
+
+        assert snapshot.branch == "main"
+        assert snapshot.ahead == 2
+        assert snapshot.behind == 3
+        assert [change.rel_path for change in snapshot.changes] == ["src/main.py"]
+        assert calls == [
+            (["git", "status", "--short", "--branch", "-uall"], str(workspace))
+        ]
+
+    def test_parse_status_snapshot_skips_branch_header(self, workspace):
+        snapshot = parse_status_snapshot(
+            str(workspace),
+            "## main\n?? new.py\n M src/main.py\n",
+        )
+
+        assert snapshot.branch == "main"
+        assert [change.rel_path for change in snapshot.changes] == ["new.py", "src/main.py"]
+
     def test_list_file_changes_marks_staged_and_unstaged(self, git_repo):
         main = git_repo / "src" / "main.py"
         main.write_text("print('staged')\n", encoding="utf-8")
@@ -114,16 +160,14 @@ class TestGitRepo:
         assert count_commits_to_pull(str(git_repo)) == 0
 
     def test_count_commits_to_push_with_ahead_commit(self, workspace, monkeypatch):
-        state = {"ahead": 0}
+        state = {"ahead": 0, "behind": 0}
         calls = []
 
         def fake_run_git(cmd, repo_path):
             calls.append(cmd)
             assert repo_path == str(workspace)
-            if cmd == ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]:
-                return "origin/main"
-            if cmd == ["git", "rev-list", "--count", "@{u}..HEAD"]:
-                return str(state["ahead"])
+            if cmd == ["git", "rev-list", "--left-right", "--count", "@{u}...HEAD"]:
+                return f"{state['behind']}\t{state['ahead']}"
             raise AssertionError(f"unexpected git command: {cmd!r}")
 
         monkeypatch.setattr("services.git_status.is_git_repo", lambda repo_path: True)
@@ -132,19 +176,17 @@ class TestGitRepo:
         assert count_commits_to_push(str(workspace)) == 0
         state["ahead"] = 1
         assert count_commits_to_push(str(workspace)) == 1
-        assert ["git", "rev-list", "--count", "@{u}..HEAD"] in calls
+        assert ["git", "rev-list", "--left-right", "--count", "@{u}...HEAD"] in calls
 
     def test_count_commits_to_pull_uses_fetched_tracking_info(self, workspace, monkeypatch):
-        state = {"behind": 0}
+        state = {"ahead": 0, "behind": 0}
         calls = []
 
         def fake_run_git(cmd, repo_path):
             calls.append(cmd)
             assert repo_path == str(workspace)
-            if cmd == ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]:
-                return "origin/main"
-            if cmd == ["git", "rev-list", "--count", "HEAD..@{u}"]:
-                return str(state["behind"])
+            if cmd == ["git", "rev-list", "--left-right", "--count", "@{u}...HEAD"]:
+                return f"{state['behind']} {state['ahead']}"
             raise AssertionError(f"unexpected git command: {cmd!r}")
 
         monkeypatch.setattr("services.git_status.is_git_repo", lambda repo_path: True)
@@ -153,12 +195,25 @@ class TestGitRepo:
         assert count_commits_to_pull(str(workspace)) == 0
         state["behind"] = 1
         assert count_commits_to_pull(str(workspace)) == 1
-        assert ["git", "rev-list", "--count", "HEAD..@{u}"] in calls
+        assert ["git", "rev-list", "--left-right", "--count", "@{u}...HEAD"] in calls
+
+    def test_count_commits_ahead_behind_uses_one_git_command(self, workspace, monkeypatch):
+        calls = []
+
+        def fake_run_git(cmd, repo_path):
+            calls.append((cmd, repo_path))
+            return "3\t2"
+
+        monkeypatch.setattr("services.git_status.is_git_repo", lambda repo_path: True)
+        monkeypatch.setattr("services.git_status.run_git", fake_run_git)
+
+        assert count_commits_ahead_behind(str(workspace)) == (2, 3)
+        assert calls == [
+            (["git", "rev-list", "--left-right", "--count", "@{u}...HEAD"], str(workspace))
+        ]
 
     def test_count_commits_returns_zero_for_bad_counts(self, workspace, monkeypatch):
         def fake_run_git(cmd, repo_path):
-            if cmd == ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]:
-                return "origin/main"
             return "not-a-number"
 
         monkeypatch.setattr("services.git_status.is_git_repo", lambda repo_path: True)
@@ -166,6 +221,7 @@ class TestGitRepo:
 
         assert count_commits_to_push(str(workspace)) == 0
         assert count_commits_to_pull(str(workspace)) == 0
+        assert count_commits_ahead_behind(str(workspace)) == (0, 0)
 
     def test_repo_relative_paths_filters_outside_workspace(self, git_repo, tmp_path):
         outside = tmp_path / "outside.txt"

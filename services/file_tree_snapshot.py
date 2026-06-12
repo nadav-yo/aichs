@@ -77,22 +77,34 @@ def build_directory_snapshot(path: str) -> FileTreeSnapshot:
 
 def _directory_entries(path: str) -> tuple[list[FileTreeEntry], int]:
     try:
-        entries = sorted(os.scandir(path), key=lambda e: (not e.is_dir(), e.name.lower()))
+        with os.scandir(path) as scanned:
+            entries = []
+            for entry in scanned:
+                try:
+                    is_dir = entry.is_dir()
+                except OSError:
+                    continue
+                entries.append((entry.name, entry.path, is_dir))
     except (OSError, PermissionError):
         return [], 0
+    entries.sort(key=lambda entry: (not entry[2], entry[0].lower()))
     visible = [
-        e for e in entries
-        if _is_visible_tree_entry(e.name, e.is_dir())
+        entry for entry in entries
+        if _is_visible_tree_entry(entry[0], entry[2])
     ]
     items = [
-        FileTreeEntry(e.name, e.path, e.is_dir())
-        for e in visible[:MAX_TREE_ENTRIES_PER_DIR]
+        FileTreeEntry(name, abs_path, is_dir)
+        for name, abs_path, is_dir in visible[:MAX_TREE_ENTRIES_PER_DIR]
     ]
     return items, max(0, len(visible) - MAX_TREE_ENTRIES_PER_DIR)
 
 
 def _filtered_entries(root_path: str, filter_text: str, *, cancelled=None) -> tuple[list[FileTreeEntry], int]:
     root = Path(root_path)
+    try:
+        resolved_root = root.resolve()
+    except OSError:
+        resolved_root = root.absolute()
     terms = [term for term in filter_text.split(" ") if term]
     if not terms:
         return [], 0
@@ -113,7 +125,7 @@ def _filtered_entries(root_path: str, filter_text: str, *, cancelled=None) -> tu
                 continue
             path = os.path.join(dirpath, name)
             try:
-                rel = Path(path).resolve(strict=False).relative_to(root.resolve()).as_posix()
+                rel = Path(path).resolve(strict=False).relative_to(resolved_root).as_posix()
             except (OSError, ValueError):
                 continue
             if not all(term in rel.casefold() for term in terms):

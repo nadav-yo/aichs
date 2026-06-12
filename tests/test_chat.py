@@ -1,7 +1,6 @@
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 
 from services.chat import ChatThread, _active_task_preview, _content_with_file_blocks, _serialize_anthropic
 from services.crew import ASK_CREW_TOOL_NAME, get_crew_member

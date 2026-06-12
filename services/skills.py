@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import config
+from services.performance import time_operation
 
 _USER_DIR = config.AICHS_HOME / "skills"
 
@@ -26,18 +27,33 @@ def load_all(cwd: str | None = None) -> list[Skill]:
     (.aichs/skills/ in cwd). Later entries override earlier ones with the same
     name.
     """
-    skills: dict[str, Skill] = {}
-    dirs = [_USER_DIR]
-    if cwd:
-        dirs.append(Path(cwd) / ".aichs" / "skills")
-    for directory in dirs:
-        if not directory.exists():
-            continue
-        for path in sorted(directory.glob("*.md")):
-            skill = _parse(path)
-            if skill:
-                skills[skill.name] = skill
-    return sorted(skills.values(), key=lambda s: s.name)
+    with time_operation("skills.load", detail=f"cwd={cwd or ''}"):
+        skills: dict[str, Skill] = {}
+        dirs = [_USER_DIR]
+        if cwd:
+            dirs.append(Path(cwd) / ".aichs" / "skills")
+        for directory in dirs:
+            for path in _skill_paths(directory):
+                skill = _parse(path)
+                if skill:
+                    skills[skill.name] = skill
+        return sorted(skills.values(), key=lambda s: s.name)
+
+
+def _skill_paths(directory: Path) -> list[Path]:
+    if not directory.is_dir():
+        return []
+    try:
+        children = sorted(directory.iterdir(), key=lambda path: path.name.casefold())
+    except OSError:
+        return []
+    return [
+        child
+        for child in children
+        if child.suffix == ".md"
+        and not child.name.startswith(".")
+        and child.is_file()
+    ]
 
 
 def _parse(path: Path) -> Skill | None:

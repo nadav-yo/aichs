@@ -1357,6 +1357,7 @@ class _TextFileTab(QWidget):
     dirty_changed = pyqtSignal(bool)
     diagnostic_fix_requested = pyqtSignal(str, object)
     language_context_changed = pyqtSignal()
+    markdown_preview_pane_changed = pyqtSignal()
 
     def __init__(
         self,
@@ -1398,6 +1399,7 @@ class _TextFileTab(QWidget):
         self._dirty = False
         self._rendering = False
         self._edit_mode = False
+        self._preview_pane_active = False
         self._force_text_view = False
         self._content_generation = 0
         self._editor_content_cache_revision: int | None = None
@@ -1443,9 +1445,9 @@ class _TextFileTab(QWidget):
         bar.addWidget(self._diff_toggle)
         self._preview_toggle = QCheckBox("Show preview")
         self._preview_toggle.setToolTip(
-            "Show the rendered Markdown preview beside the source editor"
+            "Show the rendered Markdown preview in place of chat"
         )
-        self._preview_toggle.setChecked(self._markdown and not bool(diff_text))
+        self._preview_toggle.setChecked(False)
         self._preview_toggle.setVisible(self._markdown)
         self._preview_toggle.toggled.connect(self._on_preview_toggled)
         bar.addWidget(self._preview_toggle)
@@ -1503,6 +1505,7 @@ class _TextFileTab(QWidget):
 
         view = QSplitter(Qt.Orientation.Horizontal)
         view.setChildrenCollapsible(False)
+        self._view_splitter = view
         view.addWidget(self._editor)
         view.addWidget(self._minimap)
         view.addWidget(self._preview)
@@ -1613,8 +1616,9 @@ class _TextFileTab(QWidget):
         self._force_text_view = False
         self._diff_toggle.setChecked(bool(diff_text))
         self._diff_toggle.setVisible(diff_text is not None)
-        self._preview_toggle.setChecked(self._markdown and not bool(diff_text))
         self._preview_toggle.setVisible(self._markdown)
+        if diff_text:
+            self._preview_toggle.setChecked(False)
         self._render(diagnostics_delay_ms=0)
         if diff_text is None:
             self._schedule_diff_refresh(delay_ms=0)
@@ -1643,8 +1647,6 @@ class _TextFileTab(QWidget):
             self._edit_mode = True
         elif checked and self._editable and not self._is_showing_diff():
             self._edit_mode = True
-        elif checked and not self._dirty:
-            self._edit_mode = False
         self._render()
         if not checked:
             self._editor.setFocus()
@@ -1668,8 +1670,8 @@ class _TextFileTab(QWidget):
             self._hide_find()
             return
         if not self._edit_mode:
-            if self._markdown and not self._preview_toggle.isChecked():
-                self._preview_toggle.setChecked(True)
+            if self._markdown and self._preview_toggle.isChecked():
+                self._preview_toggle.setChecked(False)
                 return
             if self._force_text_view and self._markdown:
                 self._force_text_view = False
@@ -1681,14 +1683,60 @@ class _TextFileTab(QWidget):
             self._revert()
             return
         if self._markdown:
-            self._edit_mode = True
             if not self._preview_toggle.isChecked():
                 self._preview_toggle.setChecked(True)
                 return
-            self._render()
+            self._edit_mode = True
+            self._editor.setFocus()
             return
         self._edit_mode = False
         self._render()
+
+    def is_markdown_preview_pane_active(self) -> bool:
+        return self._is_markdown_preview()
+
+    def markdown_preview_widget(self) -> _MarkdownPreview:
+        return self._preview
+
+    def preview_is_in_tab(self) -> bool:
+        return self._preview.parent() is self._view_splitter
+
+    def take_preview_for_pane(self, host: QWidget) -> _MarkdownPreview:
+        layout = host.layout()
+        if layout is None:
+            raise RuntimeError("preview host requires a layout")
+        if self._preview.parent() is not host:
+            self._preview.setParent(host)
+        if layout.indexOf(self._preview) < 0:
+            layout.addWidget(self._preview)
+        if self._is_markdown_preview() and not self._preview_has_content():
+            self._ensure_markdown_preview()
+        self._preview.show()
+        return self._preview
+
+    def restore_preview_to_tab(self):
+        if self.preview_is_in_tab():
+            self._preview.hide()
+            return
+        host = self._preview.parent()
+        host_layout = host.layout() if host is not None else None
+        if host_layout is not None:
+            host_layout.removeWidget(self._preview)
+        if self._view_splitter.indexOf(self._preview) < 0:
+            self._view_splitter.insertWidget(2, self._preview)
+        self._preview.hide()
+
+    def _preview_has_content(self) -> bool:
+        return bool(self._preview.toPlainText().strip())
+
+    def _notify_markdown_preview_pane_changed(self):
+        active = self.is_markdown_preview_pane_active()
+        if active and not self._preview_has_content():
+            self._ensure_markdown_preview()
+        if active == self._preview_pane_active:
+            return
+        self._preview_pane_active = active
+        self.markdown_preview_pane_changed.emit()
 
     def _on_text_changed(self):
         self._invalidate_editor_content_cache()
@@ -1727,21 +1775,18 @@ class _TextFileTab(QWidget):
         self._completion_provider = LanguageCompletionProvider(self._repo_root)
         self._editor.configure_completion(self._path, self._completion_provider)
         self._editor.configure_reference(self._path, self._repo_root)
-        if not (self._dirty or self._edit_mode) and self._editor.toPlainText() != self._content:
+        if not self._dirty and self._editor.toPlainText() != self._content:
             self._editor.setPlainText(self._content)
             self._invalidate_editor_content_cache()
         if self._is_markdown_preview():
             self._schedule_markdown_preview()
-            self._preview.show()
+            self._editor.show()
+            self._minimap.show()
+            if self.preview_is_in_tab():
+                self._preview.hide()
+            self._editor.setReadOnly(not self._editable)
             if self._editable:
                 self._edit_mode = True
-                self._editor.show()
-                self._minimap.show()
-                self._editor.setReadOnly(False)
-            else:
-                self._editor.hide()
-                self._minimap.hide()
-                self._editor.setReadOnly(True)
             self._editor.set_changed_lines(set())
             self._set_diagnostics([])
         elif self._is_showing_diff():
@@ -1762,6 +1807,7 @@ class _TextFileTab(QWidget):
         self._rendering = False
         self._sync_actions()
         self._minimap.update()
+        self._notify_markdown_preview_pane_changed()
 
     def goto_line(self, line_no: int, column: int = 0):
         self._show_editor_for_navigation()
@@ -2013,10 +2059,25 @@ class _TextFileTab(QWidget):
         self._auto_save_timer.start(self._AUTO_SAVE_DELAY_MS)
 
     def _schedule_markdown_preview(self, delay_ms: int | None = None):
-        self._pending_markdown = (self._current_editor_content(), self._path)
+        self._pending_markdown = (self._markdown_preview_source(), self._path)
         self._markdown_timer.start(
             self._MARKDOWN_DELAY_MS if delay_ms is None else max(0, delay_ms)
         )
+
+    def _markdown_preview_source(self) -> str:
+        text = self._current_editor_content()
+        if text.strip():
+            return text
+        if self._content.strip():
+            return self._content
+        return text
+
+    def _ensure_markdown_preview(self) -> None:
+        if not self._is_markdown_preview():
+            return
+        self._markdown_timer.stop()
+        self._pending_markdown = (self._markdown_preview_source(), self._path)
+        self._apply_markdown_preview()
 
     def _apply_markdown_preview(self):
         if self._pending_markdown is None:
@@ -2041,6 +2102,9 @@ class _TextFileTab(QWidget):
         if path != self._path or not self._is_markdown_preview():
             return
         self._preview.set_html(html, path)
+        if self.is_markdown_preview_pane_active() and not self._preview_pane_active:
+            self._preview_pane_active = True
+            self.markdown_preview_pane_changed.emit()
 
     def _invalidate_markdown_preview(self):
         self._markdown_timer.stop()
@@ -2298,6 +2362,12 @@ class _TextFileTab(QWidget):
         self._sync_actions()
 
     def _draft_diagnostic_fix(self, diagnostics: list[Diagnostic]):
+        self._draft_diagnostic_fix_prompt(diagnostics, fix_all=False)
+
+    def _draft_all_diagnostic_fixes(self, diagnostics: list[Diagnostic]):
+        self._draft_diagnostic_fix_prompt(diagnostics, fix_all=True)
+
+    def _draft_diagnostic_fix_prompt(self, diagnostics: list[Diagnostic], *, fix_all: bool):
         if not diagnostics:
             return
         rel_path = _relative_file_reference(self._path, self._repo_root)
@@ -2308,16 +2378,33 @@ class _TextFileTab(QWidget):
             "end_line": line,
         }])
         tool = _diagnostic_tool_label(diagnostics)
+        prompt_tool = _diagnostic_source_label(diagnostics) if fix_all else tool
         details = _diagnostic_details(diagnostics)
+        file_mention = _file_mention_text(rel_path)
+        command = _diagnostic_tool_command(prompt_tool, rel_path, file_mention)
+        default_prompt = (
+            DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE
+            if fix_all
+            else "Fix this {tool} issue in {mention}."
+        )
+        template = self._diagnostic_fix_prompt
+        if not fix_all and template == DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE:
+            template = default_prompt
         first_line = _format_prompt_template(
-            self._diagnostic_fix_prompt,
+            template,
             {
                 "mention": mention,
                 "path": rel_path,
                 "line": str(line),
+                "tool": prompt_tool,
+                "file": file_mention,
+                "command": command,
             },
-            DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE,
+            default_prompt,
         )
+        if fix_all:
+            self.diagnostic_fix_requested.emit(first_line, [rel_path])
+            return
         prompt = (
             f"{first_line}\n\n"
             f"Diagnostic tool: {tool}\n"
@@ -2438,6 +2525,7 @@ class FileViewerPanel(QWidget):
     active_file_changed = pyqtSignal(str)
     dirty_file_changed = pyqtSignal(str, bool)
     language_context_changed = pyqtSignal(object)
+    markdown_preview_pane_changed = pyqtSignal(bool)
 
     def __init__(self, repo_root: str = "", settings=None, parent=None):
         super().__init__(parent)
@@ -2493,6 +2581,81 @@ class FileViewerPanel(QWidget):
         key = str(self._tabs.tabBar().tabData(index) or "")
         return "" if key.startswith("\0") else key
 
+    def open_file_states(self) -> list[dict]:
+        active = self.active_path()
+        states: list[dict] = []
+        tab_bar = self._tabs.tabBar()
+        for i in range(self._tabs.count()):
+            key = str(tab_bar.tabData(i) or "")
+            if not key or key.startswith("\0"):
+                continue
+            line_no = 1
+            widget = self._tabs.widget(i)
+            if isinstance(widget, _TextFileTab):
+                line_no = widget._editor.textCursor().blockNumber() + 1
+            states.append({
+                "path": key,
+                "line": line_no,
+                "active": key == active,
+            })
+        return states
+
+    def restore_open_files(
+        self,
+        entries: list[dict],
+        *,
+        repo_root: str | None = None,
+    ) -> list[str]:
+        if repo_root:
+            self.set_repo_root(repo_root)
+        skipped: list[str] = []
+        active_path = ""
+        active_line: int | None = None
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            path = str(entry.get("path") or "").strip()
+            if not path:
+                continue
+            resolved = os.path.abspath(
+                path if os.path.isabs(path) else os.path.join(self._repo_root, path),
+            )
+            if not os.path.exists(resolved):
+                skipped.append(path)
+                continue
+            try:
+                line_no = max(1, int(entry.get("line") or 1))
+            except (TypeError, ValueError):
+                line_no = 1
+            self.open_file(resolved, repo_root=self._repo_root, line_no=line_no)
+            if bool(entry.get("active")):
+                active_path = resolved
+                active_line = line_no
+        if active_path:
+            self.open_file(active_path, repo_root=self._repo_root, line_no=active_line)
+        elif entries:
+            first = str(entries[0].get("path") or "").strip()
+            if first:
+                resolved = os.path.abspath(
+                    first if os.path.isabs(first) else os.path.join(self._repo_root, first),
+                )
+                if os.path.exists(resolved):
+                    try:
+                        line_no = max(1, int(entries[0].get("line") or 1))
+                    except (TypeError, ValueError):
+                        line_no = 1
+                    self.open_file(resolved, repo_root=self._repo_root, line_no=line_no)
+        return skipped
+
+    def active_text_tab(self) -> _TextFileTab | None:
+        return self._active_text_tab()
+
+    def active_markdown_preview_pane_active(self) -> bool:
+        widget = self._active_text_tab()
+        if widget is None:
+            return False
+        return widget.is_markdown_preview_pane_active()
+
     def active_language_context(self) -> dict:
         widget = self._active_text_tab()
         if widget is None:
@@ -2547,6 +2710,11 @@ class FileViewerPanel(QWidget):
         widget = self._active_text_tab()
         if widget is not None:
             widget._draft_diagnostic_fix(list(diagnostics or []))
+
+    def draft_active_language_fix_all(self, diagnostics: list[Diagnostic]):
+        widget = self._active_text_tab()
+        if widget is not None:
+            widget._draft_all_diagnostic_fixes(list(diagnostics or []))
 
     def reload_settings(self):
         self.set_auto_save(self._load_auto_save())
@@ -2620,6 +2788,11 @@ class FileViewerPanel(QWidget):
     def _emit_language_context_changed(self):
         self.language_context_changed.emit(self.active_language_context())
 
+    def _emit_markdown_preview_pane_changed(self):
+        self.markdown_preview_pane_changed.emit(
+            self.active_markdown_preview_pane_active()
+        )
+
     def _emit_language_context_for(self, widget: QWidget):
         if widget is self._tabs.currentWidget():
             self._emit_language_context_changed()
@@ -2636,9 +2809,14 @@ class FileViewerPanel(QWidget):
             widget.language_context_changed.connect(
                 lambda w=widget: self._emit_language_context_for(w)
             )
+            widget.markdown_preview_pane_changed.connect(
+                self._emit_markdown_preview_pane_changed
+            )
             self._sync_tab_title(widget)
         self._tabs.setCurrentIndex(idx)
         self._emit_language_context_changed()
+        if isinstance(widget, _TextFileTab):
+            self._emit_markdown_preview_pane_changed()
 
     def _add_text_tab(self, key: str, title: str, content: str):
         tab = _TextFileTab(
@@ -2916,6 +3094,7 @@ class FileViewerPanel(QWidget):
 
     def _on_current_tab_changed(self, index: int):
         self._emit_language_context_changed()
+        self._emit_markdown_preview_pane_changed()
         if index < 0:
             return
         key = str(self._tabs.tabBar().tabData(index) or "")
@@ -3080,6 +3259,23 @@ def _diagnostic_tool_label(diagnostics: list[Diagnostic]) -> str:
         if label:
             return label
     return "diagnostic tool"
+
+
+def _diagnostic_source_label(diagnostics: list[Diagnostic]) -> str:
+    for item in diagnostics:
+        source = str(item.source or "").strip()
+        if source:
+            return source
+    return "diagnostic tool"
+
+
+def _diagnostic_tool_command(tool: str, path: str, file_mention: str) -> str:
+    source = str(tool or "").split(maxsplit=1)[0].lower()
+    if source == "pymarkdown":
+        return f"`pymarkdown scan {path}`"
+    if source == "ruff":
+        return f"`ruff check {path}`"
+    return f"the configured language diagnostics for {file_mention}"
 
 
 def _format_prompt_template(template: str, values: dict[str, str], default: str) -> str:

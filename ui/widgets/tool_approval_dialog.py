@@ -15,7 +15,6 @@ from ui.theme import (
     dialog_shell_style,
     hint_label_style,
     inline_code_style,
-    palette,
 )
 
 

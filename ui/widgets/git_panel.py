@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import time
 from typing import Callable
 
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -12,7 +14,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QPushButton,
-    QSizePolicy,
+    QStackedWidget,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -29,17 +31,24 @@ from services.diff_html import diff_to_html
 from services.git_diff import commit_diff, split_diff_by_file
 from services.git_snapshot import GitSnapshot, build_git_snapshot, clear_git_snapshot_cache
 from services.git_status import GitCommandResult, run_git_command
+from services.performance import time_operation
 from storage.settings import (
     DEFAULT_GIT_FIX_PROMPT_TEMPLATE,
+    GIT_PANEL_LISTS_SPLIT_KEY,
+    GIT_PANEL_MODE_KEY,
     SettingsStore,
     git_fix_prompt_template,
+    git_panel_mode,
 )
 from ui.theme import (
     ACCENT,
+    app_font,
     contained_list_style,
     current_theme,
     git_action_button_style,
-    git_changes_list_style,
+    git_action_status_error_style,
+    git_log_list_style,
+    git_mode_button_style,
     hint_label_style,
     markdown_css,
     mono_font,
@@ -49,6 +58,11 @@ from ui.theme import (
     splitter_style,
 )
 from ui.widgets.git_changes_list import GitChangesList
+from ui.widgets.git_sync_buttons import (
+    GitSyncButtons,
+    fit_git_action_button,
+    git_action_button_text,
+)
 
 _ROLE_HASH = Qt.ItemDataRole.UserRole
 _ROLE_SUBJECT = Qt.ItemDataRole.UserRole + 1
@@ -124,13 +138,15 @@ class _CommitLogDelegate(QStyledItemDelegate):
 
         if subject:
             subject_rect = QRect(subject_x, rect.y(), max(0, rect.right() - subject_x + 1), rect.height())
-            subject_metrics = QFontMetrics(option.font)
+            subject_font = app_font()
+            subject_font.setPointSize(max(10, option.font.pointSize()))
+            subject_metrics = QFontMetrics(subject_font)
             subject_text = subject_metrics.elidedText(
                 subject,
                 Qt.TextElideMode.ElideRight,
                 subject_rect.width(),
             )
-            painter.setFont(option.font)
+            painter.setFont(subject_font)
             painter.setPen(QColor(subject_color))
             painter.drawText(
                 subject_rect,
@@ -178,7 +194,7 @@ class _CommitLogDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         size = super().sizeHint(option, index)
-        size.setHeight(max(size.height(), QFontMetrics(option.font).height() + 6))
+        size.setHeight(max(size.height(), QFontMetrics(option.font).height() + 10))
         return size
 
 
@@ -217,32 +233,46 @@ class _CommitLogList(QListWidget):
             self.setCurrentItem(item)
             item.setSelected(True)
 
+        subject = str(item.data(_ROLE_SUBJECT) or "").strip()
+        commit_hash = str(item.data(_ROLE_HASH) or "").strip()
+        short_hash = str(item.data(_ROLE_SHORT_HASH) or "").strip()
+
         menu = QMenu(self)
         copy_message = QAction("Copy commit message", self)
         copy_message.setData("message")
-        copy_message.setEnabled(bool(str(item.data(_ROLE_SUBJECT) or "").strip()))
-        copy_message.triggered.connect(lambda _checked=False: self._copy_commit_message(item))
+        copy_message.setEnabled(bool(subject))
         menu.addAction(copy_message)
         copy_hash = QAction("Copy commit hash", self)
         copy_hash.setData("hash")
-        copy_hash.setEnabled(bool(str(item.data(_ROLE_HASH) or "").strip()))
-        copy_hash.triggered.connect(lambda _checked=False: self._copy_commit_hash(item))
+        copy_hash.setEnabled(bool(commit_hash))
         menu.addAction(copy_hash)
+        ask_chat = QAction("Ask about this commit in chat", self)
+        ask_chat.setData("ask")
+        menu.addAction(ask_chat)
 
         chosen = menu.exec(self.viewport().mapToGlobal(pos))
         choice = _commit_log_menu_choice(chosen)
         if choice in {"message", "copy commit message"}:
-            self._copy_commit_message(item)
+            self._copy_commit_message(subject)
         elif choice in {"hash", "copy commit hash"}:
-            self._copy_commit_hash(item)
+            self._copy_commit_hash(commit_hash)
+        elif choice in {"ask", "ask about this commit in chat"}:
+            self._ask_about_commit(short_hash, commit_hash, subject)
 
-    def _copy_commit_message(self, item: QListWidgetItem):
-        message = str(item.data(_ROLE_SUBJECT) or "").strip()
+    def _ask_about_commit(self, short_hash: str, full_hash: str, subject: str):
+        widget = self.parentWidget()
+        while widget is not None and not isinstance(widget, GitPanel):
+            widget = widget.parentWidget()
+        if isinstance(widget, GitPanel):
+            widget.request_commit_chat(short_hash, full_hash, subject)
+
+    def _copy_commit_message(self, message: str):
+        message = str(message or "").strip()
         if message:
             QApplication.clipboard().setText(message)
 
-    def _copy_commit_hash(self, item: QListWidgetItem):
-        commit_hash = str(item.data(_ROLE_HASH) or "").strip()
+    def _copy_commit_hash(self, commit_hash: str):
+        commit_hash = str(commit_hash or "").strip()
         if commit_hash:
             QApplication.clipboard().setText(commit_hash)
 
@@ -333,6 +363,7 @@ class _CommitDiffDialog(QDialog):
 class GitPanel(QWidget):
     file_open = pyqtSignal(str)
     git_help_requested = pyqtSignal(str, object)
+    commit_summarized = pyqtSignal(str)
 
     def __init__(
         self,
@@ -342,64 +373,48 @@ class GitPanel(QWidget):
         settings: SettingsStore | None = None,
         current_model_getter: Callable[[], str] | None = None,
         defer_refresh: bool = False,
+        auto_refresh: bool = True,
     ):
         super().__init__(parent)
         self.repo_path = repo_path
         self._settings = settings or SettingsStore()
         self._loaded = False
+        self._auto_refresh_enabled = auto_refresh
         self._auto_refresh_started = False
+        self._refresh_paused = False
         self._git_action_thread: _GitActionThread | None = None
         self._refresh_generation = 0
+        self._refresh_pending = False
         self._refresh_threads: list[_GitRefreshThread] = []
         self._last_snapshot = GitSnapshot(repo_path=repo_path, is_repo=False)
         self._last_git_action_failure: tuple[str, list[str], GitCommandResult] | None = None
+        self._last_refresh_monotonic: float | None = None
+        self._header_refresh_btn: QPushButton | None = None
+        self._git_header = None
+        self._mode_manual = bool(self._settings.load().get(GIT_PANEL_MODE_KEY))
+        self._sync_sets: list[GitSyncButtons] = []
+        self._header_sync = GitSyncButtons(compact=True, parent=self)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        splitter = QSplitter(Qt.Orientation.Vertical)
-
-        self._changes = GitChangesList(
-            repo_path,
-            settings=settings,
-            current_model_getter=current_model_getter,
-            defer_refresh=True,
-        )
-        self._changes.file_open.connect(self.file_open.emit)
-        self._changes.git_changed.connect(self._on_changes_changed)
-
-        log_wrap = QWidget()
-        ll = QVBoxLayout(log_wrap)
-        ll.setContentsMargins(6, 4, 6, 0)
-        ll.setSpacing(3)
-
-        log_header = QWidget()
-        hl = QHBoxLayout(log_header)
-        hl.setContentsMargins(0, 0, 0, 0)
-        hl.setSpacing(4)
-        self._log_lbl = QLabel("Git log")
-        hl.addWidget(self._log_lbl, 1)
-
-        self._pull_btn = QPushButton("↓")
-        self._pull_btn.setAccessibleName("Pull")
-        self._pull_btn.setToolTip("Pull from the upstream branch")
-        self._pull_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._pull_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._pull_btn.clicked.connect(self._pull)
-        hl.addWidget(self._pull_btn)
-
-        self._push_btn = QPushButton("↑")
-        self._push_btn.setAccessibleName("Push")
-        self._push_btn.setToolTip("No local commits to push")
-        self._push_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._push_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._push_btn.clicked.connect(self._push)
-        hl.addWidget(self._push_btn)
-        _fit_git_action_button(self._pull_btn)
-        _fit_git_action_button(self._push_btn)
-
-        ll.addWidget(log_header)
+        mode_bar = QWidget()
+        mode_layout = QHBoxLayout(mode_bar)
+        mode_layout.setContentsMargins(10, 8, 10, 4)
+        mode_layout.setSpacing(6)
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+        self._mode_buttons: dict[str, QPushButton] = {}
+        for key, label in (("changes", "Changes"), ("history", "History")):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda checked, mode=key: self._select_mode(mode, manual=True))
+            self._mode_group.addButton(btn)
+            self._mode_buttons[key] = btn
+            mode_layout.addWidget(btn, 1)
+        root.addWidget(mode_bar)
 
         self._git_action_status = QLabel()
         self._git_action_status.setWordWrap(True)
@@ -411,43 +426,149 @@ class GitPanel(QWidget):
             self._show_git_action_status_menu
         )
         self._git_action_status.setVisible(False)
-        ll.addWidget(self._git_action_status)
+        status_wrap = QWidget()
+        status_layout = QVBoxLayout(status_wrap)
+        status_layout.setContentsMargins(10, 0, 10, 4)
+        status_layout.setSpacing(0)
+        status_layout.addWidget(self._git_action_status)
+        root.addWidget(status_wrap)
 
+        self._stack = QStackedWidget()
+        root.addWidget(self._stack, 1)
+
+        self._changes = GitChangesList(
+            repo_path,
+            settings=settings,
+            current_model_getter=current_model_getter,
+            defer_refresh=True,
+        )
+        self._changes.file_open.connect(self.file_open.emit)
+        self._changes.git_changed.connect(self._on_changes_changed)
+        self._changes.commit_summarized.connect(self.commit_summarized.emit)
+        self._changes.refresh_pause_changed.connect(self._on_refresh_pause)
+        self._changes.lists_split_changed.connect(self._save_lists_split)
+        self._stack.addWidget(self._changes)
+
+        history_wrap = QWidget()
+        self._history_page = history_wrap
+        history_layout = QVBoxLayout(history_wrap)
+        history_layout.setContentsMargins(10, 4, 10, 8)
+        history_layout.setSpacing(6)
+        history_label = QLabel("Recent commits")
+        history_label.setStyleSheet(sidebar_section_label_style())
+        history_layout.addWidget(history_label)
         self.log = _CommitLogList()
         self.log.itemDoubleClicked.connect(self._open_commit_diff)
-        ll.addWidget(self.log)
+        history_layout.addWidget(self.log, 1)
+        self._stack.addWidget(history_wrap)
 
-        splitter.addWidget(self._changes)
-        splitter.addWidget(log_wrap)
-        splitter.setSizes([180, 320])
-        root.addWidget(splitter, 1)
-
+        self._register_sync(self._header_sync)
+        self._select_mode(git_panel_mode(self._settings.load()), manual=self._mode_manual)
         self.apply_appearance()
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self.refresh)
         if not defer_refresh:
             self.refresh()
-        if not defer_refresh:
+        if auto_refresh and not defer_refresh:
             self.start_auto_refresh()
+
+    @property
+    def _pull_btn(self) -> QPushButton:
+        return self._header_sync.pull_btn
+
+    @property
+    def _push_btn(self) -> QPushButton:
+        return self._header_sync.push_btn
+
+    def header_sync(self) -> GitSyncButtons:
+        return self._header_sync
+
+    def create_header_sync(self) -> GitSyncButtons:
+        return self._header_sync
+
+    def _register_sync(self, widget: GitSyncButtons):
+        widget.pull_clicked.connect(self._pull)
+        widget.push_clicked.connect(self._push)
+        self._sync_sets.append(widget)
+        self._update_git_action_state(self._last_snapshot)
+
+    def attach_git_header(self, header) -> None:
+        self._git_header = header
+
+    def attach_refresh_button(self, button: QPushButton):
+        self._header_refresh_btn = button
+        self._update_refresh_tooltip()
+
+    def request_commit_chat(self, short_hash: str, full_hash: str = "", subject: str = ""):
+        short_hash = str(short_hash or "").strip()
+        full_hash = str(full_hash or "").strip()
+        subject = str(subject or "").strip()
+        prompt = (
+            f"Help me understand commit {short_hash or full_hash[:7]}:\n"
+            f"{subject or '(no subject)'}"
+        )
+        self.git_help_requested.emit(prompt, [])
+
+    def _select_mode(self, mode: str, *, manual: bool = False):
+        if mode == "sync":
+            mode = "changes"
+        if mode not in self._mode_buttons:
+            mode = "changes"
+        if manual:
+            self._mode_manual = True
+            self._settings.update({GIT_PANEL_MODE_KEY: mode})
+        for key, btn in self._mode_buttons.items():
+            btn.setChecked(key == mode)
+            btn.setStyleSheet(git_mode_button_style(active=key == mode))
+        page = {
+            "changes": self._changes,
+            "history": self._history_page,
+        }[mode]
+        self._stack.setCurrentWidget(page)
+
+    def _maybe_auto_mode(self, snapshot: GitSnapshot):
+        if self._mode_manual:
+            return
+        dirty = any(ch.staged or ch.unstaged for ch in snapshot.changes)
+        self._select_mode("changes" if dirty else "history")
+
+    def _save_lists_split(self, sizes: list[int]):
+        if len(sizes) == 2:
+            self._settings.update({GIT_PANEL_LISTS_SPLIT_KEY: sizes})
+
+    def _on_refresh_pause(self, paused: bool):
+        self._refresh_paused = paused
+        if paused:
+            self._refresh_timer.stop()
+            self._changes.pause_auto_refresh()
+        else:
+            self.resume_auto_refresh()
+            self._changes.resume_auto_refresh()
 
     def apply_appearance(self):
         mono = mono_font_pt()
         font = mono_font(mono)
-
-        self._log_lbl.setStyleSheet(sidebar_section_label_style())
         self._apply_git_action_status_style()
-        p = palette()
-        self._pull_btn.setStyleSheet(_git_action_button_style(ACCENT))
-        self._push_btn.setStyleSheet(_git_action_button_style(p["SUCCESS"]))
-        _fit_git_action_button(self._pull_btn)
-        _fit_git_action_button(self._push_btn)
-        list_style = git_changes_list_style()
+        palette()
+        for widget in self._sync_sets:
+            widget.apply_appearance()
         self.log.setFont(font)
-        self.log.setStyleSheet(list_style)
+        self.log.setStyleSheet(git_log_list_style())
         self._changes.apply_appearance()
+        for key, btn in self._mode_buttons.items():
+            btn.setStyleSheet(git_mode_button_style(active=btn.isChecked()))
 
     def refresh(self):
+        if self._refresh_paused:
+            return
+        if any(thread.isRunning() for thread in self._refresh_threads):
+            self._refresh_pending = True
+            if self._auto_refresh_enabled:
+                self.start_auto_refresh()
+            return
         self._refresh_generation += 1
+        if self._header_refresh_btn is not None:
+            self._header_refresh_btn.setEnabled(False)
         thread = _GitRefreshThread(self._refresh_generation, self.repo_path, self)
         self._refresh_threads.append(thread)
         thread.done.connect(self._apply_snapshot)
@@ -455,7 +576,8 @@ class GitPanel(QWidget):
         thread.finished.connect(thread.deleteLater)
         thread.start()
         self._loaded = True
-        self.start_auto_refresh()
+        if self._auto_refresh_enabled:
+            self.start_auto_refresh()
 
     def set_changes(self, changes):
         self._changes.set_changes(changes)
@@ -463,22 +585,70 @@ class GitPanel(QWidget):
     def apply_snapshot(self, snapshot: GitSnapshot):
         if snapshot.repo_path != self.repo_path:
             return
-        self._last_snapshot = snapshot
-        self._changes.set_repo_state(snapshot.is_repo, list(snapshot.changes))
-        self._set_log_lines(snapshot.log_lines if snapshot.is_repo else ())
-        self._update_git_action_state(snapshot)
-        self._loaded = True
-        self.start_auto_refresh()
+        with time_operation(
+            "git.apply",
+            detail=f"changes={len(snapshot.changes)} commits={len(snapshot.log_lines)}",
+            slow_ms=50,
+        ):
+            self._last_snapshot = snapshot
+            self._changes.set_repo_state(snapshot.is_repo, list(snapshot.changes))
+            self._set_log_lines(snapshot.log_lines if snapshot.is_repo else ())
+            self._update_git_action_state(snapshot)
+            self._update_git_header(snapshot)
+            self._maybe_auto_mode(snapshot)
+            self._last_refresh_monotonic = time.monotonic()
+            self._update_refresh_tooltip()
+            if self._header_refresh_btn is not None:
+                self._header_refresh_btn.setEnabled(True)
+            self._loaded = True
+            if self._auto_refresh_enabled:
+                self.start_auto_refresh()
+
+    def _update_git_header(self, snapshot: GitSnapshot):
+        if self._git_header is None:
+            return
+        if not snapshot.is_repo:
+            self._git_header.set_path_hint("")
+            return
+        branch = snapshot.branch or "detached HEAD"
+        parts: list[str] = []
+        if snapshot.ahead:
+            parts.append(f"↑{snapshot.ahead} to push")
+        if snapshot.behind:
+            parts.append(f"↓{snapshot.behind} to pull")
+        if not parts:
+            parts.append("up to date")
+        self._git_header.set_path_hint(f"{branch} · {' · '.join(parts)}")
+
+    def _update_refresh_tooltip(self):
+        if self._header_refresh_btn is None:
+            return
+        base = "Refresh git status"
+        if self._last_refresh_monotonic is None:
+            self._header_refresh_btn.setToolTip(base)
+            return
+        age = max(0, int(time.monotonic() - self._last_refresh_monotonic))
+        self._header_refresh_btn.setToolTip(f"{base} · updated {age}s ago")
 
     def ensure_loaded(self):
+        self._auto_refresh_enabled = True
         if not self._loaded:
             self.refresh()
+        else:
+            self.start_auto_refresh()
 
     def start_auto_refresh(self):
-        if self._auto_refresh_started:
+        if not self._auto_refresh_enabled:
+            return
+        if self._auto_refresh_started and self._refresh_timer.isActive():
             return
         self._auto_refresh_started = True
-        self._refresh_timer.start(5000)
+        if not self._refresh_paused:
+            self._refresh_timer.start(5000)
+
+    def resume_auto_refresh(self):
+        if self._auto_refresh_started and not self._refresh_paused:
+            self._refresh_timer.start(5000)
 
     def _on_changes_changed(self):
         clear_git_snapshot_cache(self.repo_path)
@@ -531,6 +701,13 @@ class GitPanel(QWidget):
     def _release_refresh_thread(self, thread: _GitRefreshThread):
         if thread in self._refresh_threads:
             self._refresh_threads.remove(thread)
+        if (
+            self._refresh_pending
+            and not self._refresh_paused
+            and not any(existing.isRunning() for existing in self._refresh_threads)
+        ):
+            self._refresh_pending = False
+            self.refresh()
 
     def _set_log_lines(self, lines):
         self.log.clear()
@@ -557,34 +734,35 @@ class GitPanel(QWidget):
         is_repo = snapshot.is_repo
         ahead = snapshot.ahead
         behind = snapshot.behind
-        self._pull_btn.setText(_git_action_button_text("↓", behind))
-        self._push_btn.setText(_git_action_button_text("↑", ahead))
-        _fit_git_action_button(self._pull_btn)
-        _fit_git_action_button(self._push_btn)
-        self._pull_btn.setEnabled(is_repo)
-        self._push_btn.setEnabled(is_repo and ahead > 0)
-        if not is_repo:
-            self._pull_btn.setToolTip("No git repository found")
-            self._push_btn.setToolTip("No git repository found")
-        else:
-            if behind > 0:
-                self._pull_btn.setToolTip(
+        for sync in self._sync_sets:
+            sync.pull_btn.setText(git_action_button_text("↓", behind))
+            sync.push_btn.setText(git_action_button_text("↑", ahead))
+            fit_git_action_button(sync.pull_btn, compact=sync._compact)
+            fit_git_action_button(sync.push_btn, compact=sync._compact)
+            sync.pull_btn.setEnabled(is_repo)
+            sync.push_btn.setEnabled(is_repo and ahead > 0)
+            if not is_repo:
+                sync.pull_btn.setToolTip("No git repository found")
+                sync.push_btn.setToolTip("No git repository found")
+            elif behind > 0:
+                sync.pull_btn.setToolTip(
                     f"Pull {behind} upstream commit{'s' if behind != 1 else ''}"
                 )
             else:
-                self._pull_btn.setToolTip("Pull from the upstream branch")
+                sync.pull_btn.setToolTip("Pull from the upstream branch")
             if ahead > 0:
-                self._push_btn.setToolTip(f"Push {ahead} local commit{'s' if ahead != 1 else ''}")
+                sync.push_btn.setToolTip(f"Push {ahead} local commit{'s' if ahead != 1 else ''}")
             else:
-                self._push_btn.setToolTip("No local commits to push")
+                sync.push_btn.setToolTip("No local commits to push")
 
     def _set_git_action_buttons_enabled(self, enabled: bool):
-        self._pull_btn.setEnabled(enabled)
         ahead = self._last_snapshot.ahead if enabled else 0
-        self._push_btn.setText(_git_action_button_text("↑", ahead))
-        _fit_git_action_button(self._pull_btn)
-        _fit_git_action_button(self._push_btn)
-        self._push_btn.setEnabled(enabled and ahead > 0)
+        is_repo = self._last_snapshot.is_repo
+        for sync in self._sync_sets:
+            sync.pull_btn.setEnabled(enabled and is_repo)
+            sync.push_btn.setText(git_action_button_text("↑", ahead))
+            fit_git_action_button(sync.push_btn, compact=sync._compact)
+            sync.push_btn.setEnabled(enabled and is_repo and ahead > 0)
 
     def _set_git_action_status(self, text: str, *, failed: bool = False):
         self._git_action_status.setText(text)
@@ -598,11 +776,7 @@ class GitPanel(QWidget):
         if not failed:
             self._git_action_status.setStyleSheet(sidebar_section_label_style())
             return
-        p = palette()
-        self._git_action_status.setStyleSheet(
-            f"color:#ef4444; background:{p['BG2']}; border:1px solid #ef4444;"
-            "border-radius:6px; padding:4px 6px;"
-        )
+        self._git_action_status.setStyleSheet(git_action_status_error_style())
 
     def _show_git_action_status_menu(self, pos):
         detail = self._git_action_status.toolTip().strip()
@@ -667,6 +841,7 @@ class GitPanel(QWidget):
 
     def shutdown(self):
         self._refresh_generation += 1
+        self._refresh_pending = False
         self._refresh_timer.stop()
         if self._git_action_thread is not None:
             try:
@@ -760,15 +935,15 @@ def _commit_ref_badge_colors(kind: str, selected: bool, p: dict) -> tuple[str, s
 
 
 def _git_action_button_text(symbol: str, count: int) -> str:
-    count = max(0, int(count or 0))
-    return symbol if count == 0 else f"{symbol} ({count})"
+    return git_action_button_text(symbol, count)
 
 
-def _fit_git_action_button(button: QPushButton) -> None:
-    metrics = QFontMetrics(button.font())
-    width = max(30, metrics.horizontalAdvance(button.text()) + 18)
-    button.setFixedWidth(width)
-    button.setFixedHeight(24)
+def _fit_git_action_button(button: QPushButton, *, compact: bool = True) -> None:
+    fit_git_action_button(button, compact=compact)
+
+
+def _git_action_button_style(accent_color: str = ACCENT, theme: str | None = None) -> str:
+    return git_action_button_style(accent_color, theme)
 
 
 def _file_diff_label(path: str, added: int, removed: int) -> str:
@@ -855,7 +1030,3 @@ def _git_action_status_menu_choice(action: QAction | None) -> str:
     if value:
         return value
     return str(action.text() or "").replace("&", "").strip().lower()
-
-
-def _git_action_button_style(accent_color: str = ACCENT, theme: str | None = None) -> str:
-    return git_action_button_style(accent_color, theme)

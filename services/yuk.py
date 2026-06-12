@@ -6,6 +6,7 @@ import re
 import shutil
 import stat
 import zipfile
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -146,7 +147,7 @@ def discover_export_items(cwd: str | None = None, settings: dict | None = None) 
             )
 
     for scope, root in _skill_roots(cwd):
-        for path in sorted(root.glob("*.md")) if root.exists() else []:
+        for path in _skill_sources(root):
             items.append(
                 YukExportItem(
                     id=f"skill:{scope}:{path.name}",
@@ -186,6 +187,7 @@ def export_yuk(
     selection: YukExportSelection | None = None,
     *,
     name: str = "AICHS User Kit",
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict:
     selection = selection or YukExportSelection()
     out_path = Path(path)
@@ -194,7 +196,9 @@ def export_yuk(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     settings = SettingsStore().load()
+    _raise_if_cancelled(cancelled)
     items = discover_export_items(cwd, settings)
+    _raise_if_cancelled(cancelled)
     selected = {item.id: item for item in items if selection.includes(item.id)}
     manifest = {
         "format": YUK_FORMAT,
@@ -206,6 +210,7 @@ def export_yuk(
 
     with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for item in selected.values():
+            _raise_if_cancelled(cancelled)
             if item.kind == "setting":
                 manifest["items"].append(_manifest_item(item))
             elif item.kind == "skill":
@@ -228,7 +233,12 @@ def export_yuk(
                 else:
                     archive_root = f"extensions/{item.scope}/{Path(item.path).name}"
                     entry["archive_path"] = archive_root
-                    entry["files"] = _write_tree(zf, Path(item.path), archive_root)
+                    entry["files"] = _write_tree(
+                        zf,
+                        Path(item.path),
+                        archive_root,
+                        cancelled=cancelled,
+                    )
                 manifest["items"].append(entry)
             elif item.kind == "avatar":
                 archive_path = f"avatars/{_safe_name(Path(item.path).name)}"
@@ -430,17 +440,26 @@ def _extension_state_cwd(cwd: str | None) -> str | None:
 
 
 def _extension_sources(root: Path) -> list[tuple[Path, Path, str, str]]:
-    if not root.exists():
-        return []
     items: list[tuple[Path, Path, str, str]] = []
     seen: set[Path] = set()
-    for entrypoint in sorted(root.glob("*/extension.py")):
+    children = _top_level_children(root)
+    folder_entrypoints = []
+    files = []
+    for child in children:
+        if child.is_dir():
+            entrypoint = child / "extension.py"
+            if entrypoint.is_file():
+                folder_entrypoints.append(entrypoint)
+        elif child.is_file() and child.suffix == ".py":
+            files.append(child)
+
+    for entrypoint in sorted(folder_entrypoints):
         source = entrypoint.parent
         resolved = source.resolve()
         if resolved not in seen:
             items.append((source, entrypoint, "extension_folder", source.name))
             seen.add(resolved)
-    for path in sorted(root.glob("*.py")):
+    for path in sorted(files):
         if path.name == "__init__.py":
             continue
         resolved = path.resolve()
@@ -448,6 +467,21 @@ def _extension_sources(root: Path) -> list[tuple[Path, Path, str, str]]:
             items.append((path, path, "extension_file", path.name))
             seen.add(resolved)
     return items
+
+
+def _skill_sources(root: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in _top_level_children(root)
+        if path.is_file() and path.suffix == ".md"
+    )
+
+
+def _top_level_children(root: Path) -> list[Path]:
+    try:
+        return sorted(root.iterdir(), key=lambda item: item.name.casefold())
+    except OSError:
+        return []
 
 
 def _manifest_item(item: YukExportItem) -> dict:
@@ -576,16 +610,51 @@ def _copy_zip_tree(zf: zipfile.ZipFile, archive_root: str, target: Path) -> None
             shutil.copyfileobj(src, dst)
 
 
-def _write_tree(zf: zipfile.ZipFile, source: Path, archive_root: str) -> list[str]:
+def _write_tree(
+    zf: zipfile.ZipFile,
+    source: Path,
+    archive_root: str,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> list[str]:
     files = []
-    for path in sorted(p for p in source.rglob("*") if p.is_file()):
-        if any(part in _IGNORED_EXTENSION_NAMES for part in path.relative_to(source).parts):
-            continue
+    for path in _iter_tree_files(source, cancelled=cancelled):
+        _raise_if_cancelled(cancelled)
         rel = path.relative_to(source).as_posix()
         archive_path = f"{archive_root}/{rel}"
         zf.write(path, archive_path)
         files.append(archive_path)
     return files
+
+
+def _iter_tree_files(
+    source: Path,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> Iterator[Path]:
+    stack = [source]
+    while stack:
+        _raise_if_cancelled(cancelled)
+        current = stack.pop()
+        try:
+            children = sorted(current.iterdir(), key=lambda child: child.name.lower())
+        except OSError:
+            continue
+        dirs: list[Path] = []
+        for child in children:
+            _raise_if_cancelled(cancelled)
+            if child.name in _IGNORED_EXTENSION_NAMES:
+                continue
+            if child.is_dir():
+                dirs.append(child)
+            elif child.is_file():
+                yield child
+        stack.extend(reversed(dirs))
+
+
+def _raise_if_cancelled(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled and cancelled():
+        raise RuntimeError("cancelled")
 
 
 def _validate_zip(zf: zipfile.ZipFile) -> None:

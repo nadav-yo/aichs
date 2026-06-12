@@ -1,6 +1,5 @@
 import json
 import re
-from pathlib import Path
 
 import pytest
 
@@ -94,9 +93,8 @@ def test_combo_box_popup_style_paints_container_viewport_and_items():
     style = combo_box_popup_style("modern", bg=p["BG3"], border_radius=6, font_pt=12)
 
     assert "QComboBoxPrivateContainer" in style
-    assert "padding:0" in style
-    assert "padding:2px" not in style
-    assert "padding:6px 10px" in style
+    assert "padding:6px" in style
+    assert "padding:5px 10px" in style
     assert "QComboBox::indicator" not in style
     assert "QAbstractItemView::indicator" in style
     assert "QComboBoxPrivateContainer QWidget" in style
@@ -104,6 +102,108 @@ def test_combo_box_popup_style_paints_container_viewport_and_items():
     assert p["BG3"] in style
     assert p["SELECTION"] in style
     assert p["SELECTION_TEXT"] in style
+
+
+def test_conversation_list_style_overrides_global_item_padding():
+    style = theme_module.conversation_list_style()
+    assert "padding:0px 0px" in style
+
+
+def test_workbench_header_styles_share_frame_and_title_contract():
+    frame = theme_module.workbench_header_frame_style(object_name="chatHeader")
+    chat = theme_module.chat_header_style()
+    files = theme_module.files_header_style()
+
+    assert "border-bottom:1px solid" in frame
+    assert "chatHeaderTitle" in chat
+    assert "chatHeaderSubtitle" in chat
+    assert "filesPath" in files
+    assert "font-weight:600" in chat
+    assert "font-weight:600" in files
+    assert theme_module.WORKBENCH_HEADER_MARGINS == (16, 8, 12, 8)
+
+
+def test_combo_box_popup_container_style_includes_item_padding():
+    style = theme_module.combo_box_popup_container_style("modern", border_radius=6, font_pt=12)
+
+    assert "padding:6px" in style
+    assert "padding:5px 10px" in style
+    assert "QListView::item" in style
+    assert "border-radius:6px" in style
+
+
+def test_combo_popup_hover_uses_lifted_surface():
+    modern = palette("modern")
+    modern_style = theme_module.combo_box_popup_container_style("modern")
+    assert f"background:{modern['BORDER']}" in modern_style
+
+    light = palette("light")
+    light_style = theme_module.combo_box_popup_container_style("light")
+    assert f"background:{light['BG2']}" in light_style
+
+
+def test_combo_popup_visible_row_count():
+    count = theme_module.combo_popup_visible_row_count
+    assert count(0) == 0
+    assert count(2) == 2
+    assert count(4) == 4
+    assert count(8) == 8
+    assert count(15) == theme_module.COMBO_POPUP_MAX_VISIBLE_ROWS
+
+
+def test_combo_popup_container_resizes_for_multiple_rows(qapp):
+    from PyQt6.QtWidgets import QComboBox, QListView
+
+    apply_app_theme(qapp, "modern")
+    combo = QComboBox()
+    for i in range(8):
+        combo.addItem(f"provider-{i}")
+    combo.show()
+    combo.showPopup()
+    for _ in range(3):
+        qapp.processEvents()
+
+    container = next(
+        w for w in qapp.allWidgets()
+        if w.metaObject().className() == "QComboBoxPrivateContainer" and w.isVisible()
+    )
+    view = container.findChild(QListView)
+    assert view is not None
+    row_h = max(view.sizeHintForRow(0), 24)
+    visible = theme_module.combo_popup_visible_row_count(8)
+    assert visible == 8
+    assert view.minimumHeight() >= visible * (row_h - 2)
+    assert container.height() >= 4 * (row_h - 2)
+
+    combo.hidePopup()
+    combo.deleteLater()
+    qapp.processEvents()
+
+
+def test_combo_popup_container_fits_short_lists(qapp):
+    from PyQt6.QtWidgets import QComboBox, QListView
+
+    apply_app_theme(qapp, "modern")
+    combo = QComboBox()
+    combo.addItems(["one", "two"])
+    combo.show()
+    combo.showPopup()
+    for _ in range(3):
+        qapp.processEvents()
+
+    container = next(
+        w for w in qapp.allWidgets()
+        if w.metaObject().className() == "QComboBoxPrivateContainer" and w.isVisible()
+    )
+    view = container.findChild(QListView)
+    row_h = max(view.sizeHintForRow(0), 24)
+    pad = theme_module.COMBO_POPUP_VIEW_PADDING * 2
+    assert container.height() <= 2 * row_h + pad + 4
+    assert container.height() >= 2 * row_h + pad - 4
+
+    combo.hidePopup()
+    combo.deleteLater()
+    qapp.processEvents()
 
 
 def test_overlay_search_styles_share_modal_search_contract():
@@ -175,9 +275,9 @@ def test_flat_list_variants_share_shell_and_differ_on_selection():
     conversation = theme_module.conversation_list_style()
 
     assert "QListWidget { background:" in git
-    assert "padding:2px 6px" in git
+    assert "padding:1px 6px" in git
     assert f"border-left:3px solid {theme_module.ACCENT}" in overlay
-    assert "border-radius:7px" in conversation
+    assert "border-radius:5px" in conversation
 
 
 def test_new_chat_button_style_uses_theme_soft_accent(qapp):

@@ -84,6 +84,22 @@ class TestConversationStore:
         assert store.list_trash() == []
         assert [summary["id"] for _, summary in store.list_all()] == ["x"]
 
+    def test_purge_removes_trashed_conversation(self, store):
+        path = store.save("x", _sample_conv("x"))
+        store.delete(str(path))
+        trash_path = store.list_trash()[0][0]
+
+        assert store.purge(str(trash_path)) == "x"
+        assert store.list_trash() == []
+        assert store.list_all() == []
+
+    def test_purge_ignores_non_trash_paths(self, store, conv_dir):
+        path = store.save("x", _sample_conv("x"))
+
+        assert store.purge(str(path)) == ""
+        assert path.exists()
+        assert store.list_all()
+
     def test_prune_trash_removes_expired_conversations(self, store):
         path = store.save("old", _sample_conv("old"))
         store.delete(str(path))

@@ -21,27 +21,15 @@ _CHATML_CONTROL_TOKEN_RE = re.compile(
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 
 BASE_PROMPT = """\
-Generate one concise Git commit message for the staged changes only.
-Use the staged file list, staged stats, and staged diff below.
+Write one Git commit message for the staged changes below.
 
-Output format:
-Line 1: commit summary
-Optional blank line followed by commit body
-
-Rules:
-- Reply with the commit message only.
-- Do not wrap the answer in quotes.
-- Do not use markdown fences.
-- Do not include alternatives or explanations.
-"""
+Format: summary line, optional blank line, optional body.
+Reply with the message only—no quotes, markdown, or commentary."""
 
 
 CHUNK_SUMMARY_PROMPT = """\
-Summarize this staged Git diff chunk for a later commit-message generator.
-Focus on changed behavior, user-visible effects, and important files.
-Do not write a commit message yet.
-Reply with a compact plain-text summary only.
-"""
+Summarize this staged diff chunk for a later commit message.
+Focus on behavior changes and important files. Plain text only—no commit message yet."""
 
 
 def staged_commit_parts(repo_path: str) -> tuple[str, str, str]:
@@ -376,6 +364,16 @@ def split_commit_message(message: str) -> tuple[str, str]:
     summary = lines[0].strip()
     body = "\n".join(lines[1:]).strip()
     return summary, body
+
+
+def format_commit_message(summary: str, body: str = "") -> str:
+    title = str(summary or "").strip()
+    detail = str(body or "").strip()
+    if not title:
+        return detail
+    if not detail:
+        return title
+    return f"{title}\n\n{detail}"
 
 
 def _finish_reason(resp) -> str:

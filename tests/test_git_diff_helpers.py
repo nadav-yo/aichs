@@ -1,4 +1,3 @@
-from unittest.mock import patch
 
 from services.git_diff import _unified, can_diff_against_head, change_for_file
 

@@ -12,7 +12,6 @@ from services.tool_registry import (
     ExtensionContext,
     HookContext,
     RuntimeCommandApi,
-    RuntimeDirective,
     ToolContext,
     ToolRegistry,
     extension_context_snippets,
@@ -44,7 +43,7 @@ def test_load_extension_tool_and_context(workspace_with_tool):
     assert tool.extension_id == "tooling"
     assert tool.parallel_safe is True
 
-    ctx = ExtensionContext(cwd=cwd)
+    ExtensionContext(cwd=cwd)
     snippets, errors = extension_context_snippets(cwd)
     assert errors == []
     assert ("Ping note", "from extension") in snippets
@@ -642,6 +641,29 @@ def test_extension_overview_uses_docstring_description_fallback(workspace):
     assert overview.files[0].description == "Docstring description."
 
 
+def test_extension_overview_skips_static_description_parse_when_metadata_sets_description(workspace, monkeypatch):
+    ext = write_extension(
+        workspace,
+        "metadata_description.py",
+        """
+        def register(registry):
+            registry.metadata(description="Runtime metadata description.")
+        """,
+    )
+    original = Path.read_text
+
+    def fail_extension_read_text(self, *args, **kwargs):
+        if self == ext:
+            raise AssertionError("static description should not be parsed")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_extension_read_text)
+
+    overview = extension_overview(str(workspace))
+
+    assert overview.files[0].description == "Runtime metadata description."
+
+
 def test_disabled_extension_is_visible_but_not_loaded(workspace):
     ext = write_extension(
         workspace,
@@ -1029,25 +1051,206 @@ def test_extension_overview_reuses_discovered_extension_files(workspace, monkeyp
     assert calls == 1
 
 
-def test_extension_summary_reuses_content_hash_for_review_state(workspace, monkeypatch):
+def test_extension_file_discovery_uses_top_level_iterdir_without_glob(workspace, monkeypatch):
+    root = workspace / ".aichs" / "extensions"
+    write_extension(workspace, "direct.py", "def register(registry): pass")
+    write_extension(workspace, "__init__.py", "def register(registry): pass")
+    folder = root / "foldered"
+    folder.mkdir()
+    (folder / "extension.py").write_text("def register(registry): pass\n", encoding="utf-8")
+    nested = root / "nested" / "inner"
+    nested.mkdir(parents=True)
+    (nested / "extension.py").write_text("def register(registry): pass\n", encoding="utf-8")
+
+    def fail_glob(self, pattern):
+        raise AssertionError(f"unexpected glob({pattern})")
+
+    monkeypatch.setattr(Path, "glob", fail_glob)
+
+    discovered = tool_registry._extension_files(str(workspace))
+
+    assert [path.relative_to(root).as_posix() for path in discovered] == [
+        "direct.py",
+        "foldered/extension.py",
+    ]
+
+
+def test_extension_summary_reuses_metadata_for_hash_and_review_state(workspace, monkeypatch):
     ext_dir = workspace / ".aichs" / "extensions" / "hash-once"
     ext_dir.mkdir(parents=True)
     (ext_dir / "aichs-extension.json").write_text('{"name": "Hash Once"}\n', encoding="utf-8")
     entrypoint = ext_dir / "extension.py"
     entrypoint.write_text("def register(registry):\n    pass\n", encoding="utf-8")
     calls = []
-    original = tool_registry.extension_content_hash
+    original = tool_registry._extension_file_metadata
 
-    def counted_content_hash(path):
+    def counted_metadata(path):
         calls.append(Path(path))
         return original(path)
 
-    monkeypatch.setattr(tool_registry, "extension_content_hash", counted_content_hash)
+    monkeypatch.setattr(tool_registry, "_extension_file_metadata", counted_metadata)
 
     summary = tool_registry._extension_file_summary(entrypoint, str(workspace), load_code=False)
 
     assert summary.display_name == "Hash Once"
     assert calls == [entrypoint]
+
+
+def test_extension_overview_prunes_ignored_folder_extension_dirs(workspace, monkeypatch):
+    ext_dir = workspace / ".aichs" / "extensions" / "walk-once"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "aichs-extension.json").write_text('{"name": "Walk Once"}\n', encoding="utf-8")
+    (ext_dir / "extension.py").write_text(
+        "def register(registry):\n"
+        "    registry.command(name='walk_once', description='Walk once')\n",
+        encoding="utf-8",
+    )
+    (ext_dir / "extra.txt").write_text("included in content hash\n", encoding="utf-8")
+    ignored = ext_dir / "__pycache__"
+    nested = ignored / "nested"
+    nested.mkdir(parents=True)
+    (nested / "junk.py").write_text("should not be inspected\n", encoding="utf-8")
+    visited = []
+    original = Path.iterdir
+
+    def counted_iterdir(self):
+        visited.append(self)
+        return original(self)
+
+    monkeypatch.setattr(Path, "iterdir", counted_iterdir)
+
+    overview = extension_overview(str(workspace))
+
+    assert overview.files[0].display_name == "Walk Once"
+    assert ext_dir in visited
+    assert ignored not in visited
+    assert nested not in visited
+
+
+def test_extension_content_hash_reuses_cached_file_reads_until_signature_changes(workspace, monkeypatch):
+    ext_dir = workspace / ".aichs" / "extensions" / "hash-cache"
+    ext_dir.mkdir(parents=True)
+    manifest = ext_dir / "aichs-extension.json"
+    entrypoint = ext_dir / "extension.py"
+    extra = ext_dir / "extra.txt"
+    manifest.write_text('{"name": "Hash Cache"}\n', encoding="utf-8")
+    entrypoint.write_text("def register(registry):\n    pass\n", encoding="utf-8")
+    extra.write_text("first\n", encoding="utf-8")
+    read_files = []
+    original = Path.open
+
+    def counted_open(self, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if self in {manifest, entrypoint, extra} and "b" in mode:
+            read_files.append(self.name)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    first = tool_registry.extension_content_hash(entrypoint)
+    second = tool_registry.extension_content_hash(entrypoint)
+
+    assert second == first
+    assert sorted(read_files) == ["aichs-extension.json", "extension.py", "extra.txt"]
+
+    extra.write_text("second with a different size\n", encoding="utf-8")
+    third = tool_registry.extension_content_hash(entrypoint)
+
+    assert third != first
+    assert len(read_files) == 6
+
+
+def test_extension_content_hash_times_uncached_digest_only(workspace, monkeypatch):
+    ext_dir = workspace / ".aichs" / "extensions" / "hash-timed"
+    ext_dir.mkdir(parents=True)
+    manifest = ext_dir / "aichs-extension.json"
+    entrypoint = ext_dir / "extension.py"
+    extra = ext_dir / "extra.txt"
+    manifest.write_text('{"name": "Hash Timed"}\n', encoding="utf-8")
+    entrypoint.write_text("def register(registry):\n    pass\n", encoding="utf-8")
+    extra.write_text("first\n", encoding="utf-8")
+    operations = []
+
+    @contextmanager
+    def fake_time_operation(operation, *, detail="", slow_ms=100.0):
+        operations.append((operation, detail, slow_ms))
+        yield
+
+    tool_registry.clear_all_extension_caches()
+    monkeypatch.setattr(tool_registry, "time_operation", fake_time_operation)
+
+    first = tool_registry.extension_content_hash(entrypoint)
+    second = tool_registry.extension_content_hash(entrypoint)
+
+    assert second == first
+    assert len(operations) == 1
+    assert operations[0][0] == "extension.content_hash"
+    assert f"path={entrypoint}" in operations[0][1]
+    assert "files=3" in operations[0][1]
+    assert operations[0][2] == 50
+
+    extra.write_text("second with a different size\n", encoding="utf-8")
+    third = tool_registry.extension_content_hash(entrypoint)
+
+    assert third != first
+    assert len(operations) == 2
+
+
+def test_extension_content_hash_cache_evicts_oldest_entry(workspace, monkeypatch):
+    first = write_extension(workspace, "first.py", "def register(registry): pass\n")
+    second = write_extension(workspace, "second.py", "def register(registry): pass\n")
+    tool_registry.clear_all_extension_caches()
+    monkeypatch.setattr(tool_registry, "_CONTENT_HASH_CACHE_LIMIT", 1)
+    read_files = []
+    original = Path.open
+
+    def counted_open(self, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if self in {first, second} and "b" in mode:
+            read_files.append(self.name)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+
+    tool_registry.extension_content_hash(first)
+    tool_registry.extension_content_hash(second)
+    tool_registry.extension_content_hash(first)
+
+    assert read_files == ["first.py", "second.py", "first.py"]
+
+
+def test_extension_content_hash_streams_file_chunks(workspace, monkeypatch):
+    ext = write_extension(workspace, "chunked.py", "0123456789")
+    tool_registry.clear_all_extension_caches()
+    monkeypatch.setattr(tool_registry, "_CONTENT_HASH_CHUNK_SIZE", 4)
+    original = Path.open
+    read_sizes = []
+
+    class RecordingFile:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._handle.__exit__(*args)
+
+        def read(self, size=-1):
+            read_sizes.append(size)
+            return self._handle.read(size)
+
+    def recording_open(self, *args, **kwargs):
+        handle = original(self, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if self == ext and "b" in mode:
+            return RecordingFile(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", recording_open)
+
+    assert tool_registry.extension_content_hash(ext)
+    assert read_sizes == [4, 4, 4, 4]
 
 
 def test_extension_cache_invalidates_when_file_changes(workspace):

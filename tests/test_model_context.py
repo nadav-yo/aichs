@@ -78,9 +78,11 @@ def test_refresh_anthropic_context_cache(monkeypatch):
     mock_info = MagicMock(max_input_tokens=200_000)
     mock_client = MagicMock()
     mock_client.models.retrieve.return_value = mock_info
-    with patch.object(reg, "resolve_api_key", return_value="test-key"), patch(
+    anthropic_configs = [cfg for cfg in reg._MODEL_CONFIG.values() if cfg.api == "anthropic"]
+    with patch.object(reg, "resolve_api_key", return_value="test-key") as resolve, patch(
         "anthropic.Anthropic", return_value=mock_client,
     ):
         reg._refresh_anthropic_context_cache()
     assert reg._ANTHROPIC_CONTEXT["claude-sonnet-4-6"] == 200_000
+    assert resolve.call_count == len(anthropic_configs)
     mock_client.models.retrieve.assert_any_call("claude-sonnet-4-6")

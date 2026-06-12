@@ -1,5 +1,6 @@
 import pytest
 import time
+from contextlib import contextmanager
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence
@@ -21,13 +22,13 @@ from services.file_search import clear_workspace_file_cache, list_workspace_file
 from PyQt6.QtWidgets import QLabel, QListWidget, QLineEdit, QTextBrowser
 from PyQt6.QtWidgets import QMessageBox
 
-from services.file_tree_snapshot import FileTreeSnapshot
+from services.file_tree_snapshot import FileTreeEntry, FileTreeSnapshot
 from services.git_snapshot import GitSnapshot
 from services.git_status import GitCommandResult
 from storage.settings import SettingsStore
 from ui.theme import palette
 from ui.widgets.git_panel import GitPanel, _CommitDiffDialog
-from ui.widgets.left_panel import FileTree, _FileTreeActionThread, _FileTreeRefreshThread, _FilesHeader, _path_key
+from ui.widgets.left_panel import FileTree, _FileTreeActionThread, _FileTreeRefreshThread, _FilesHeader, _IS_DIR_ROLE, _LOAD_GENERATION_ROLE, _path_key
 from ui.widgets.conversation_panel import ConversationPanel
 
 
@@ -162,6 +163,302 @@ def test_files_tree_refresh_thread_drops_cancelled_result(qapp, workspace, monke
 
     assert calls == [(str(workspace), "main", True)]
     assert emitted == []
+
+
+def test_files_tree_apply_snapshots_are_timed(qapp, workspace, monkeypatch):
+    import ui.widgets.left_panel as left_panel
+
+    operations = []
+
+    @contextmanager
+    def fake_time_operation(operation, *, detail="", slow_ms=100.0):
+        operations.append((operation, detail, slow_ms))
+        yield
+
+    monkeypatch.setattr(left_panel, "time_operation", fake_time_operation)
+    tree = FileTree(str(workspace), defer_git_status=True)
+    operations.clear()
+    folder = workspace / "src"
+    child = folder / "main.py"
+
+    tree._apply_snapshot(
+        FileTreeSnapshot(
+            root_path=str(workspace),
+            filter_text="",
+            entries=(FileTreeEntry("src", str(folder), True),),
+        )
+    )
+    item = tree.topLevelItem(0)
+    item.setData(0, _LOAD_GENERATION_ROLE, 3)
+    tree._apply_children_snapshot(
+        3,
+        str(folder),
+        FileTreeSnapshot(
+            root_path=str(folder),
+            filter_text="",
+            entries=(FileTreeEntry("main.py", str(child), False),),
+        ),
+    )
+
+    assert operations == [
+        ("file_tree.apply", "entries=1 filtered=False git=0", 50),
+        ("file_tree.children.apply", f"entries=1 path={folder}", 50),
+    ]
+
+
+def test_files_tree_snapshot_apply_sets_icons_once_per_decorated_item(qapp, workspace, monkeypatch):
+    tree = FileTree(str(workspace), defer_git_status=True)
+    src = workspace / "src"
+    docs = workspace / "docs"
+    docs.mkdir()
+    icon_paths = []
+
+    def fake_apply_icon(_item, path, **_kwargs):
+        icon_paths.append(path)
+
+    monkeypatch.setattr(tree, "_apply_item_icon", fake_apply_icon)
+
+    tree._apply_snapshot(
+        FileTreeSnapshot(
+            root_path=str(workspace),
+            filter_text="",
+            entries=(
+                FileTreeEntry("src", str(src), True),
+                FileTreeEntry("docs", str(docs), True),
+            ),
+        )
+    )
+
+    assert icon_paths == [str(src), str(docs)]
+
+
+def test_files_tree_uses_uniform_row_heights(qapp, workspace):
+    tree = FileTree(str(workspace), defer_git_status=True)
+
+    assert tree.uniformRowHeights() is True
+
+
+def test_files_tree_snapshot_apply_batches_updates(qapp, workspace, monkeypatch):
+    tree = FileTree(str(workspace), defer_git_status=True)
+    src = workspace / "src"
+    calls = []
+
+    monkeypatch.setattr(tree, "_begin_tree_update_batch", lambda: calls.append("begin") or False)
+    monkeypatch.setattr(tree, "_end_tree_update_batch", lambda enabled: calls.append(("end", enabled)))
+
+    tree._apply_snapshot(
+        FileTreeSnapshot(
+            root_path=str(workspace),
+            filter_text="",
+            entries=(FileTreeEntry("src", str(src), True),),
+        )
+    )
+
+    assert calls == ["begin", ("end", False)]
+
+
+def test_files_tree_snapshot_apply_restores_updates_after_failure(qapp, workspace, monkeypatch):
+    tree = FileTree(str(workspace), defer_git_status=True)
+    src = workspace / "src"
+    calls = []
+
+    monkeypatch.setattr(tree, "_begin_tree_update_batch", lambda: calls.append("begin") or True)
+    monkeypatch.setattr(tree, "_end_tree_update_batch", lambda enabled: calls.append(("end", enabled)))
+
+    def fail_fill(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(tree, "_fill_from_snapshot", fail_fill)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        tree._apply_snapshot(
+            FileTreeSnapshot(
+                root_path=str(workspace),
+                filter_text="",
+                entries=(FileTreeEntry("src", str(src), True),),
+            )
+        )
+
+    assert calls == ["begin", ("end", True)]
+
+
+def test_files_tree_children_apply_batches_updates(qapp, workspace, monkeypatch):
+    tree = FileTree(str(workspace), defer_git_status=True)
+    src = workspace / "src"
+    child = src / "main.py"
+    tree._apply_snapshot(
+        FileTreeSnapshot(
+            root_path=str(workspace),
+            filter_text="",
+            entries=(FileTreeEntry("src", str(src), True),),
+        )
+    )
+    src_item = tree.topLevelItem(0)
+    src_item.setData(0, _LOAD_GENERATION_ROLE, 9)
+    calls = []
+
+    monkeypatch.setattr(tree, "_begin_tree_update_batch", lambda: calls.append("begin") or True)
+    monkeypatch.setattr(tree, "_end_tree_update_batch", lambda enabled: calls.append(("end", enabled)))
+
+    tree._apply_children_snapshot(
+        9,
+        str(src),
+        FileTreeSnapshot(
+            root_path=str(src),
+            filter_text="",
+            entries=(FileTreeEntry("main.py", str(child), False),),
+        ),
+    )
+
+    assert calls == ["begin", ("end", True)]
+
+
+def test_files_tree_git_timer_refreshes_decorations_without_rebuilding_tree(qapp, workspace, monkeypatch):
+    import ui.widgets.left_panel as left_panel
+
+    tree = FileTree(str(workspace), defer_git_status=True)
+    refresh_calls = []
+    loaded_changes = []
+    decorated = []
+
+    class FakeSignal:
+        def __init__(self):
+            self._callbacks = []
+
+        def connect(self, callback):
+            self._callbacks.append(callback)
+
+        def emit(self, *args):
+            for callback in list(self._callbacks):
+                callback(*args)
+
+    class FakeThread:
+        def __init__(self, generation, root_path, parent=None):
+            self.done = FakeSignal()
+            self.finished = FakeSignal()
+            self.generation = generation
+            self.root_path = root_path
+            self.parent = parent
+
+        def start(self):
+            self.done.emit(self.generation, ["change"])
+            self.finished.emit()
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(left_panel, "_FileTreeGitStatusThread", FakeThread)
+    monkeypatch.setattr(tree, "_request_refresh", lambda **_kwargs: refresh_calls.append(True))
+    monkeypatch.setattr(tree, "_load_git_status", lambda changes=None: loaded_changes.append(changes))
+    monkeypatch.setattr(tree, "_update_git_labels", lambda: decorated.append("labels"))
+    monkeypatch.setattr(tree, "_apply_decorations", lambda *args: decorated.append("decorations"))
+
+    tree._refresh_git_status()
+
+    assert refresh_calls == []
+    assert loaded_changes == [["change"]]
+    assert decorated == ["labels", "decorations"]
+    assert tree._git_status_threads == []
+
+
+def test_files_tree_ignores_stale_git_status_results(qapp, workspace, monkeypatch):
+    tree = FileTree(str(workspace), defer_git_status=True)
+    loaded_changes = []
+    monkeypatch.setattr(tree, "_refresh_git_status", lambda changes=None: loaded_changes.append(changes))
+    tree._git_status_generation = 2
+
+    tree._apply_git_status_result(1, ["old"])
+    tree._apply_git_status_result(2, ["current"])
+
+    assert loaded_changes == [["current"]]
+
+
+def test_files_tree_children_apply_decorates_loaded_subtree_only(qapp, workspace, monkeypatch):
+    tree = FileTree(str(workspace), defer_git_status=True)
+    src = workspace / "src"
+    docs = workspace / "docs"
+    docs.mkdir()
+    child = src / "main.py"
+    tree._apply_snapshot(
+        FileTreeSnapshot(
+            root_path=str(workspace),
+            filter_text="",
+            entries=(
+                FileTreeEntry("src", str(src), True),
+                FileTreeEntry("docs", str(docs), True),
+            ),
+        )
+    )
+    src_item = tree._find_child_for_path(tree.invisibleRootItem(), str(src))
+    docs_item = tree._find_child_for_path(tree.invisibleRootItem(), str(docs))
+    assert src_item is not None
+    assert docs_item is not None
+    src_item.setData(0, _LOAD_GENERATION_ROLE, 4)
+    decorated = []
+
+    def fake_apply_icon(_item, path, **_kwargs):
+        decorated.append(path)
+
+    monkeypatch.setattr(tree, "_apply_item_icon", fake_apply_icon)
+
+    tree._apply_children_snapshot(
+        4,
+        str(src),
+        FileTreeSnapshot(
+            root_path=str(src),
+            filter_text="",
+            entries=(FileTreeEntry("main.py", str(child), False),),
+        ),
+    )
+
+    assert str(src) in decorated
+    assert str(child) in decorated
+    assert str(docs) not in decorated
+
+
+def test_files_tree_children_apply_uses_snapshot_entry_types(qapp, workspace, monkeypatch):
+    import ui.widgets.left_panel as left_panel
+
+    tree = FileTree(str(workspace), defer_git_status=True)
+    src = workspace / "src"
+    child = src / "main.py"
+    tree._apply_snapshot(
+        FileTreeSnapshot(
+            root_path=str(workspace),
+            filter_text="",
+            entries=(FileTreeEntry("src", str(src), True),),
+        )
+    )
+    src_item = tree.topLevelItem(0)
+    assert src_item.data(0, _IS_DIR_ROLE) is True
+    src_item.setData(0, _LOAD_GENERATION_ROLE, 5)
+
+    def fail_isdir(path):
+        if str(path) in {str(src), str(child)}:
+            raise AssertionError(f"unexpected isdir stat: {path}")
+        return False
+
+    def fail_isfile(path):
+        if str(path) in {str(src), str(child)}:
+            raise AssertionError(f"unexpected isfile stat: {path}")
+        return False
+
+    monkeypatch.setattr(left_panel.os.path, "isdir", fail_isdir)
+    monkeypatch.setattr(left_panel.os.path, "isfile", fail_isfile)
+
+    tree._apply_children_snapshot(
+        5,
+        str(src),
+        FileTreeSnapshot(
+            root_path=str(src),
+            filter_text="",
+            entries=(FileTreeEntry("main.py", str(child), False),),
+        ),
+    )
+
+    child_item = src_item.child(0)
+    assert child_item.data(0, _IS_DIR_ROLE) is False
+    assert child_item.text(0) == "main.py"
 
 
 def test_files_tree_registers_keyboard_shortcuts(qapp, workspace):

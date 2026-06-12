@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -70,7 +71,7 @@ def build_workspace_snapshot(
             root=str(root_path),
             name=root_path.name or str(root_path),
             agents_exists=agents_path.is_file(),
-            agents_text=_read_text(agents_path, limit=None) if agents_path.is_file() else "",
+            agents_text=_read_text(agents_path) if agents_path.is_file() else "",
             skills_count=_skill_count(root_path),
             extensions_count=_extension_count(root_path),
             git_repo=git_snapshot.is_repo,
@@ -112,14 +113,14 @@ def _recent_chats(root: Path) -> tuple[RecentChat, ...]:
 
 
 def _recent_workspaces(root: Path) -> tuple[RecentWorkspace, ...]:
-    current_key = str(root).casefold()
+    current_key = os.path.normcase(os.path.abspath(str(root)))
     rows = []
     for row in list_workspaces():
         path = str(row.get("path") or "")
         if not path:
             continue
-        resolved = str(Path(path).resolve())
-        if resolved.casefold() == current_key:
+        path_key = os.path.normcase(os.path.abspath(path))
+        if path_key == current_key:
             continue
         rows.append(
             RecentWorkspace(
@@ -140,9 +141,9 @@ def _first_existing(root: Path, names: tuple[str, ...]) -> Path | None:
     return None
 
 
-def _read_text(path: Path, limit: int | None = PREVIEW_LIMIT) -> str:
-    text = path.read_text(encoding="utf-8", errors="replace")
-    return text if limit is None else text[:limit]
+def _read_text(path: Path, limit: int = PREVIEW_LIMIT) -> str:
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        return handle.read(limit)
 
 
 def _extension_count(root: Path) -> int:
@@ -164,8 +165,10 @@ def _skill_count(root: Path) -> int:
     skills_dir = root / ".aichs" / "skills"
     if not skills_dir.is_dir():
         return 0
-    return sum(
-        1
-        for child in skills_dir.glob("*.md")
-        if child.is_file() and not child.name.startswith(".")
-    )
+    count = 0
+    for child in skills_dir.iterdir():
+        if child.name.startswith("."):
+            continue
+        if child.suffix == ".md" and child.is_file():
+            count += 1
+    return count

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, pyqtSignal, QSize, QPointF
+from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -14,8 +15,10 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QMenu,
     QPushButton,
     QScrollArea,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -23,7 +26,11 @@ from PyQt6.QtWidgets import (
 from services.extension_installer import (
     ExtensionInstallCandidate,
     ExtensionInstallSource,
+    ExistingExtensionInstall,
     cleanup_extension_install_source,
+    format_commit_date,
+    format_install_timestamp,
+    install_conflicts,
     install_extension_candidates,
     prepare_extension_install_source,
 )
@@ -34,6 +41,7 @@ from services.tool_registry import (
     set_extension_enabled,
 )
 from ui.theme import (
+    ACCENT,
     checkbox_style,
     chat_font_pt,
     compact_combo_box_style,
@@ -42,6 +50,8 @@ from ui.theme import (
     form_field_style,
     hint_label_style,
     icon_button_style,
+    accent_icon_button_style,
+    bordered_icon_button_style,
     extension_detail_name_style,
     extension_detail_table_frame_style,
     extension_detail_value_style,
@@ -50,12 +60,21 @@ from ui.theme import (
     extension_list_name_style,
     extension_list_row_style,
     extension_panel_heading_style,
+    menu_style,
     meta_font_pt,
     palette,
-    section_label_style,
     status_pill_style,
     transparent_scroll_area_style,
     title_label_style,
+)
+
+
+_STATUS_FILTER_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("All", "all"),
+    ("Enabled", "enabled"),
+    ("Disabled", "disabled"),
+    ("Needs review", "review"),
+    ("Has errors", "errors"),
 )
 
 
@@ -91,6 +110,8 @@ class ExtensionsDialog(QDialog):
         self._overview = ExtensionOverview(files=[]) if self._cwd else overview_or_cwd
         self._on_reload = on_reload
         self._selected_path = ""
+        self._filter_query = ""
+        self._status_filter = "all"
         self._overview_generation = 0
         self._overview_pool = QThreadPool.globalInstance()
         self._pending_enable_warning_path = ""
@@ -98,7 +119,7 @@ class ExtensionsDialog(QDialog):
         self.resize(900, 620)
 
         self.setStyleSheet(dialog_shell_style() + transparent_scroll_area_style())
-        p = palette()
+        palette()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
@@ -113,17 +134,22 @@ class ExtensionsDialog(QDialog):
         title_row.addWidget(title)
         title_row.addStretch()
 
-        add_btn = QPushButton("Add")
-        add_btn.setToolTip("Install extensions from a git URL")
-        add_btn.clicked.connect(self._install_extensions)
-        title_row.addWidget(add_btn)
-
         reload_btn = QPushButton("↻")
         reload_btn.setToolTip("Reload extensions")
         reload_btn.setFixedSize(30, 30)
         reload_btn.setStyleSheet(icon_button_style(30))
         reload_btn.clicked.connect(self._reload)
         title_row.addWidget(reload_btn)
+
+        add_btn = QPushButton("")
+        add_btn.setToolTip("Install extensions from a git URL")
+        add_btn.setFixedSize(30, 30)
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.setIcon(_extensions_add_icon())
+        add_btn.setIconSize(QSize(14, 14))
+        add_btn.setStyleSheet(accent_icon_button_style(30))
+        add_btn.clicked.connect(self._install_extensions)
+        title_row.addWidget(add_btn)
         root.addLayout(title_row)
 
         self._summary = QLabel()
@@ -135,6 +161,43 @@ class ExtensionsDialog(QDialog):
         content.setSpacing(14)
         root.addLayout(content, 1)
 
+        list_column = QVBoxLayout()
+        list_column.setContentsMargins(0, 0, 0, 0)
+        list_column.setSpacing(8)
+
+        list_toolbar = QHBoxLayout()
+        list_toolbar.setContentsMargins(0, 0, 0, 0)
+        list_toolbar.setSpacing(6)
+
+        self._filter_edit = QLineEdit()
+        self._filter_edit.setPlaceholderText("Filter extensions")
+        self._filter_edit.setClearButtonEnabled(True)
+        self._filter_edit.setStyleSheet(_filter_field_style())
+        self._filter_edit.textChanged.connect(self._on_filter_changed)
+        list_toolbar.addWidget(self._filter_edit, 1)
+
+        self._status_filter_btn = QToolButton()
+        self._status_filter_btn.setText("▾")
+        self._status_filter_btn.setFixedSize(28, 28)
+        self._status_filter_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._status_filter_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._status_menu = QMenu(self)
+        self._status_menu.setStyleSheet(menu_style())
+        self._status_actions: dict[str, QAction] = {}
+        for label, value in _STATUS_FILTER_OPTIONS:
+            action = self._status_menu.addAction(label)
+            action.setCheckable(True)
+            action.setData(value)
+            action.triggered.connect(
+                lambda _checked, filter_value=value: self._set_status_filter(filter_value)
+            )
+            self._status_actions[value] = action
+        self._status_actions["all"].setChecked(True)
+        self._status_filter_btn.setMenu(self._status_menu)
+        list_toolbar.addWidget(self._status_filter_btn)
+        self._sync_status_filter_button()
+        list_column.addLayout(list_toolbar)
+
         self._list_scroll = QScrollArea()
         self._list_scroll.setWidgetResizable(True)
         self._list_scroll.setFixedWidth(330)
@@ -144,7 +207,12 @@ class ExtensionsDialog(QDialog):
         self._list_layout.setContentsMargins(0, 0, 0, 0)
         self._list_layout.setSpacing(1)
         self._list_scroll.setWidget(self._list_body)
-        content.addWidget(self._list_scroll)
+        list_column.addWidget(self._list_scroll, 1)
+
+        list_wrap = QWidget()
+        list_wrap.setFixedWidth(330)
+        list_wrap.setLayout(list_column)
+        content.addWidget(list_wrap)
 
         self._detail_scroll = QScrollArea()
         self._detail_scroll.setWidgetResizable(True)
@@ -219,6 +287,33 @@ class ExtensionsDialog(QDialog):
                 self._show_placeholder()
             return
 
+    def _on_filter_changed(self, *_args) -> None:
+        self._filter_query = self._filter_edit.text().strip()
+        self._render()
+
+    def _set_status_filter(self, value: str) -> None:
+        self._status_filter = value or "all"
+        for filter_value, action in self._status_actions.items():
+            action.setChecked(filter_value == self._status_filter)
+        self._sync_status_filter_button()
+        self._render()
+
+    def _sync_status_filter_button(self) -> None:
+        labels = {value: label for label, value in _STATUS_FILTER_OPTIONS}
+        label = labels.get(self._status_filter, "All")
+        active = self._status_filter != "all"
+        self._status_filter_btn.setToolTip(
+            f"Status filter: {label}" if active else "Filter by status"
+        )
+        p = palette()
+        self._status_filter_btn.setStyleSheet(
+            bordered_icon_button_style(
+                size_px=28,
+                text_color=ACCENT if active else p["TEXT_DIM"],
+                border_color=ACCENT if active else p["BORDER"],
+            )
+        )
+
     def _install_extensions(self) -> None:
         dialog = ExtensionInstallDialog(self._cwd, parent=self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -226,24 +321,35 @@ class ExtensionsDialog(QDialog):
 
     def _render(self):
         overview = self._overview
-        self._summary.setText(_summary_text(overview))
+        visible_files = _filter_extensions(
+            overview.files,
+            query=self._filter_query,
+            status=self._status_filter,
+        )
+        self._summary.setText(_summary_text(overview, visible_count=len(visible_files)))
         _clear_layout(self._list_layout)
         if overview.files:
             selected = _find_file(overview, self._selected_path) if self._selected_path else None
-            if self._selected_path and selected is None:
+            if selected and selected not in visible_files:
+                selected = visible_files[0] if visible_files else None
+                self._selected_path = selected.path if selected else ""
+            elif self._selected_path and selected is None:
                 self._selected_path = ""
-            if not self._selected_path:
-                selected = overview.files[0]
+            if not self._selected_path and visible_files:
+                selected = visible_files[0]
                 self._selected_path = selected.path
-            for file in overview.files:
-                row = _ExtensionListRow(
-                    file,
-                    selected=file.path == self._selected_path,
-                    on_toggle=self._set_enabled,
-                    on_select=self._show_file_detail,
-                )
-                self._list_layout.addWidget(row)
-            if selected:
+            if visible_files:
+                for file in visible_files:
+                    row = _ExtensionListRow(
+                        file,
+                        selected=file.path == self._selected_path,
+                        on_toggle=self._set_enabled,
+                        on_select=self._show_file_detail,
+                    )
+                    self._list_layout.addWidget(row)
+            else:
+                self._list_layout.addWidget(_FilteredEmptyList())
+            if selected and selected in visible_files:
                 self._detail_scroll.setWidget(_ExtensionDetailPane(selected, on_toggle=self._set_enabled))
             else:
                 self._show_placeholder()
@@ -356,6 +462,9 @@ class ExtensionInstallDialog(QDialog):
         self._cwd = cwd
         self._source: ExtensionInstallSource | None = None
         self._candidate_checks: list[tuple[QCheckBox, ExtensionInstallCandidate]] = []
+        self._candidate_filter = ""
+        self._all_candidates: list[ExtensionInstallCandidate] = []
+        self._conflicts: dict[str, ExistingExtensionInstall] = {}
         self._fetch_generation = 0
         self._fetch_active = False
         self._install_generation = 0
@@ -375,10 +484,6 @@ class ExtensionInstallDialog(QDialog):
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(10)
 
-        title = QLabel("Add Extensions")
-        title.setStyleSheet(title_label_style(font_weight="600"))
-        root.addWidget(title)
-
         source_row = QHBoxLayout()
         source_row.setContentsMargins(0, 0, 0, 0)
         source_row.setSpacing(8)
@@ -391,9 +496,9 @@ class ExtensionInstallDialog(QDialog):
         source_row.addWidget(self.fetch_btn)
         root.addLayout(source_row)
 
-        scope_row = QHBoxLayout()
-        scope_row.setContentsMargins(0, 0, 0, 0)
-        scope_row.setSpacing(8)
+        controls_row = QHBoxLayout()
+        controls_row.setContentsMargins(0, 0, 0, 0)
+        controls_row.setSpacing(8)
         scope_label = QLabel("Install to")
         scope_label.setStyleSheet(hint_label_style())
         self.scope_combo = QComboBox()
@@ -402,34 +507,81 @@ class ExtensionInstallDialog(QDialog):
         self.scope_combo.setStyleSheet(_install_scope_combo_style())
         if not self._cwd:
             self.scope_combo.setCurrentIndex(1)
-        scope_row.addWidget(scope_label)
-        scope_row.addWidget(self.scope_combo)
-        scope_row.addStretch()
-        root.addLayout(scope_row)
+        controls_row.addWidget(scope_label)
+        controls_row.addWidget(self.scope_combo)
+        controls_row.addStretch()
+        self._select_all_btn = QPushButton("Select all")
+        self._select_all_btn.setStyleSheet(_install_toolbar_button_style())
+        self._select_all_btn.clicked.connect(lambda: self._set_all_candidates(True))
+        controls_row.addWidget(self._select_all_btn)
+        self._deselect_all_btn = QPushButton("Deselect all")
+        self._deselect_all_btn.setStyleSheet(_install_toolbar_button_style())
+        self._deselect_all_btn.clicked.connect(lambda: self._set_all_candidates(False))
+        controls_row.addWidget(self._deselect_all_btn)
+        root.addLayout(controls_row)
+        self.scope_combo.currentIndexChanged.connect(self._on_install_scope_changed)
 
         self.status_label = QLabel("Fetch a git source to choose extensions.")
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet(hint_label_style())
         root.addWidget(self.status_label)
 
+        self._candidate_filter_edit = QLineEdit()
+        self._candidate_filter_edit.setPlaceholderText("Filter extensions")
+        self._candidate_filter_edit.setClearButtonEnabled(True)
+        self._candidate_filter_edit.setStyleSheet(_filter_field_style())
+        self._candidate_filter_edit.textChanged.connect(self._on_candidate_filter_changed)
+        root.addWidget(self._candidate_filter_edit)
+
         self.candidate_scroll = QScrollArea()
         self.candidate_scroll.setWidgetResizable(True)
         self.candidate_body = QWidget()
         self.candidate_layout = QVBoxLayout(self.candidate_body)
-        self.candidate_layout.setContentsMargins(10, 10, 10, 10)
-        self.candidate_layout.setSpacing(8)
+        self.candidate_layout.setContentsMargins(0, 0, 0, 0)
+        self.candidate_layout.setSpacing(1)
         self.candidate_scroll.setWidget(self.candidate_body)
         root.addWidget(self.candidate_scroll, 1)
         self._set_candidates([])
 
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.setSpacing(8)
+        self._selection_label = QLabel("")
+        self._selection_label.setStyleSheet(hint_label_style())
+        footer.addWidget(self._selection_label)
+        footer.addStretch()
         buttons = QDialogButtonBox()
         buttons.setStyleSheet(dialog_button_box_style())
-        self.install_btn = buttons.addButton("Install", QDialogButtonBox.ButtonRole.AcceptRole)
+        self.install_btn = buttons.addButton("Install selected", QDialogButtonBox.ButtonRole.AcceptRole)
         self.install_btn.setEnabled(False)
         cancel = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
         self.install_btn.clicked.connect(self._install)
         cancel.clicked.connect(self.reject)
-        root.addWidget(buttons)
+        footer.addWidget(buttons)
+        root.addLayout(footer)
+        self._sync_list_controls_visible(False)
+
+    def _sync_list_controls_visible(self, visible: bool) -> None:
+        self._candidate_filter_edit.setVisible(visible)
+        self._select_all_btn.setVisible(visible)
+        self._deselect_all_btn.setVisible(visible)
+
+    def _set_all_candidates(self, checked: bool) -> None:
+        for checkbox, _candidate in self._candidate_checks:
+            if not checkbox.isEnabled():
+                continue
+            checkbox.blockSignals(True)
+            checkbox.setChecked(checked)
+            checkbox.blockSignals(False)
+        self._sync_install_enabled()
+
+    def _on_candidate_filter_changed(self, text: str) -> None:
+        self._candidate_filter = text.strip()
+        self._set_candidates(self._all_candidates)
+
+    def _on_install_scope_changed(self, *_args) -> None:
+        if self._all_candidates:
+            self._set_candidates(self._all_candidates)
 
     def reject(self) -> None:
         if self._fetch_active:
@@ -491,11 +643,7 @@ class ExtensionInstallDialog(QDialog):
         self._source = source if isinstance(source, ExtensionInstallSource) else None
         candidates = self._source.candidates if self._source else []
         self._set_candidates(candidates)
-        count = len(candidates)
-        if count:
-            noun = "extension" if count == 1 else "extensions"
-            self._set_status(f"Found {count} installable {noun}.")
-        else:
+        if not candidates:
             self._set_status("No extension.py or root .py extensions found.", danger=True)
         self.fetch_btn.setEnabled(True)
 
@@ -540,6 +688,29 @@ class ExtensionInstallDialog(QDialog):
         )
         self.accept()
 
+    def _current_scope(self) -> str:
+        return str(self.scope_combo.currentData() or "local")
+
+    def _refresh_conflicts(self) -> None:
+        if not self._all_candidates:
+            self._conflicts = {}
+            return
+        self._conflicts = install_conflicts(
+            self._all_candidates,
+            scope=self._current_scope(),
+            cwd=self._cwd or None,
+        )
+
+    def _current_conflicts(self) -> dict[str, ExistingExtensionInstall]:
+        return dict(self._conflicts)
+
+    def _replacing_conflicts(self) -> dict[str, ExistingExtensionInstall]:
+        return {
+            name: conflict
+            for name, conflict in self._current_conflicts().items()
+            if conflict.replaces_target
+        }
+
     def selected_candidates(self) -> list[ExtensionInstallCandidate]:
         return [
             candidate
@@ -548,38 +719,205 @@ class ExtensionInstallDialog(QDialog):
         ]
 
     def _set_candidates(self, candidates: list[ExtensionInstallCandidate]) -> None:
+        self._all_candidates = list(candidates)
+        self._refresh_conflicts()
+        visible = _filter_install_candidates(candidates, self._candidate_filter)
+        conflicts = self._conflicts
         _clear_layout(self.candidate_layout)
         self._candidate_checks = []
+        self._sync_list_controls_visible(bool(candidates))
         if not candidates:
             empty = QLabel("No extensions discovered yet.")
             empty.setStyleSheet(hint_label_style())
             self.candidate_layout.addWidget(empty)
             self.candidate_layout.addStretch()
             self.install_btn.setEnabled(False) if hasattr(self, "install_btn") else None
+            self._sync_install_button_label(False)
+            self._sync_selection_label(0)
             return
-        for candidate in candidates:
-            checkbox = QCheckBox(_candidate_label(candidate))
-            checkbox.setToolTip(_candidate_disclosure(candidate))
-            checkbox.setChecked(True)
-            checkbox.setStyleSheet(_enabled_checkbox_style())
-            checkbox.toggled.connect(lambda _checked: self._sync_install_enabled())
-            self.candidate_layout.addWidget(checkbox)
-            disclosure = QLabel(_candidate_disclosure(candidate))
-            disclosure.setWordWrap(True)
-            disclosure.setStyleSheet(_list_path_style())
-            self.candidate_layout.addWidget(disclosure)
-            self._candidate_checks.append((checkbox, candidate))
+        if not visible:
+            empty = QLabel("No extensions match the filter.")
+            empty.setStyleSheet(hint_label_style())
+            self.candidate_layout.addWidget(empty)
+            self.candidate_layout.addStretch()
+            self._sync_install_enabled()
+            self._sync_all_installed_summary()
+            return
+        replacing = False
+        for candidate in visible:
+            conflict = conflicts.get(candidate.name)
+            row = _InstallCandidateRow(
+                candidate,
+                conflict=conflict,
+                source=self._source,
+                install_scope=self._current_scope(),
+            )
+            row.checkbox.toggled.connect(lambda _checked: self._sync_install_enabled())
+            self.candidate_layout.addWidget(row)
+            self._candidate_checks.append((row.checkbox, candidate))
+            if conflict is not None and conflict.replaces_target and row.checkbox.isChecked():
+                replacing = True
         self.candidate_layout.addStretch()
         self._sync_install_enabled()
+        self._sync_install_button_label(replacing)
+        self._sync_all_installed_summary()
+
+    def _candidate_is_already_installed(self, candidate: ExtensionInstallCandidate) -> bool:
+        conflict = self._conflicts.get(candidate.name)
+        return conflict is not None and conflict.same_content
+
+    def _all_candidates_already_installed(self) -> bool:
+        return bool(self._all_candidates) and all(
+            self._candidate_is_already_installed(candidate)
+            for candidate in self._all_candidates
+        )
+
+    def _sync_all_installed_summary(self) -> None:
+        if not hasattr(self, "status_label"):
+            return
+        if self._fetch_active or self._install_active:
+            return
+        if self._all_candidates_already_installed():
+            count = len(self._all_candidates)
+            if count == 1:
+                text = "This extension is already installed."
+            else:
+                text = f"All {count} extensions are already installed."
+            self._set_status(text)
+        elif self._all_candidates:
+            self._set_status("")
 
     def _sync_install_enabled(self) -> None:
         if hasattr(self, "install_btn"):
-            self.install_btn.setEnabled(bool(self.selected_candidates()))
+            selected = self.selected_candidates()
+            self.install_btn.setEnabled(bool(selected))
+            replacing = any(
+                candidate.name in self._replacing_conflicts()
+                for candidate in selected
+            )
+            self._sync_install_button_label(replacing)
+            self._sync_selection_label(len(selected))
+
+    def _selectable_candidate_count(self) -> int:
+        return sum(
+            1 for checkbox, _candidate in self._candidate_checks if checkbox.isEnabled()
+        )
+
+    def _sync_selection_label(self, selected_count: int) -> None:
+        if not hasattr(self, "_selection_label"):
+            return
+        if not self._candidate_checks:
+            self._selection_label.setText("")
+            return
+        selectable = self._selectable_candidate_count()
+        if selectable == 0:
+            if self._all_candidates_already_installed():
+                count = len(self._all_candidates)
+                if count == 1:
+                    self._selection_label.setText("Already installed")
+                else:
+                    self._selection_label.setText(
+                        f"All {count} extensions already installed"
+                    )
+            elif self._candidate_checks:
+                visible = len(self._candidate_checks)
+                suffix = "s" if visible != 1 else ""
+                self._selection_label.setText(
+                    f"All {visible} visible extension{suffix} already installed"
+                )
+            else:
+                self._selection_label.setText("")
+            return
+        if selected_count == 0:
+            self._selection_label.setText("None selected")
+            return
+        self._selection_label.setText(f"{selected_count} of {selectable} selected")
+
+    def _sync_install_button_label(self, replacing: bool) -> None:
+        if not hasattr(self, "install_btn"):
+            return
+        self.install_btn.setText("Replace selected" if replacing else "Install selected")
 
     def _set_status(self, text: str, *, danger: bool = False) -> None:
         color = "#f87171" if danger else palette()["TEXT_DIM"]
+        self.status_label.setVisible(bool(text))
         self.status_label.setText(text)
         self.status_label.setStyleSheet(hint_label_style(text_color=color))
+
+
+class _InstallCandidateRow(QFrame):
+    def __init__(
+        self,
+        candidate: ExtensionInstallCandidate,
+        *,
+        conflict: ExistingExtensionInstall | None,
+        source: ExtensionInstallSource | None,
+        install_scope: str = "local",
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.checkbox = QCheckBox("")
+        already_installed = conflict is not None and conflict.same_content
+        self.checkbox.setChecked(conflict is None and not already_installed)
+        tooltip = _candidate_disclosure(
+            candidate,
+            conflict=conflict,
+            source=source,
+            install_scope=install_scope,
+        )
+        self.setToolTip(tooltip)
+        self.checkbox.setToolTip(tooltip)
+        if already_installed:
+            self.checkbox.setEnabled(False)
+            self.checkbox.setStyleSheet(_disabled_checkbox_style())
+        else:
+            self.checkbox.setStyleSheet(_enabled_checkbox_style())
+
+        self.setObjectName("installCandidateRow")
+        elsewhere = (
+            conflict is not None
+            and not conflict.replaces_target
+            and not conflict.same_content
+        )
+        self.setStyleSheet(_install_candidate_row_style(elsewhere=elsewhere))
+
+        grid = QGridLayout(self)
+        grid.setContentsMargins(10, 8, 10, 8)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
+
+        name = QLabel(_candidate_display_name(candidate))
+        name.setWordWrap(True)
+        name.setStyleSheet(
+            hint_label_style() if already_installed else _list_name_style()
+        )
+        grid.addWidget(self.checkbox, 0, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(name, 0, 1)
+
+        next_row = 1
+        if candidate.description:
+            description = QLabel(candidate.description)
+            description.setWordWrap(True)
+            description.setStyleSheet(hint_label_style())
+            grid.addWidget(description, next_row, 1)
+            next_row += 1
+
+        if conflict is not None:
+            notice = QLabel(_install_conflict_notice_text(
+                candidate,
+                conflict,
+                source,
+                install_scope,
+            ))
+            notice.setWordWrap(True)
+            if conflict.same_content:
+                notice.setStyleSheet(hint_label_style())
+            else:
+                notice.setStyleSheet(_install_conflict_notice_style())
+            grid.addWidget(notice, next_row, 1)
+            next_row += 1
+
+        grid.setColumnStretch(1, 1)
 
 
 class _ExtensionListRow(QFrame):
@@ -780,10 +1118,21 @@ class _ExtensionDetailPane(QWidget):
         root.addWidget(label)
 
 
+class _FilteredEmptyList(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        label = QLabel("No extensions match the filter.")
+        label.setStyleSheet(hint_label_style())
+        layout.addWidget(label)
+        layout.addStretch()
+
+
 class _EmptyList(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        p = palette()
+        palette()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         label = QLabel("No extension files found.")
@@ -795,7 +1144,7 @@ class _EmptyList(QWidget):
 class _PlaceholderPane(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        p = palette()
+        palette()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addStretch()
@@ -846,16 +1195,100 @@ def _add_detail_section(
     layout.addWidget(table)
 
 
-def _summary_text(overview: ExtensionOverview) -> str:
+def _extensions_add_icon(*, size: int = 14, color: str = "#ffffff") -> QIcon:
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color))
+    pen.setWidthF(max(2.0, size / 7.0))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    center = size / 2.0
+    arm = size * 0.28
+    painter.drawLine(QPointF(center - arm, center), QPointF(center + arm, center))
+    painter.drawLine(QPointF(center, center - arm), QPointF(center, center + arm))
+    painter.end()
+    return QIcon(pix)
+
+
+def _summary_text(overview: ExtensionOverview, *, visible_count: int | None = None) -> str:
     count = len(overview.files)
     noun = "file" if count == 1 else "files"
     errors = overview.error_count
     disabled = sum(1 for file in overview.files if file.status == "Disabled")
-    parts = [f"{count} extension {noun}"]
+    if visible_count is not None and visible_count != count:
+        parts = [f"{visible_count} of {count} extension {noun}"]
+    else:
+        parts = [f"{count} extension {noun}"]
     parts.append(f"{errors} error(s)" if errors else "no errors")
     if disabled:
         parts.append(f"{disabled} disabled")
     return " · ".join(parts)
+
+
+def _extension_search_text(file: ExtensionFileSummary) -> str:
+    parts = [
+        _extension_name(file),
+        file.path,
+        file.description,
+        file.status,
+        _list_status_text(file),
+        _list_subtitle(file),
+    ]
+    return " ".join(part.lower() for part in parts if part)
+
+
+def _filter_extensions(
+    files: list[ExtensionFileSummary],
+    *,
+    query: str = "",
+    status: str = "all",
+) -> list[ExtensionFileSummary]:
+    visible = list(files)
+    if status == "enabled":
+        visible = [file for file in visible if file.status != "Disabled"]
+    elif status == "disabled":
+        visible = [file for file in visible if file.status == "Disabled"]
+    elif status == "review":
+        visible = [file for file in visible if file.review_required]
+    elif status == "errors":
+        visible = [
+            file for file in visible
+            if file.errors or file.permission_violations
+        ]
+    query = query.strip().lower()
+    if query:
+        visible = [
+            file for file in visible
+            if query in _extension_search_text(file)
+        ]
+    return visible
+
+
+def _candidate_search_text(candidate: ExtensionInstallCandidate) -> str:
+    parts = [
+        candidate.name,
+        candidate.display_name,
+        candidate.kind,
+        candidate.description,
+        str(candidate.source_path),
+        _permissions_text(candidate.permissions),
+    ]
+    return " ".join(str(part).lower() for part in parts if part)
+
+
+def _filter_install_candidates(
+    candidates: list[ExtensionInstallCandidate],
+    query: str,
+) -> list[ExtensionInstallCandidate]:
+    query = query.strip().lower()
+    if not query:
+        return list(candidates)
+    return [
+        candidate for candidate in candidates
+        if query in _candidate_search_text(candidate)
+    ]
 
 
 def _clear_layout(layout: QVBoxLayout) -> None:
@@ -897,19 +1330,98 @@ def _extension_name(file: ExtensionFileSummary) -> str:
     return Path(file.path).name
 
 
-def _candidate_label(candidate: ExtensionInstallCandidate) -> str:
-    details = [candidate.name, candidate.kind]
-    if candidate.description:
-        details.append(candidate.description)
-    return " · ".join(details)
+def _candidate_display_name(candidate: ExtensionInstallCandidate) -> str:
+    if candidate.display_name:
+        return candidate.display_name
+    return candidate.name
 
 
-def _candidate_disclosure(candidate: ExtensionInstallCandidate) -> str:
+def _install_conflict_notice_text(
+    candidate: ExtensionInstallCandidate,
+    conflict: ExistingExtensionInstall,
+    source: ExtensionInstallSource | None,
+    install_scope: str,
+) -> str:
+    del install_scope
+    if conflict.same_content:
+        return "Already installed"
+    return "\n".join([
+        _install_conflict_headline(conflict),
+        _install_conflict_timeline(candidate, conflict, source),
+    ])
+
+
+def _install_conflict_headline(conflict: ExistingExtensionInstall) -> str:
+    if conflict.scope == "global":
+        return "Already installed in global library"
+    if conflict.scope == "local":
+        return "Already installed in local library"
+    return "Already installed elsewhere"
+
+
+def _install_conflict_timeline(
+    candidate: ExtensionInstallCandidate,
+    conflict: ExistingExtensionInstall,
+    source: ExtensionInstallSource | None,
+) -> str:
+    current = format_install_timestamp(conflict.modified_at)
+    incoming_date = _incoming_commit_date(candidate, source)
+    incoming_commit = _incoming_commit_hash(candidate, source)
+    if incoming_commit:
+        return f"current: {current}. incoming: {incoming_date} ({incoming_commit})"
+    return f"current: {current}. incoming: {incoming_date}"
+
+
+def _incoming_commit_date(
+    candidate: ExtensionInstallCandidate,
+    source: ExtensionInstallSource | None,
+) -> str:
+    commit_date = candidate.source_commit_date or (source.commit_date if source else "")
+    if commit_date:
+        formatted = format_commit_date(commit_date)
+        if formatted:
+            return formatted
+    return "unknown"
+
+
+def _incoming_commit_hash(
+    candidate: ExtensionInstallCandidate,
+    source: ExtensionInstallSource | None,
+) -> str:
+    commit = candidate.source_commit or (source.commit_hash if source else "")
+    return commit[:12] if commit else ""
+
+
+def _install_conflict_hint(
+    conflict: ExistingExtensionInstall,
+    install_scope: str,
+) -> str:
+    del conflict, install_scope
+    return "Check to replace the installed extension."
+
+
+def _candidate_disclosure(
+    candidate: ExtensionInstallCandidate,
+    *,
+    conflict: ExistingExtensionInstall | None = None,
+    source: ExtensionInstallSource | None = None,
+    install_scope: str = "local",
+) -> str:
     parts = [
         "Runs local Python when enabled.",
         "Installs disabled until reviewed.",
         f"Permissions: {_permissions_text(candidate.permissions)}",
     ]
+    if conflict is not None:
+        parts.append(_install_conflict_notice_text(
+            candidate,
+            conflict,
+            source,
+            install_scope,
+        ))
+        if not conflict.same_content:
+            parts.append(_install_conflict_hint(conflict, install_scope))
+        parts.append(f"Installed at {conflict.path}")
     if candidate.requirements.executables or candidate.requirements.python:
         reqs = []
         if candidate.requirements.executables:
@@ -1082,7 +1594,51 @@ def _enabled_checkbox_style() -> str:
     return checkbox_style(font_pt=meta_font_pt(), indicator_px=14, spacing_px=6)
 
 
-def _install_scope_combo_style() -> str:
+def _disabled_checkbox_style() -> str:
+    p = palette()
+    return (
+        checkbox_style(
+            font_pt=meta_font_pt(),
+            indicator_px=14,
+            spacing_px=6,
+            text_color=p["TEXT_DIM"],
+        )
+        + f"QCheckBox:disabled {{ color: {p['TEXT_DIM']}; }}"
+    )
+
+
+def _install_conflict_notice_style() -> str:
+    return (
+        "color: #f87171; background-color: transparent; border: none; "
+        "border-top: 1px solid #5c2a2a; padding-top: 6px; margin-top: 2px;"
+    )
+
+
+def _install_candidate_row_style(*, elsewhere: bool = False) -> str:
+    p = palette()
+    bg = "#221a14" if elsewhere else "transparent"
+    return (
+        f"QFrame#installCandidateRow {{ background-color: {bg}; border: none; "
+        f"border-bottom: 1px solid {p['BORDER_SUBTLE']}; }}"
+        f"QFrame#installCandidateRow QLabel {{ background-color: transparent; border: none; }}"
+    )
+
+
+def _install_toolbar_button_style() -> str:
+    p = palette()
+    fs = meta_font_pt()
+    return (
+        f"QPushButton {{ background: transparent; border: none; color: {p['LINK']}; "
+        f"font-size: {fs}pt; padding: 4px 8px; }}"
+        f"QPushButton:hover {{ color: {p['TEXT']}; }}"
+    )
+
+
+def _filter_field_style() -> str:
+    return form_field_style(selector="QLineEdit", padding="7px 10px")
+
+
+def _toolbar_combo_style() -> str:
     p = palette()
     fs = meta_font_pt()
     return compact_combo_box_style(
@@ -1093,3 +1649,7 @@ def _install_scope_combo_style() -> str:
         popup_background=p["BG3"],
         popup_item_padding="5px 8px",
     )
+
+
+def _install_scope_combo_style() -> str:
+    return _toolbar_combo_style()

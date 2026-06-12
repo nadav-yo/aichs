@@ -1135,7 +1135,6 @@ def test_context_budget_worker_loads_settings_and_emits_budget(qapp, monkeypatch
 
 
 def test_slash_changed_queues_picker_load_without_sync_extension_scan(qapp, monkeypatch):
-    started = []
     calls = []
 
     class FakePicker:

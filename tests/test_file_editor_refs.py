@@ -1,5 +1,4 @@
 from services.file_editor_refs import (
-    AICHS_EDITOR_REF_MIME,
     MAX_EDITOR_REF_TEXT_CHARS,
     editor_ref_paths,
     editor_ref_payload,

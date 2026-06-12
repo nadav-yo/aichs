@@ -45,7 +45,7 @@ class _QueryInput(QLineEdit):
 class _ResultRow(QWidget):
     def __init__(self, item: PaletteItem, parent=None):
         super().__init__(parent)
-        p = palette()
+        palette()
         fs = chat_font_pt()
 
         layout = QVBoxLayout(self)

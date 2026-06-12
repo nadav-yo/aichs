@@ -61,7 +61,7 @@ class ExtensionPanelDialog(QDialog):
         self.setWindowTitle(title)
         self.resize(560, 520)
 
-        p = palette()
+        palette()
         self.setStyleSheet(dialog_shell_style() + transparent_scroll_area_style())
 
         root = QVBoxLayout(self)
@@ -124,7 +124,7 @@ class ExtensionPanelDialog(QDialog):
             self._add_item(item)
 
     def _add_item(self, item):
-        p = palette()
+        palette()
         card = QFrame()
         card.setObjectName("extensionPanelItem")
         card.setStyleSheet(surface_frame_style(selector="QFrame#extensionPanelItem"))
@@ -262,7 +262,7 @@ class ExtensionPanelDialog(QDialog):
         self._on_refresh = callback
 
     def _add_body(self, text: str):
-        p = palette()
+        palette()
         label = QLabel(text)
         label.setWordWrap(True)
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)

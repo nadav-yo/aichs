@@ -135,8 +135,8 @@ def test_yuk_export_package_worker_emits_export_result(qapp, monkeypatch):
     calls = []
     manifest = {"items": []}
 
-    def fake_export(path, cwd, selection):
-        calls.append((path, cwd, selection.selected_item_ids))
+    def fake_export(path, cwd, selection, *, cancelled=None):
+        calls.append((path, cwd, selection.selected_item_ids, cancelled()))
         return manifest
 
     monkeypatch.setattr("ui.widgets.settings_dialog.export_yuk", fake_export)
@@ -145,8 +145,27 @@ def test_yuk_export_package_worker_emits_export_result(qapp, monkeypatch):
 
     worker.run()
 
-    assert calls == [("C:/tmp/profile.yuk", "C:/repo", {"setting:system_prompt"})]
+    assert calls == [("C:/tmp/profile.yuk", "C:/repo", {"setting:system_prompt"}, False)]
     assert done == [(5, manifest, "")]
+
+
+def test_yuk_export_package_worker_can_cancel_export(qapp, monkeypatch):
+    done = []
+    calls = []
+
+    def fake_export(_path, _cwd, _selection, *, cancelled=None):
+        calls.append(cancelled())
+        raise RuntimeError("cancelled")
+
+    monkeypatch.setattr("ui.widgets.settings_dialog.export_yuk", fake_export)
+    worker = _YukExportPackageWorker(6, "C:/tmp/profile.yuk", "C:/repo", {"setting:system_prompt"})
+    worker.signals.done.connect(lambda *args: done.append(args))
+    worker.cancel()
+
+    worker.run()
+
+    assert calls == [True]
+    assert done == [(6, None, "cancelled")]
 
 
 def test_settings_yuk_export_starts_package_worker_without_exporting_on_ui_thread(
@@ -195,6 +214,35 @@ def test_settings_yuk_export_starts_package_worker_without_exporting_on_ui_threa
     assert dialog._yuk_export_btn.text() == "Exporting..."
     assert dialog._yuk_export_status.text() == "Exporting YUK package..."
     assert isinstance(started[0], _YukExportPackageWorker)
+
+
+def test_settings_close_cancels_active_yuk_export_without_waiting(qapp, workspace, tmp_path, monkeypatch):
+    store = SettingsStore()
+    store.save({"system_prompt": "Saved prompt."})
+    dialog = SettingsDialog(store, cwd=str(workspace))
+    dialog._ensure_page(dialog._page_ids.index("user_kit"))
+    started = []
+    waits = []
+    monkeypatch.setattr(
+        "ui.widgets.settings_dialog.QThreadPool.start",
+        lambda _pool, worker: started.append(worker),
+    )
+    monkeypatch.setattr(
+        "ui.widgets.settings_dialog.QThreadPool.waitForDone",
+        lambda *_args: waits.append("wait"),
+    )
+
+    dialog._start_yuk_export(str(tmp_path / "profile.yuk"), {"setting:system_prompt"})
+    worker = started[0]
+    generation = dialog._yuk_export_generation
+
+    dialog.closeEvent(QCloseEvent())
+
+    assert worker._cancel.is_set()
+    assert dialog._yuk_export_generation == generation + 1
+    assert dialog._yuk_export_worker is None
+    assert not dialog._yuk_export_active
+    assert waits == []
 
 
 def test_settings_yuk_export_done_updates_state_and_reports_result(qapp, workspace, monkeypatch):

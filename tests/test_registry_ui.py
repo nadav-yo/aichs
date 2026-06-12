@@ -1,9 +1,6 @@
 from services.tool_registry import (
-    ExtensionContext,
-    ToolRegistry,
     extension_panel_data,
     extension_status_badges,
-    load_extensions,
 )
 from ui.widgets.extension_panel_dialog import _is_supported_action
 from tests.conftest import write_extension

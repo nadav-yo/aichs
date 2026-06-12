@@ -1,6 +1,13 @@
+import json
 import threading
 
-from services.performance import MAX_RECENT_EVENTS, PerformanceRecorder, time_operation
+from services.performance import (
+    MAX_RECENT_EVENTS,
+    PerformanceOperationSummary,
+    PerformanceRecorder,
+    slowest_logged_operations,
+    time_operation,
+)
 
 
 def test_time_operation_records_slow_event(monkeypatch, tmp_path):
@@ -82,6 +89,107 @@ def test_performance_recorder_clear_and_recent_are_bounded(tmp_path):
     local.clear()
 
     assert local.recent() == []
+    assert local.slowest_operations() == []
+
+
+def test_performance_recorder_summarizes_slowest_operations(tmp_path):
+    local = PerformanceRecorder(tmp_path / "performance.log")
+    local.record("git.apply", 40, detail="changes=3")
+    local.record("workspace.apply", 75, detail="recent=12")
+    local.record("git.apply", 90, detail="changes=9")
+    local.record("markdown.render", 120.4567, detail="chars=5000")
+
+    summaries = local.slowest_operations(limit=2)
+
+    assert summaries == [
+        PerformanceOperationSummary(
+            operation="git.apply",
+            count=2,
+            total_ms=130.0,
+            max_ms=90.0,
+            avg_ms=65.0,
+            latest_detail="changes=9",
+            latest_at=summaries[0].latest_at,
+        ),
+        PerformanceOperationSummary(
+            operation="markdown.render",
+            count=1,
+            total_ms=120.457,
+            max_ms=120.457,
+            avg_ms=120.457,
+            latest_detail="chars=5000",
+            latest_at=summaries[1].latest_at,
+        ),
+    ]
+
+    assert local.slowest_operations(limit=0) == []
+
+
+def test_slowest_logged_operations_summarizes_bounded_log_tail(tmp_path):
+    log_path = tmp_path / "performance.log"
+    early = json.dumps({
+        "operation": "old.operation",
+        "elapsed_ms": 999,
+        "detail": "outside tail",
+        "created_at": "2026-01-01T00:00:00",
+    })
+    malformed = "{not json"
+    tail_lines = [
+        json.dumps({
+            "operation": "git.apply",
+            "elapsed_ms": 40,
+            "detail": "changes=3",
+            "created_at": "2026-01-01T00:00:01",
+        }),
+        json.dumps({
+            "operation": "git.apply",
+            "elapsed_ms": 60,
+            "detail": "changes=9",
+            "created_at": "2026-01-01T00:00:02",
+        }),
+        json.dumps({
+            "operation": "markdown.render",
+            "elapsed_ms": 90.1254,
+            "detail": "chars=5000",
+            "created_at": "2026-01-01T00:00:03",
+        }),
+    ]
+    tail = "\n".join(tail_lines) + "\n"
+    log_path.write_text(f"{early}\n{malformed}\n{tail}", encoding="utf-8")
+
+    summaries = slowest_logged_operations(
+        log_path,
+        limit=2,
+        max_bytes=len(tail) + 4,
+    )
+
+    assert summaries == [
+        PerformanceOperationSummary(
+            operation="git.apply",
+            count=2,
+            total_ms=100.0,
+            max_ms=60.0,
+            avg_ms=50.0,
+            latest_detail="changes=9",
+            latest_at="2026-01-01T00:00:02",
+        ),
+        PerformanceOperationSummary(
+            operation="markdown.render",
+            count=1,
+            total_ms=90.125,
+            max_ms=90.125,
+            avg_ms=90.125,
+            latest_detail="chars=5000",
+            latest_at="2026-01-01T00:00:03",
+        ),
+    ]
+
+
+def test_slowest_logged_operations_handles_missing_or_zero_window(tmp_path):
+    missing = tmp_path / "missing.log"
+
+    assert slowest_logged_operations(missing) == []
+    assert slowest_logged_operations(missing, max_bytes=0) == []
 
 
 def test_performance_recorder_close_flushes_writer(tmp_path):

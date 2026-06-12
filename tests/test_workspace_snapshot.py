@@ -1,6 +1,9 @@
 from services.git_snapshot import GitSnapshot
 from services.git_status import GitFileChange
 from services.workspace_snapshot import (
+    PREVIEW_LIMIT,
+    _recent_workspaces,
+    _skill_count,
     build_workspace_snapshot,
     display_chat_time,
     display_updated_at,
@@ -94,13 +97,63 @@ def test_workspace_snapshot_keeps_supplied_git_changes_compatibility(workspace, 
     assert snapshot.changed_count == 1
 
 
-def test_workspace_snapshot_reads_full_agents_text(workspace):
+def test_workspace_snapshot_bounds_agents_preview(workspace):
     long_agents = "Project instructions.\n" + ("keep this rule visible " * 1000)
     (workspace / "AGENTS.md").write_text(long_agents, encoding="utf-8")
 
     snapshot = build_workspace_snapshot(str(workspace))
 
-    assert snapshot.agents_text == long_agents
+    assert snapshot.agents_text == long_agents[:PREVIEW_LIMIT]
+
+
+def test_workspace_snapshot_recent_workspaces_do_not_resolve_saved_paths(workspace, monkeypatch):
+    import services.workspace_snapshot as workspace_snapshot
+
+    other = workspace.parent / "other"
+    monkeypatch.setattr(
+        workspace_snapshot,
+        "list_workspaces",
+        lambda: [
+            {
+                "path": str(workspace),
+                "name": "Current",
+                "updated_at": "2026-02-03T04:05:00",
+                "exists": True,
+            },
+            {
+                "path": str(other),
+                "name": "Other",
+                "updated_at": "2026-02-03T04:05:00",
+                "exists": False,
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "services.workspace_snapshot.Path.resolve",
+        lambda self: (_ for _ in ()).throw(
+            AssertionError("recent workspace filtering should not resolve paths")
+        ),
+    )
+
+    rows = _recent_workspaces(workspace)
+
+    assert [row.path for row in rows] == [str(other)]
+
+
+def test_workspace_snapshot_skill_count_uses_top_level_iterdir(workspace, monkeypatch):
+    skills_dir = workspace / ".aichs" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "review.md").write_text("Review carefully.\n", encoding="utf-8")
+    (skills_dir / ".hidden.md").write_text("hidden\n", encoding="utf-8")
+    (skills_dir / "notes.txt").write_text("not a skill\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "services.workspace_snapshot.Path.glob",
+        lambda self, pattern: (_ for _ in ()).throw(
+            AssertionError("skill count should not use glob")
+        ),
+    )
+
+    assert _skill_count(workspace) == 1
 
 
 def test_workspace_snapshot_display_dates():

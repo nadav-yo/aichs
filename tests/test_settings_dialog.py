@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 import services.model_registry as reg
@@ -12,8 +14,10 @@ from storage.settings import (
     FILE_EDITOR_TAB_SPACES_KEY,
     FILE_REVIEW_PROMPT_TEMPLATE_KEY,
     GIT_FIX_PROMPT_TEMPLATE_KEY,
+    DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
     TRASH_RETENTION_DAYS_KEY,
     SettingsStore,
+    file_review_prompt_template,
 )
 from ui.widgets.settings_dialog import SettingsDialog, _ProviderDialog
 from PyQt6.QtWidgets import QAbstractItemView
@@ -218,6 +222,31 @@ def test_settings_save_refreshes_anthropic_context_asynchronously(qapp, monkeypa
     assert async_calls == ["refresh"]
 
 
+def test_settings_save_preserves_env_only_provider_key(qapp, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "external-key")
+    reg.save_user_providers({})
+    reg.reload()
+
+    try:
+        store = SettingsStore()
+        dialog = SettingsDialog(store)
+        _ensure_models_page(dialog)
+        row = _provider_row(dialog, "openai")
+
+        assert dialog._providers[row]["api_key"] == ""
+
+        dialog._save()
+        saved = store.load()
+
+        assert "openai" not in saved.get("provider_api_keys", {})
+        assert saved["openai_api_key"] == ""
+        assert os.environ["OPENAI_API_KEY"] == "external-key"
+    finally:
+        reg.save_user_providers({})
+        reg.reload()
+
+
 def test_model_order_drag_updates_provider_order_without_default_column(qapp, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -344,9 +373,10 @@ def test_basic_settings_are_saved_and_reloaded(qapp):
     assert dialog.file_editor_tab_spaces_spin.value() == 4
     assert dialog.trash_retention_spin.value() == 14
     assert dialog._nav.item(2).text() == "Prompts"
-    assert "{mention}" in dialog.file_review_prompt_template.text()
-    assert "{mention}" in dialog.diagnostic_fix_prompt_template.text()
-    assert "{action}" in dialog.git_fix_prompt_template.text()
+    assert dialog.file_review_prompt_template.text() == ""
+    assert DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE in dialog.file_review_prompt_template.placeholderText()
+    assert dialog.diagnostic_fix_prompt_template.text() == ""
+    assert dialog.git_fix_prompt_template.text() == ""
     assert dialog.commit_message_guidance.parent() is not None
     assert dialog.commit_message_guidance.toPlainText() == ""
 
@@ -395,6 +425,28 @@ def test_basic_settings_are_saved_and_reloaded(qapp):
     reloaded._save()
 
     assert store.load()[COMMIT_MESSAGE_PROMPT_ADDITION_KEY] == ""
+
+
+def test_prompt_field_reset_clears_custom_text(qapp):
+    store = SettingsStore()
+    store.save({
+        FILE_REVIEW_PROMPT_TEMPLATE_KEY: "Custom {mention}.",
+        AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY: "Custom title rules.",
+    })
+    dialog = SettingsDialog(store)
+    _ensure_page(dialog, "prompts")
+
+    assert dialog.file_review_prompt_template.text() == "Custom {mention}."
+    assert dialog.auto_title_prompt_instructions.toPlainText() == "Custom title rules."
+
+    from PyQt6.QtWidgets import QPushButton
+
+    dialog.findChild(QPushButton, "promptReset_ask_file_first_line").click()
+    assert dialog.file_review_prompt_template.text() == ""
+
+    dialog._save()
+    assert store.load()[FILE_REVIEW_PROMPT_TEMPLATE_KEY] == ""
+    assert file_review_prompt_template(store.load()) == DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE
 
 
 def test_provider_order_drag_is_saved_and_reloaded(qapp, monkeypatch):

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QRectF
-from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 
 from ui.theme import ACCENT, current_theme, palette
 
@@ -46,24 +46,14 @@ def paint_git_status_badge(
     *,
     theme: str | None = None,
 ):
-    kind, symbol, color = _git_status_kind(code, label, theme=theme)
+    kind, _symbol, color = _git_status_kind(code, label, theme=theme)
     rect = rect or QRectF(0, 0, 8, 8)
     fill = QColor(color)
     border = QColor("#10213f") if (theme or "") != "light" else QColor("#ffffff")
 
     painter.setPen(QPen(border, 1))
     painter.setBrush(fill)
-    if kind == "modified":
-        painter.drawEllipse(rect)
-        return
-
     painter.drawEllipse(rect)
-    font = QFont()
-    font.setBold(True)
-    font.setPixelSize(max(6, int(rect.height()) - 2))
-    painter.setFont(font)
-    painter.setPen(QColor("#111827") if kind in {"added", "untracked"} else QColor("#ffffff"))
-    painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, symbol)
 
 
 def _git_status_kind(code: str, label: str = "", theme: str | None = None) -> tuple[str, str, str]:

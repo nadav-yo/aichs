@@ -1,3 +1,5 @@
+from PyQt6.QtWidgets import QSizePolicy
+
 from ui.widgets.chat_panel import ChatPanel
 
 
@@ -73,3 +75,24 @@ def test_auto_title_waits_for_single_first_user(monkeypatch):
     ChatPanel._maybe_auto_title(panel)
 
     assert _FakeTitleThread.created == []
+
+
+def test_chat_panel_header_stays_stable_across_sidebar_context(qapp, store, workspace):
+    panel = ChatPanel(store, cwd=str(workspace))
+    panel.show()
+    qapp.processEvents()
+    before = panel._header_bar.contentsMargins()
+    panel._sync_header_title()
+    after = panel._header_bar.contentsMargins()
+    assert before == after
+    assert panel._title_block.isVisible()
+    assert panel._subtitle_label.isVisible()
+    assert panel._subtitle_label.text() == workspace.name
+
+
+def test_chat_panel_header_has_no_extensions_button(qapp, store, workspace):
+    panel = ChatPanel(store, cwd=str(workspace))
+    assert not hasattr(panel, "extensions_btn")
+    assert panel._model_controls.sizePolicy().horizontalPolicy() == (
+        QSizePolicy.Policy.Maximum
+    )

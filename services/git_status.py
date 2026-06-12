@@ -32,6 +32,14 @@ class GitFileChange:
     unstaged_label: str = ""
 
 
+@dataclass(frozen=True)
+class GitStatusSnapshot:
+    changes: tuple[GitFileChange, ...] = ()
+    branch: str = ""
+    ahead: int = 0
+    behind: int = 0
+
+
 def run_git(cmd: list[str], cwd: str, timeout: float = 5) -> str:
     with time_operation("git.run", detail=" ".join(cmd)):
         try:
@@ -72,30 +80,30 @@ def run_git_command(cmd: list[str], cwd: str, timeout: float = 60) -> GitCommand
 
 def count_commits_to_push(repo_path: str) -> int:
     """Return local commits ahead of the configured upstream branch."""
-    if not is_git_repo(repo_path):
-        return 0
-    upstream = run_git(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], repo_path)
-    if not upstream:
-        return 0
-    raw = run_git(["git", "rev-list", "--count", "@{u}..HEAD"], repo_path)
-    try:
-        return max(0, int(raw.strip()))
-    except (TypeError, ValueError):
-        return 0
+    ahead, _behind = count_commits_ahead_behind(repo_path)
+    return ahead
 
 
 def count_commits_to_pull(repo_path: str) -> int:
     """Return upstream commits not yet in HEAD, using local tracking info."""
+    _ahead, behind = count_commits_ahead_behind(repo_path)
+    return behind
+
+
+def count_commits_ahead_behind(repo_path: str) -> tuple[int, int]:
+    """Return ``(ahead, behind)`` against the configured upstream branch."""
     if not is_git_repo(repo_path):
-        return 0
-    upstream = run_git(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], repo_path)
-    if not upstream:
-        return 0
-    raw = run_git(["git", "rev-list", "--count", "HEAD..@{u}"], repo_path)
+        return 0, 0
+    raw = run_git(["git", "rev-list", "--left-right", "--count", "@{u}...HEAD"], repo_path)
+    parts = raw.replace("\t", " ").split()
+    if len(parts) < 2:
+        return 0, 0
     try:
-        return max(0, int(raw.strip()))
+        behind = max(0, int(parts[0]))
+        ahead = max(0, int(parts[1]))
     except (TypeError, ValueError):
-        return 0
+        return 0, 0
+    return ahead, behind
 
 
 def is_git_repo(repo_path: str) -> bool:
@@ -156,19 +164,65 @@ def _change_from_status_line(repo_path: str, line: str) -> GitFileChange | None:
 
 def list_file_changes(repo_path: str) -> list[GitFileChange]:
     """Uncommitted file changes (same filters as the Git tab)."""
-    if not is_git_repo(repo_path):
-        return []
+    return list(read_git_status_snapshot(repo_path).changes)
 
-    status = run_git(["git", "status", "--short", "-uall"], repo_path)
+
+def read_git_status_snapshot(repo_path: str, *, check_repo: bool = True) -> GitStatusSnapshot:
+    """Return status, branch, and local upstream counts from one status call."""
+    if check_repo and not is_git_repo(repo_path):
+        return GitStatusSnapshot()
+    status = run_git(["git", "status", "--short", "--branch", "-uall"], repo_path)
+    return parse_status_snapshot(repo_path, status)
+
+
+def parse_status_snapshot(repo_path: str, status: str) -> GitStatusSnapshot:
     if not status:
-        return []
-
+        return GitStatusSnapshot()
+    branch = ""
+    ahead = 0
+    behind = 0
     changes: list[GitFileChange] = []
     for line in status.splitlines():
+        if line.startswith("## "):
+            branch, ahead, behind = parse_status_branch_line(line)
+            continue
         change = _change_from_status_line(repo_path, line)
         if change:
             changes.append(change)
-    return changes
+    return GitStatusSnapshot(
+        changes=tuple(changes),
+        branch=branch,
+        ahead=ahead,
+        behind=behind,
+    )
+
+
+def parse_status_branch_line(line: str) -> tuple[str, int, int]:
+    if not line.startswith("## "):
+        return "", 0, 0
+    branch_text = line[3:].strip()
+    ahead = 0
+    behind = 0
+    if "[" in branch_text:
+        branch_text, counts = branch_text.split("[", 1)
+        for part in counts.rstrip("]").split(","):
+            label, _, raw_count = part.strip().partition(" ")
+            try:
+                count = max(0, int(raw_count))
+            except ValueError:
+                continue
+            if label == "ahead":
+                ahead = count
+            elif label == "behind":
+                behind = count
+    branch_text = branch_text.strip()
+    if branch_text.startswith("No commits yet on "):
+        branch = branch_text.removeprefix("No commits yet on ").strip()
+    elif branch_text.startswith("HEAD "):
+        branch = ""
+    else:
+        branch = branch_text.split("...", 1)[0].strip()
+    return branch, ahead, behind
 
 
 def stage_files(repo_path: str, rel_paths: list[str]) -> GitCommandResult:

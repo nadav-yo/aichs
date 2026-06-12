@@ -1,6 +1,5 @@
 from unittest.mock import MagicMock
 
-import pytest
 
 from services.palette import PaletteContext, PaletteItem, _list_files, build_palette_items, filter_items, fuzzy_score
 

@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import threading
 import traceback
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Iterable
 
 from services.code_completion import CompletionItem, CompletionProvider, LocalCompletionProvider
+from services.performance import time_operation
 from services.tool_policy import path_in_repo, resolve_path
 from services.tool_registry import (
     ExtensionStorage,
     LanguageContribution,
+    extension_cache_signature,
     extension_languages,
     extension_overview,
 )
@@ -21,6 +24,12 @@ from services.tool_registry import (
 
 _SEVERITIES = {"error", "warning", "info", "hint"}
 _FIX_SAFETIES = {"safe", "unsafe"}
+_MATCHING_LANGUAGE_CACHE_LOCK = threading.Lock()
+_MATCHING_LANGUAGE_CACHE: dict[
+    tuple[str, str, tuple],
+    tuple[tuple[LanguageContribution, ...], tuple[str, ...]],
+] = {}
+_MATCHING_LANGUAGE_CACHE_LIMIT = 256
 
 
 @dataclass(frozen=True)
@@ -126,7 +135,8 @@ class LanguageService:
                 continue
             ctx = self._context(path, content, language)
             try:
-                results.extend(_normalize_diagnostics(language.diagnostics(ctx), path))
+                with time_operation("language.diagnostics", detail=_language_detail(language, path)):
+                    results.extend(_normalize_diagnostics(language.diagnostics(ctx), path))
             except Exception:
                 errors.append(f"language diagnostics {language.name}:\n{traceback.format_exc().rstrip()}")
         return sorted(results, key=lambda item: (item.line, item.column, item.message)), errors
@@ -139,7 +149,8 @@ class LanguageService:
                 continue
             ctx = self._context(path, content, language)
             try:
-                results.extend(_normalize_symbols(language.symbols(ctx), path))
+                with time_operation("language.symbols", detail=_language_detail(language, path)):
+                    results.extend(_normalize_symbols(language.symbols(ctx), path))
             except Exception:
                 errors.append(f"language symbols {language.name}:\n{traceback.format_exc().rstrip()}")
         return sorted(results, key=lambda item: (item.line, item.column, item.name)), errors
@@ -158,7 +169,8 @@ class LanguageService:
                 continue
             ctx = self._context(path, content, language, position=position, prefix=prefix)
             try:
-                results.extend(_normalize_completions(language.completion(ctx)))
+                with time_operation("language.completion", detail=_language_detail(language, path)):
+                    results.extend(_normalize_completions(language.completion(ctx)))
             except Exception:
                 errors.append(f"language completion {language.name}:\n{traceback.format_exc().rstrip()}")
         return _dedupe_completion_items(results), errors
@@ -176,7 +188,8 @@ class LanguageService:
                 continue
             ctx = self._context(path, content, language, diagnostics=diagnostics)
             try:
-                results.extend(_normalize_code_actions(language.code_actions(ctx)))
+                with time_operation("language.code_actions", detail=_language_detail(language, path)):
+                    results.extend(_normalize_code_actions(language.code_actions(ctx)))
             except Exception:
                 errors.append(f"language code_actions {language.name}:\n{traceback.format_exc().rstrip()}")
         return _dedupe_code_actions(results), errors
@@ -204,7 +217,8 @@ class LanguageService:
                 diagnostics=diagnostics,
             )
             try:
-                result = _normalize_code_action_result(provider(ctx))
+                with time_operation("language.apply_code_action", detail=_language_detail(language, path)):
+                    result = _normalize_code_action_result(provider(ctx))
             except Exception:
                 errors.append(f"language code_action {language.name} {action_id}:\n{traceback.format_exc().rstrip()}")
                 continue
@@ -220,7 +234,8 @@ class LanguageService:
                 continue
             ctx = self._context(path, content, language)
             try:
-                result = _normalize_code_action_result(language.format_document(ctx))
+                with time_operation("language.format_document", detail=_language_detail(language, path)):
+                    result = _normalize_code_action_result(language.format_document(ctx))
             except Exception:
                 errors.append(f"language format_document {language.name}:\n{traceback.format_exc().rstrip()}")
                 continue
@@ -263,14 +278,8 @@ class LanguageService:
         return statuses, errors
 
     def _matching_languages(self, path: str) -> tuple[list[LanguageContribution], list[str]]:
-        languages, errors = extension_languages(self.cwd)
-        rel = _relative_path(self.cwd, path)
-        name = os.path.basename(path)
-        return [
-            language
-            for language in languages
-            if any(fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(name, pattern) for pattern in language.file_patterns)
-        ], list(errors)
+        languages, errors = _cached_matching_languages(self.cwd, path)
+        return list(languages), list(errors)
 
     def _context(
         self,
@@ -342,6 +351,60 @@ def format_file(cwd: str, path: str, content: str | None = None) -> tuple[CodeAc
 
 def language_status(cwd: str) -> tuple[list[LanguageFeatureStatus], list[str]]:
     return LanguageService(cwd).status()
+
+
+def clear_matching_language_cache(cwd: str | None = None) -> None:
+    with _MATCHING_LANGUAGE_CACHE_LOCK:
+        if cwd is None:
+            _MATCHING_LANGUAGE_CACHE.clear()
+            return
+        root_key = str(Path(cwd).resolve())
+        for key in list(_MATCHING_LANGUAGE_CACHE):
+            if key[0] == root_key:
+                _MATCHING_LANGUAGE_CACHE.pop(key, None)
+
+
+def _cached_matching_languages(
+    cwd: str,
+    path: str,
+) -> tuple[tuple[LanguageContribution, ...], tuple[str, ...]]:
+    root_key = str(Path(cwd).resolve())
+    path_key = _path_cache_key(path)
+    signature = extension_cache_signature(root_key)
+    key = (root_key, path_key, signature)
+    with _MATCHING_LANGUAGE_CACHE_LOCK:
+        cached = _MATCHING_LANGUAGE_CACHE.get(key)
+        if cached is not None:
+            return cached
+
+    languages, errors = extension_languages(root_key)
+    rel = _relative_path(root_key, path)
+    name = os.path.basename(path)
+    matches = tuple(
+        language
+        for language in languages
+        if any(
+            fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(name, pattern)
+            for pattern in language.file_patterns
+        )
+    )
+    snapshot = (matches, tuple(errors))
+    with _MATCHING_LANGUAGE_CACHE_LOCK:
+        if key not in _MATCHING_LANGUAGE_CACHE and len(_MATCHING_LANGUAGE_CACHE) >= _MATCHING_LANGUAGE_CACHE_LIMIT:
+            _MATCHING_LANGUAGE_CACHE.pop(next(iter(_MATCHING_LANGUAGE_CACHE)))
+        _MATCHING_LANGUAGE_CACHE[key] = snapshot
+    return snapshot
+
+
+def _path_cache_key(path: str) -> str:
+    try:
+        return str(Path(path).resolve())
+    except OSError:
+        return str(Path(path))
+
+
+def _language_detail(language: LanguageContribution, path: str) -> str:
+    return f"extension={language.extension_id} language={language.name} path={path}"
 
 
 def _normalize_diagnostics(raw, path: str) -> list[Diagnostic]:

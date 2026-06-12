@@ -1,11 +1,12 @@
 import os
 import time
+from contextlib import contextmanager
 
 import pytest
 from PyQt6.QtCore import QThreadPool, Qt
 from PyQt6.QtWidgets import QMessageBox, QMenu
 
-from services.workspace_snapshot import RecentWorkspace
+from services.workspace_snapshot import RecentChat, RecentWorkspace, WorkspaceSnapshot
 from storage.repository import ConversationStore, register_workspace
 from storage.repository import list_workspaces
 from ui.main_window import (
@@ -646,6 +647,57 @@ def test_workspace_dashboard_context_menu_removes_recent_workspace(qapp, workspa
         dashboard.close()
 
 
+def test_workspace_dashboard_apply_snapshot_is_timed(qapp, workspace, monkeypatch):
+    import ui.widgets.workspace_dashboard as workspace_dashboard
+
+    operations = []
+
+    @contextmanager
+    def fake_time_operation(operation, *, detail="", slow_ms=100.0):
+        operations.append((operation, detail, slow_ms))
+        yield
+
+    monkeypatch.setattr(workspace_dashboard, "time_operation", fake_time_operation)
+    dashboard = WorkspaceDashboard(str(workspace), defer_refresh=True)
+    dashboard._refresh_generation = 4
+    snapshot = WorkspaceSnapshot(
+        root=str(workspace.resolve()),
+        name=workspace.name,
+        agents_exists=False,
+        agents_text="",
+        skills_count=0,
+        extensions_count=0,
+        git_repo=False,
+        changed_count=0,
+        branch="",
+        readme_exists=False,
+        readme_text="",
+        recent_chats=(
+            RecentChat(
+                path=str(workspace / ".aichs" / "chats" / "one.json"),
+                title="One",
+                updated_at="2026-02-03T04:05:00",
+                message_count=1,
+            ),
+        ),
+        recent_workspaces=(
+            RecentWorkspace(
+                path=str(workspace),
+                name=workspace.name,
+                updated_at="2026-02-03T04:05:00",
+                exists=True,
+            ),
+        ),
+    )
+
+    try:
+        dashboard._apply_snapshot(4, snapshot)
+    finally:
+        dashboard.close()
+
+    assert operations == [("workspace.apply", "chats=1 workspaces=1", 50)]
+
+
 def test_workspace_dashboard_shutdown_clears_refresh_threads(qapp, workspace):
     dashboard = WorkspaceDashboard(str(workspace), defer_refresh=True)
     try:
@@ -855,15 +907,20 @@ def test_main_window_language_section_tracks_supported_active_file(qapp, workspa
         assert window._context._language_quick_fix_btn.isEnabled()
         assert not window._context._language_ask_btn.isHidden()
         assert window._context._language_ask_btn.isEnabled()
+        assert window._context._language_ask_btn.text() == "Ask Fix all"
 
         window._context._language_ask_file_btn.click()
 
-        assert "Please review @src/main.py" in drafted[-1][0]
+        assert "Review @src/main.py for bugs, regressions, and missing tests." in drafted[-1][0]
         assert drafted[-1][1] == ["src/main.py"]
 
         window._context._language_ask_btn.click()
 
-        assert "Please fix this diagnostic in @src/main.py:1." in drafted[-1][0]
+        assert (
+            "Run the configured language diagnostics for @src/main.py, "
+            "then fix every issue reported by demo in @src/main.py."
+        ) in drafted[-1][0]
+        assert "Diagnostic output:" not in drafted[-1][0]
         assert drafted[-1][1] == ["src/main.py"]
 
         window._context._language_fix_safe_btn.click()
@@ -894,8 +951,17 @@ def test_main_window_language_section_tracks_supported_active_file(qapp, workspa
         assert window._context._language_type.text() == "No language"
         assert window._context._language_file.text() == "notes.txt"
         assert window._context._language_summary.text() == "No language support for this file."
-        assert window._context._language_actions_label.isHidden()
+        assert not window._context._language_actions_label.isHidden()
+        assert window._context._language_format_btn.isHidden()
+        assert window._context._language_fix_safe_btn.isHidden()
+        assert not window._context._language_ask_file_btn.isHidden()
+        assert window._context._language_ask_file_btn.isEnabled()
+        assert window._context._language_refresh_btn.isHidden()
         assert window._context._language_problems_label.isHidden()
+
+        window._context._language_ask_file_btn.click()
+        assert "notes.txt" in drafted[-1][1][0]
+        assert "@notes.txt" in drafted[-1][0] or "notes.txt" in drafted[-1][0]
 
         window._context_tab.click()
 
@@ -940,6 +1006,67 @@ def test_main_window_context_panel_can_collapse_and_reopen(qapp, workspace):
         window._context._collapse_btn.click()
 
         assert window._is_context_collapsed()
+    finally:
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
+def test_main_window_shows_markdown_preview_in_chat_slot(
+    qapp,
+    workspace,
+    quiet_file_language,
+):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    path = workspace / "README.md"
+    path.write_text("# Hello\n", encoding="utf-8")
+    window = MainWindow(startup_workspace=str(workspace))
+    try:
+        window.show()
+        qapp.processEvents()
+        window._open_file(str(path))
+        _settle_file_viewer_workers(qapp)
+        tab = window._viewer.active_text_tab()
+        assert tab is not None
+        tab._preview_toggle.setChecked(True)
+        qapp.processEvents()
+        tab._apply_markdown_preview()
+        _settle_file_viewer_workers(qapp)
+        _wait_until(
+            qapp,
+            lambda: (
+                window._viewer.active_markdown_preview_pane_active()
+                and window._workbench_left.currentWidget() is window._workbench_preview_host
+            ),
+        )
+
+        sizes = window._workbench.sizes()
+        assert sizes[0] > 0
+        assert sizes[1] > 0
+        assert window._workbench_left.currentWidget() is window._workbench_preview_host
+
+        tab = window._viewer.active_text_tab()
+        assert tab is not None
+        assert tab._editor.isVisibleTo(tab)
+        assert tab._preview.parent() is window._workbench_preview_host
+
+        tab._preview_toggle.setChecked(False)
+        qapp.processEvents()
+
+        assert window._workbench_left.currentWidget() is window._chat
+        assert tab.preview_is_in_tab()
+
+        tab._preview_toggle.setChecked(True)
+        _settle_file_viewer_workers(qapp)
+        _wait_until(
+            qapp,
+            lambda: window._workbench_left.currentWidget() is window._workbench_preview_host,
+        )
+
+        assert window._workbench_left.currentWidget() is window._workbench_preview_host
     finally:
         window.close()
         os.chdir(cwd)

@@ -36,17 +36,16 @@ from services.terminal_refs import TERMINAL_REF_MIME
 from ui.theme import (
     attachment_remove_button_style,
     attachment_thumbnail_style,
+    code_surface_colors,
     composer_reference_colors,
     composer_shell_style,
     composer_style,
     skill_chip_style,
-    chat_font_pt,
-    palette,
-    ACCENT,
 )
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _REFERENCE_RE = re.compile(r'(?<!\S)@(?:"[^"]+"|[^\s@]*[^\s@.,:;!?)\]}])')
+_INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 _INPUT_MIN_HEIGHT = 46
 _INPUT_MAX_LINES = 8
 
@@ -54,20 +53,36 @@ _INPUT_MAX_LINES = 8
 class _ReferenceHighlighter(QSyntaxHighlighter):
     def __init__(self, document):
         super().__init__(document)
-        self._fmt = QTextCharFormat()
+        self._reference_fmt = QTextCharFormat()
+        self._code_fmt = QTextCharFormat()
         self.apply_appearance()
 
     def apply_appearance(self):
         colors = composer_reference_colors()
-        self._fmt = QTextCharFormat()
-        self._fmt.setForeground(QColor(colors["fg"]))
-        self._fmt.setBackground(QColor(colors["bg"]))
-        self._fmt.setFontWeight(QFont.Weight.DemiBold)
+        self._reference_fmt = QTextCharFormat()
+        self._reference_fmt.setForeground(QColor(colors["fg"]))
+        self._reference_fmt.setBackground(QColor(colors["bg"]))
+        self._reference_fmt.setFontWeight(QFont.Weight.DemiBold)
+
+        code_colors = code_surface_colors()
+        self._code_fmt = QTextCharFormat()
+        self._code_fmt.setForeground(QColor(code_colors["foreground"]))
+        self._code_fmt.setBackground(QColor(code_colors["background"]))
+        self._code_fmt.setFontFamily("Cascadia Code")
+        self._code_fmt.setFontWeight(QFont.Weight.DemiBold)
         self.rehighlight()
 
     def highlightBlock(self, text: str):
+        code_spans: list[tuple[int, int]] = []
+        for match in _INLINE_CODE_RE.finditer(text):
+            start = match.start()
+            length = match.end() - start
+            code_spans.append((start, match.end()))
+            self.setFormat(start, length, self._code_fmt)
         for match in _REFERENCE_RE.finditer(text):
-            self.setFormat(match.start(), match.end() - match.start(), self._fmt)
+            if any(start <= match.start() < end for start, end in code_spans):
+                continue
+            self.setFormat(match.start(), match.end() - match.start(), self._reference_fmt)
 
 
 def _path_is_image(path: str) -> bool:

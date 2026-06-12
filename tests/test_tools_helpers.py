@@ -1,6 +1,5 @@
 import sys
 
-import pytest
 
 from config import MAX_TOOL_OUTPUT_CHARS, MAX_TOOL_OUTPUT_LINES
 from services.shell_tool import SHELL_TOOL_NAME, is_shell_tool, shell_tool_name

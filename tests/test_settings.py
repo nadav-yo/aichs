@@ -18,6 +18,8 @@ from storage.settings import (
     file_editor_tab_spaces,
     file_review_prompt_template,
     git_fix_prompt_template,
+    resume_session,
+    DEFAULT_RESUME_SESSION,
 )
 
 
@@ -66,6 +68,12 @@ def test_apply_saved_overwrites_env(settings_store, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "old")
     settings_store.apply_saved({"provider_api_keys": {"openai": "new-key"}})
     assert os.environ["OPENAI_API_KEY"] == "new-key"
+
+
+def test_apply_saved_blank_key_does_not_clear_external_env(settings_store, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "external")
+    settings_store.apply_saved({"provider_api_keys": {"openai": ""}, "openai_api_key": ""})
+    assert os.environ["OPENAI_API_KEY"] == "external"
 
 
 def test_load_invalid_json_returns_empty(settings_store, isolate_aichs_home):
@@ -119,3 +127,25 @@ def test_file_prompt_templates_default_and_strip():
         == "Keep tests"
     )
     assert archivist_prompt({"archivist_prompt": "  Search memory  "}) == "Search memory"
+
+
+def test_resume_session_defaults_and_validates():
+    assert resume_session({}) == DEFAULT_RESUME_SESSION
+    assert resume_session({"resume_session": "ask"}) == "ask"
+    assert resume_session({"resume_session": "never"}) == "never"
+    assert resume_session({"resume_session": "bogus"}) == DEFAULT_RESUME_SESSION
+
+
+def test_git_panel_settings_helpers():
+    from storage.settings import (
+        git_panel_body_expanded,
+        git_panel_lists_split,
+        git_panel_mode,
+    )
+
+    assert git_panel_mode({}) == "changes"
+    assert git_panel_mode({"git_panel_mode": "history"}) == "history"
+    assert git_panel_mode({"git_panel_mode": "invalid"}) == "changes"
+    assert git_panel_lists_split({}) == [120, 220]
+    assert git_panel_lists_split({"git_panel_lists_split": [80, 160]}) == [80, 160]
+    assert git_panel_body_expanded({"git_panel_body_expanded": True}) is True

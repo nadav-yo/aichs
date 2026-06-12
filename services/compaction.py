@@ -26,20 +26,11 @@ MIN_KEEP_RECENT_TOKENS = 2_048
 RESERVE_TOKENS = DEFAULT_RESERVE_TOKENS  # legacy import name
 
 SUMMARY_PROMPT = """\
-The following is an earlier portion of a coding-agent conversation. Summarize it
-so the next model call can continue the engineering task without carrying the
-full transcript.
+Summarize this earlier coding-agent conversation so the next call can continue the task.
 
-Preserve only durable, task-relevant context:
-- Current user goal and any explicit constraints
-- Decisions made, rejected approaches, and reasons
-- Files, symbols, commands, tests, and tool results that mattered
-- Changes already made or planned, including unresolved failures
-- Repository or project instructions that affected the work
-- Open questions, blockers, and the exact next step
-
-Prefer concise bullets grouped by topic. Omit casual chatter, duplicate tool
-output, raw file contents, and anything that can be rediscovered cheaply."""
+Keep: user goal, decisions, key files/commands/tests, changes made, failures, next step.
+Drop: chatter, duplicate tool output, raw file contents.
+Use concise bullets grouped by topic."""
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,4 @@
-from datetime import datetime, date
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -7,14 +7,16 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QFileDialog, QMessageBox,
 )
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, Qt, QSize, pyqtSignal, QEvent, QMimeData, QTimer
-from PyQt6.QtGui import QAction, QDrag, QFontMetrics, QPainter, QPalette
+from PyQt6.QtGui import QAction, QDrag, QFont, QFontMetrics
 
 from storage.repository import ConversationStore
 from storage.settings import SettingsStore, trash_retention_days
 from services.chat_drag import AICHS_CHAT_DROP_MIME, chat_drop_payload, chat_drop_text
 from services.export import default_export_name, export_conversation_file_to_path
+from services.relative_time import format_relative_ago
 from ui.theme import (
-    palette, meta_font_pt, chat_font_pt, app_font, hint_label_style,
+    palette, chat_font_pt, app_font, hint_label_style,
+    conversation_caption_pt, conversation_title_pt,
     new_chat_button_style, search_field_style, conversation_list_style,
     conversation_row_title_style, conversation_row_inline_edit_style,
     conversation_row_icon_label_style, conversation_row_restore_button_style,
@@ -82,6 +84,9 @@ class _ConversationActionWorker(QRunnable):
                 restored = self._store.restore(self._path)
                 conv_id = restored.stem
                 detail = str(restored)
+            elif self._action == "purge":
+                conv_id = self._store.purge(self._path)
+                detail = ""
             elif self._action == "rename":
                 conv_id = self._store.rename(self._path, self._title)
                 detail = self._title
@@ -97,8 +102,24 @@ class _ConversationActionWorker(QRunnable):
         self.signals.done.emit(self._action, conv_id, detail, "")
 
 
+def _conversation_title_font() -> QFont:
+    font = app_font()
+    font.setPointSize(conversation_title_pt())
+    font.setWeight(QFont.Weight.Medium)
+    return font
+
+
+def _conversation_title_line_height() -> int:
+    fm = QFontMetrics(_conversation_title_font())
+    return fm.ascent() + fm.descent() + 4
+
+
+def _conversation_item_height() -> int:
+    return 6 + max(_conversation_title_line_height(), 18)
+
+
 class TitleLabel(QLabel):
-    """Single-line title; paints elided text so QListWidget layouts cannot wrap it."""
+    """Single-line title; elides on resize using normal QLabel painting."""
 
     double_clicked = pyqtSignal()
 
@@ -109,48 +130,35 @@ class TitleLabel(QLabel):
         self.setWordWrap(False)
         self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        super().setText("")
-        self._sync_height()
+        self.apply_font()
 
     def setText(self, text: str):
         self._full_text = _normalize_title(text)
         self.setToolTip(self._full_text)
-        super().setText("")
-        self.update()
+        self._refresh_elide()
 
     def full_text(self) -> str:
         return self._full_text
 
     def elided_display(self, width: int | None = None) -> str:
-        w = width if width is not None else max(1, self.contentsRect().width())
-        return self.fontMetrics().elidedText(
+        w = width if width is not None else max(1, self.width())
+        return QFontMetrics(self.font()).elidedText(
             self._full_text, Qt.TextElideMode.ElideRight, max(1, w),
         )
 
-    def _sync_height(self):
-        h = self.fontMetrics().height()
-        self.setFixedHeight(h + 2)
-
     def apply_font(self):
-        self._sync_height()
-        self.update()
+        self.setFont(_conversation_title_font())
+        line_h = _conversation_title_line_height()
+        self.setMinimumHeight(line_h)
+        self.setMaximumHeight(line_h)
+        self._refresh_elide()
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        try:
-            painter.setFont(self.font())
-            color = self.palette().color(QPalette.ColorRole.WindowText)
-            if not color.isValid():
-                color = self.palette().color(QPalette.ColorRole.Text)
-            painter.setPen(color)
-            rect = self.contentsRect()
-            painter.drawText(
-                rect,
-                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                self.elided_display(rect.width()),
-            )
-        finally:
-            painter.end()
+    def _refresh_elide(self):
+        super().setText(self.elided_display())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_elide()
 
     def mouseDoubleClickEvent(self, event):
         self.double_clicked.emit()
@@ -174,13 +182,14 @@ class RenameEdit(QLineEdit):
 class ConversationItem(QWidget):
     delete_requested = pyqtSignal()
     restore_requested = pyqtSignal()
+    purge_requested = pyqtSignal()
     rename_requested = pyqtSignal(str)
     pin_requested    = pyqtSignal()
     export_requested = pyqtSignal()
     edit_started     = pyqtSignal(object)
 
-    def __init__(self, title: str, date_str: str, pinned: bool = False,
-                 trashed: bool = False, parent=None):
+    def __init__(self, title: str, ago_str: str, pinned: bool = False,
+                 trashed: bool = False, *, ago_tooltip: str = "", parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -194,12 +203,12 @@ class ConversationItem(QWidget):
         self._drag_data: dict | None = None
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(9, 7, 6, 7)
-        row.setSpacing(6)
+        row.setContentsMargins(5, 3, 4, 3)
+        row.setSpacing(4)
 
-        col = QVBoxLayout()
-        col.setSpacing(2)
-        col.setContentsMargins(0, 0, 0, 0)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        title_row.setContentsMargins(0, 0, 0, 0)
 
         self.title_lbl = TitleLabel(title)
         self.title_lbl.double_clicked.connect(self._start_edit)
@@ -209,12 +218,20 @@ class ConversationItem(QWidget):
         self.title_edit.returnPressed.connect(self._commit_edit)
         self.title_edit.escape_pressed.connect(self._cancel_edit)
 
-        self.date_lbl = QLabel(date_str)
+        self.ago_lbl = QLabel(ago_str)
+        self.ago_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.ago_lbl.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred
+        )
+        if ago_tooltip:
+            self.ago_lbl.setToolTip(ago_tooltip)
 
-        col.addWidget(self.title_lbl)
-        col.addWidget(self.title_edit)
-        col.addWidget(self.date_lbl)
-        row.addLayout(col, 1)
+        title_row.addWidget(self.title_lbl, 1)
+        title_row.addWidget(self.title_edit, 1)
+        title_row.addWidget(self.ago_lbl)
+        row.addLayout(title_row, 1)
 
         self.pin_btn = QLabel("★" if pinned else "☆")
         self.pin_btn.setFixedSize(18, 18)
@@ -240,6 +257,10 @@ class ConversationItem(QWidget):
 
         self.apply_appearance()
         self._sync_delete_visibility()
+        self.setMinimumHeight(_conversation_item_height())
+
+    def sizeHint(self):
+        return QSize(0, _conversation_item_height())
 
     def set_drag_data(self, conv_id: str, title: str):
         self._drag_data = {
@@ -293,7 +314,7 @@ class ConversationItem(QWidget):
         self.title_lbl.setStyleSheet(conversation_row_title_style())
         self.title_lbl.apply_font()
         self.title_edit.setStyleSheet(conversation_row_inline_edit_style())
-        self.date_lbl.setStyleSheet(hint_label_style())
+        self.ago_lbl.setStyleSheet(hint_label_style(font_pt=conversation_caption_pt()))
         self.pin_btn.setStyleSheet(
             conversation_row_icon_label_style(
                 color=pin_color,
@@ -311,13 +332,14 @@ class ConversationItem(QWidget):
         self._sync_action_visibility()
 
     def _sync_action_visibility(self):
-        reveal = self._hovered or self._active or self.title_edit.isVisible()
+        reveal = self._hovered or self.title_edit.isVisible()
         self.pin_btn.setVisible(not self._trashed and (self._pinned or reveal))
         self.del_btn.setVisible(not self._pinned and not self._trashed and reveal)
         self.restore_btn.setVisible(self._trashed)
 
     def _start_edit(self):
         self.edit_started.emit(self)
+        self.ago_lbl.hide()
         self.title_lbl.hide()
         self.title_edit.setText(self._title)
         self.title_edit.show()
@@ -329,6 +351,7 @@ class ConversationItem(QWidget):
         self.title_edit.hide()
         self.title_lbl.setText(new_title)
         self.title_lbl.show()
+        self.ago_lbl.show()
         self._sync_action_visibility()
         if new_title != self._title:
             self._title = new_title
@@ -337,6 +360,7 @@ class ConversationItem(QWidget):
     def _cancel_edit(self):
         self.title_edit.hide()
         self.title_lbl.show()
+        self.ago_lbl.show()
         self._sync_action_visibility()
 
     def cancel_edit(self):
@@ -352,6 +376,9 @@ class ConversationItem(QWidget):
             restore = QAction("Restore", self)
             restore.triggered.connect(self.restore_requested.emit)
             menu.addAction(restore)
+            delete = QAction("Delete", self)
+            delete.triggered.connect(self.purge_requested.emit)
+            menu.addAction(delete)
             menu.exec(self.mapToGlobal(pos))
             return
         rename = QAction("Rename", self)
@@ -361,15 +388,6 @@ class ConversationItem(QWidget):
         export.triggered.connect(self.export_requested.emit)
         menu.addAction(export)
         menu.exec(self.mapToGlobal(pos))
-
-
-def _conversation_item_height() -> int:
-    meta = meta_font_pt()
-    title_fm = QFontMetrics(app_font())
-    date_font = app_font()
-    date_font.setPointSize(meta)
-    date_fm = QFontMetrics(date_font)
-    return 7 + 7 + title_fm.lineSpacing() + 1 + date_fm.lineSpacing()
 
 
 class _ConversationList(QListWidget):
@@ -568,16 +586,18 @@ class ConversationPanel(QWidget):
         path: Path,
         data: dict,
         *,
-        today: date,
         trashed: bool = False,
     ) -> str:
         title = data.get("title", "Untitled")
         updated = data.get("deleted_at", "") if trashed else data.get("updated_at", "")
+        ago_str = ""
+        ago_tooltip = ""
         try:
             dt = datetime.fromisoformat(updated)
-            date_str = dt.strftime("%H:%M") if dt.date() == today else dt.strftime("%b %d")
+            ago_str = format_relative_ago(dt)
+            ago_tooltip = dt.strftime("%b %d, %Y %H:%M")
         except Exception:
-            date_str = ""
+            pass
 
         item = QListWidgetItem()
         conv_id = str(data.get("id") or Path(path).stem)
@@ -589,9 +609,10 @@ class ConversationPanel(QWidget):
 
         widget = ConversationItem(
             title,
-            date_str,
+            ago_str,
             pinned=data.get("pinned", False),
             trashed=trashed,
+            ago_tooltip=ago_tooltip,
         )
         if not trashed:
             widget.set_drag_data(conv_id, title)
@@ -601,8 +622,11 @@ class ConversationPanel(QWidget):
             widget.export_requested.connect(lambda p=str(path), t=title: self._export(p, t))
         else:
             widget.restore_requested.connect(lambda p=str(path): self._restore(p))
+            widget.purge_requested.connect(lambda p=str(path): self._purge(p))
         widget.edit_started.connect(self._on_edit_started)
         self.list.setItemWidget(item, widget)
+        row_h = max(_conversation_item_height(), widget.sizeHint().height())
+        item.setSizeHint(QSize(0, row_h))
         return conv_id
 
     def _on_item_clicked(self, item: QListWidgetItem):
@@ -630,7 +654,6 @@ class ConversationPanel(QWidget):
         query = self.search.text().strip()
         self.list.clear()
         self.store.prune_trash(self._trash_retention_days())
-        today = date.today()
         visible = 0
         trash_records = self.store.list_trash()
         if not trash_records:
@@ -640,7 +663,7 @@ class ConversationPanel(QWidget):
             if query and not self.store.matches_search(path, data, query):
                 continue
 
-            conv_id = self._add_conversation_row(path, data, today=today)
+            conv_id = self._add_conversation_row(path, data)
 
             if (target_id and conv_id == target_id) or (target_path and str(path) == target_path):
                 self.list.setCurrentItem(self.list.item(self.list.count() - 1))
@@ -654,7 +677,7 @@ class ConversationPanel(QWidget):
                 for path, data in trash_records:
                     if query and not self.store.matches_search(path, data, query):
                         continue
-                    self._add_conversation_row(path, data, today=today, trashed=True)
+                    self._add_conversation_row(path, data, trashed=True)
                     visible += 1
 
         self.no_results.setText("No results")
@@ -687,6 +710,9 @@ class ConversationPanel(QWidget):
     def _restore(self, path: str):
         self._start_action("restore", path)
 
+    def _purge(self, path: str):
+        self._start_action("purge", path)
+
     def _on_edit_started(self, item: ConversationItem):
         prev = self._editing_item
         if prev is not None and prev is not item:
@@ -709,7 +735,7 @@ class ConversationPanel(QWidget):
         if error:
             QMessageBox.warning(self, "Conversation action failed", error)
             return
-        if action == "delete":
+        if action in ("delete", "purge"):
             self.deleted.emit(conv_id)
         elif action == "rename":
             self.renamed.emit(conv_id, detail)

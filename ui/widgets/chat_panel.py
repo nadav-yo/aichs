@@ -67,6 +67,8 @@ from ui.theme import (
     send_button_style, stop_button_style, floating_button_style,
     tool_notice_style, center_notice_style, icon_button_style, inline_code_style,
     secondary_button_style, surface_frame_style, hint_label_style,
+    compact_combo_box_style,
+    chat_header_style, WORKBENCH_HEADER_MARGINS, WORKBENCH_HEADER_SPACING,
 )
 from services.skills import Skill, load_all as load_skills
 from services.shell_tool import is_shell_tool
@@ -823,9 +825,9 @@ class ChatPanel(QWidget):
         # compact conversation header
         self._header = QFrame()
         self._header.setObjectName("chatHeader")
-        bar = QHBoxLayout(self._header)
-        bar.setContentsMargins(16, 8, 12, 8)
-        bar.setSpacing(8)
+        self._header_bar = QHBoxLayout(self._header)
+        self._header_bar.setContentsMargins(*WORKBENCH_HEADER_MARGINS)
+        self._header_bar.setSpacing(WORKBENCH_HEADER_SPACING)
 
         title_col = QVBoxLayout()
         title_col.setContentsMargins(0, 0, 0, 0)
@@ -833,38 +835,64 @@ class ChatPanel(QWidget):
         self._title_label = QLabel("New chat")
         self._title_label.setObjectName("chatHeaderTitle")
         self._title_label.setWordWrap(False)
-        self._subtitle_label = QLabel("AICHS workspace")
+        self._title_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        self._subtitle_label = QLabel("")
         self._subtitle_label.setObjectName("chatHeaderSubtitle")
         self._subtitle_label.setWordWrap(False)
         title_col.addWidget(self._title_label)
         title_col.addWidget(self._subtitle_label)
-        bar.addLayout(title_col, 1)
+        self._title_block = QWidget()
+        self._title_block.setLayout(title_col)
+        self._title_block.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        self._header_bar.addWidget(self._title_block, 1)
 
         self.provider_combo = QComboBox()
+        self.provider_combo.setObjectName("chatProviderCombo")
+        self.provider_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self.provider_combo.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+        )
         self.provider_combo.currentTextChanged.connect(self._on_provider_changed)
 
         self.model_combo = QComboBox()
-        self.model_combo.setMinimumWidth(170)
+        self.model_combo.setObjectName("chatModelCombo")
+        self.model_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.model_combo.setMinimumContentsLength(10)
+        self.model_combo.setMaximumWidth(220)
+        self.model_combo.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+        )
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
 
-        bar.addWidget(self.provider_combo)
-        bar.addWidget(self.model_combo)
+        self._model_controls = QWidget()
+        model_row = QHBoxLayout(self._model_controls)
+        model_row.setContentsMargins(0, 0, 0, 0)
+        model_row.setSpacing(6)
+        model_row.addWidget(self.provider_combo)
+        model_row.addWidget(self.model_combo)
+        self._model_controls.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+        )
+        self._header_bar.addWidget(self._model_controls)
 
         self._extension_bar = ExtensionContributionsBar(
             self.cwd,
             on_action=self._handle_extension_action,
             parent=self,
         )
-        bar.addWidget(self._extension_bar)
-
-        self.extensions_btn = QPushButton("Ext")
-        self.extensions_btn.setToolTip("View loaded extensions")
-        self.extensions_btn.clicked.connect(self.show_extensions)
-        bar.addWidget(self.extensions_btn)
+        self._header_bar.addWidget(self._extension_bar)
 
         self.context_ring = ContextRing()
         self.context_ring.clicked.connect(self._show_context_breakdown)
-        bar.addWidget(self.context_ring)
+        self._header_bar.addWidget(self.context_ring)
 
         root.addWidget(self._header)
 
@@ -1114,6 +1142,9 @@ class ChatPanel(QWidget):
         self._dispose_runtime(conv_id)
         if was_active:
             self._reset_view()
+
+    def current_conversation_id(self) -> str:
+        return str(self.conv_id or "")
 
     def load_conversation(self, path: str):
         path = str(path)
@@ -1603,7 +1634,8 @@ class ChatPanel(QWidget):
         settings = self._settings.load()
         cwd = self.cwd
         skill_prompt = str(getattr(skill, "prompt", "") or "")
-        system = lambda: _build_chat_system(cwd, skill_prompt, crew, copy.deepcopy(settings))
+        def system():
+            return _build_chat_system(cwd, skill_prompt, crew, copy.deepcopy(settings))
         allowed_tools = list(crew.tools) if crew else (skill.tools if skill else None)
         write_roots = list(crew.write_roots) if crew else None
         tool_policy = self._runtime_for(conv_id).tool_policy
@@ -3073,28 +3105,39 @@ class ChatPanel(QWidget):
         self._render_history_tail()
         return True
 
+    def _workspace_header_label(self) -> str:
+        root = Path(self.cwd or os.getcwd()).name
+        return root or "workspace"
+
     def _sync_header_title(self):
         title = "New chat"
         if self.conv_data:
             title = " ".join(str(self.conv_data.get("title") or "Untitled").split()) or "Untitled"
         self._title_label.setText(title)
         self._title_label.setToolTip(title)
-        model = self.model_combo.currentText() if hasattr(self, "model_combo") else ""
-        provider = self.provider_combo.currentText() if hasattr(self, "provider_combo") else ""
-        detail = " · ".join(part for part in (provider, model) if part)
-        self._subtitle_label.setText(detail or "AICHS workspace")
+        workspace = self._workspace_header_label()
+        self._subtitle_label.setText(workspace)
+        self._subtitle_label.setToolTip(str(self.cwd or workspace))
+        self._subtitle_label.setVisible(True)
 
     def _apply_chrome(self):
         sep = separator_color()
-        p = palette()
-        self._header.setStyleSheet(
-            f"QFrame#chatHeader {{ background:{p['BG']};"
-            f"border-bottom:1px solid {sep}; }}"
-            f"QLabel#chatHeaderTitle {{ color:{p['TEXT']};"
-            f"font-size:{max(13, self.font().pointSize())}px; font-weight:700; }}"
-            f"{hint_label_style(selector='QLabel#chatHeaderSubtitle', font_pt=max(10, self.font().pointSize() - 3))}"
+        self._header_bar.setContentsMargins(*WORKBENCH_HEADER_MARGINS)
+        header_combo_style = (
+            compact_combo_box_style(
+                selector="QComboBox#chatProviderCombo",
+                padding="3px 8px",
+                drop_down_width=18,
+            )
+            + compact_combo_box_style(
+                selector="QComboBox#chatModelCombo",
+                padding="3px 8px",
+                drop_down_width=18,
+            )
         )
-        self.extensions_btn.setStyleSheet(icon_button_style(34))
+        self._header.setStyleSheet(chat_header_style())
+        self.provider_combo.setStyleSheet(header_combo_style)
+        self.model_combo.setStyleSheet(header_combo_style)
         self._sep.setStyleSheet(
             f"background:{sep}; color:{sep}; border:none; max-height:1px;"
         )
@@ -3702,7 +3745,7 @@ class ChatPanel(QWidget):
         layout.addWidget(label, 1)
         layout.addWidget(cancel)
 
-        p = palette()
+        palette()
         row.setStyleSheet(surface_frame_style(selector="QFrame#queueItem"))
         label.setStyleSheet(hint_label_style())
         cancel.setStyleSheet(icon_button_style(24))

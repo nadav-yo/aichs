@@ -5,12 +5,11 @@ import subprocess
 import sys
 from pathlib import Path
 from threading import Event
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from config import MAX_TOOL_OUTPUT_CHARS, MAX_TOOL_OUTPUT_LINES, MAX_TOOL_READ_BYTES
-from services.tool_registry import ToolContext
 from services.shell_tool import shell_tool_name
 from storage.repository import ConversationStore, _CONVERSATION_INDEX_NAME, _load_json
 from services.tools import (
@@ -27,7 +26,6 @@ from services.tools import (
     _search_files,
     _search_files_with_rg,
     execute,
-    registry_for,
     tool_approval,
 )
 
@@ -229,6 +227,24 @@ class TestSearchFiles:
         assert "intro.md" in out
         assert "api.md" in out
 
+    def test_list_files_nonrecursive_uses_iterdir_not_glob(self, cwd, workspace, monkeypatch):
+        docs = workspace / "docs"
+        docs.mkdir()
+        (docs / "intro.md").write_text("# Intro\n", encoding="utf-8")
+        nested = docs / "nested"
+        nested.mkdir()
+        (nested / "hidden.md").write_text("# Hidden\n", encoding="utf-8")
+
+        def fail_glob(self, pattern):
+            raise AssertionError(f"unexpected glob({pattern})")
+
+        monkeypatch.setattr(Path, "glob", fail_glob)
+
+        out = _list_files(docs, "*.md", recursive=False, limit=10, cwd=cwd)
+
+        assert "docs\\intro.md" in out or "docs/intro.md" in out
+        assert "hidden.md" not in out
+
     def test_list_files_recursive_skips_ignored_dirs(self, workspace):
         cache = workspace / "__pycache__"
         cache.mkdir()
@@ -239,6 +255,29 @@ class TestSearchFiles:
         names = {p.name for p in paths}
         assert "visible.py" in names
         assert "junk.py" not in names
+
+    def test_list_files_recursive_prunes_ignored_dirs_before_descent(self, workspace, monkeypatch):
+        cache = workspace / "__pycache__"
+        nested = cache / "nested"
+        nested.mkdir(parents=True)
+        (nested / "junk.py").write_text("secret", encoding="utf-8")
+        (workspace / "visible.py").write_text("secret", encoding="utf-8")
+        visited = []
+        original = Path.iterdir
+
+        def counted_iterdir(self):
+            visited.append(self)
+            return original(self)
+
+        monkeypatch.setattr(Path, "iterdir", counted_iterdir)
+
+        paths = list(_iter_list_paths(workspace, "*.py", recursive=True))
+
+        names = {path.name for path in paths}
+        assert "visible.py" in names
+        assert "junk.py" not in names
+        assert cache not in visited
+        assert nested not in visited
 
     def test_list_files_limit_reports_omitted(self, cwd, workspace):
         for idx in range(3):

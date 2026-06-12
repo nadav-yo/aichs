@@ -59,6 +59,8 @@ _BUILTIN_PROVIDER_IDS = frozenset({"claude", "openai"})
 _ANTHROPIC_CONTEXT: dict[str, int] = {}
 _CONTEXT_REFRESH_LOCK = threading.Lock()
 _CONTEXT_REFRESH_GENERATION = 0
+_API_KEY_COMMAND_CACHE: dict[str, str] = {}
+_API_KEY_COMMAND_CACHE_LOCK = threading.Lock()
 
 
 def api_default_context_window(api: str) -> int:
@@ -151,6 +153,11 @@ def api_key_env_var(spec: str) -> str | None:
     return None
 
 
+def _clear_api_key_command_cache() -> None:
+    with _API_KEY_COMMAND_CACHE_LOCK:
+        _API_KEY_COMMAND_CACHE.clear()
+
+
 def configured_provider_ids(saved: dict, environ=None) -> list[str]:
     environ = os.environ if environ is None else environ
     user_providers = set(load_user_providers().keys())
@@ -197,6 +204,10 @@ def resolve_api_key(spec: str) -> str:
     if not spec:
         return ""
     if spec.startswith("!"):
+        with _API_KEY_COMMAND_CACHE_LOCK:
+            cached = _API_KEY_COMMAND_CACHE.get(spec)
+        if cached is not None:
+            return cached
         try:
             result = subprocess.run(
                 spec[1:],
@@ -210,7 +221,10 @@ def resolve_api_key(spec: str) -> str:
             if result.returncode != 0:
                 warnings.warn(f"aichs: API key command failed ({spec[1:]!r}): {result.stderr.strip()}")
                 return ""
-            return result.stdout.strip()
+            resolved = result.stdout.strip()
+            with _API_KEY_COMMAND_CACHE_LOCK:
+                _API_KEY_COMMAND_CACHE[spec] = resolved
+            return resolved
         except Exception as exc:
             warnings.warn(f"aichs: API key command error: {exc}")
             return ""
@@ -240,6 +254,7 @@ def load_user_providers() -> dict:
 
 def save_user_providers(providers: dict) -> None:
     """Persist provider definitions to the configured AICHS_HOME models file."""
+    _clear_api_key_command_cache()
     _MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)
     if providers:
         _MODELS_PATH.write_text(json.dumps({"providers": providers}, indent=2))
@@ -422,12 +437,13 @@ def custom_default_context_window() -> int:
 
 
 def _fetch_anthropic_context_window(cfg: ModelConfig, model_id: str) -> int | None:
-    if not resolve_api_key(cfg.api_key_spec):
+    api_key = resolve_api_key(cfg.api_key_spec)
+    if not api_key:
         return None
     try:
         import anthropic
 
-        kwargs: dict = {"api_key": resolve_api_key(cfg.api_key_spec)}
+        kwargs: dict = {"api_key": api_key}
         if cfg.base_url:
             kwargs["base_url"] = cfg.base_url
         info = anthropic.Anthropic(**kwargs).models.retrieve(model_id)
@@ -487,6 +503,7 @@ def context_window_tokens(model_id: str) -> int:
 def reload(*, refresh_anthropic: bool = True) -> None:
     """Reload built-ins plus configured user models, preserving public dict objects."""
     global _providers, _CONTEXT_REFRESH_GENERATION
+    _clear_api_key_command_cache()
     _providers = _merge(_BUILTIN, _load_user_providers())
     models, model_provider, model_config, provider_config = _build(_providers)
     MODELS.clear()

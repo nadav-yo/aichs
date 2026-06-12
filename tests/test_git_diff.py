@@ -202,3 +202,40 @@ def test_run_git_returns_failure_tuple_on_exception(monkeypatch):
     monkeypatch.setattr("services.git_diff.run_no_window", lambda *args, **kwargs: (_ for _ in ()).throw(OSError()))
 
     assert gd._run_git(["git", "status"], "repo") == (1, "")
+
+
+def test_head_text_reads_bounded_prefix_and_stops_large_blob(workspace, monkeypatch):
+    read_sizes = []
+    processes = []
+
+    class FakeStdout:
+        def read(self, size):
+            read_sizes.append(size)
+            return b"abcdef"
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = FakeStdout()
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        assert cmd == ["git", "show", "HEAD:large.txt"]
+        assert kwargs["cwd"] == str(workspace)
+        proc = FakeProcess()
+        processes.append(proc)
+        return proc
+
+    monkeypatch.setattr(gd, "MAX_FILE_PREVIEW_BYTES", 5)
+    monkeypatch.setattr(gd, "popen_no_window", fake_popen)
+
+    text = gd._head_text(str(workspace), "large.txt")
+
+    assert text == "abcde\n\n[Diff truncated at 5 bytes]"
+    assert read_sizes == [6]
+    assert processes[0].killed is True

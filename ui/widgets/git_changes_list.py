@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import json
+from pathlib import PurePosixPath
 from typing import Callable
 
-from PyQt6.QtCore import QMimeData, Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
+from PyQt6.QtCore import QMimeData, QSize, Qt, QThread, QTimer, pyqtSignal, QRectF
+from PyQt6.QtGui import (
+    QAction,
+    QColor,
+    QFont,
+    QFontMetrics,
+    QIcon,
+    QPainter,
+    QPixmap,
+)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -18,15 +27,19 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSplitter,
     QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from services.commit_message import CommitMessageThread
-from storage.settings import COMMIT_MESSAGE_PROMPT_ADDITION_KEY
+from services.commit_message import CommitMessageThread, format_commit_message, split_commit_message
 from services.chat_drag import AICHS_FILE_DROP_MIME, file_drop_payload, file_drop_text
+from services.git_snapshot import GitSnapshot, build_git_snapshot, clear_git_snapshot_cache
 from services.git_status import (
     GitCommandResult,
     GitFileChange,
@@ -36,55 +49,163 @@ from services.git_status import (
     stash_files,
     unstage_files,
 )
-from services.git_snapshot import GitSnapshot, build_git_snapshot, clear_git_snapshot_cache
+from services.performance import time_operation
+from storage.settings import (
+    COMMIT_MESSAGE_PROMPT_ADDITION_KEY,
+    git_panel_lists_split,
+)
 from storage.settings import SettingsStore
 from ui.theme import (
     ACCENT,
-    compact_field_style,
+    app_font,
     git_change_button_style,
     git_changes_list_style,
-    git_status_color,
+    git_commit_field_style,
+    git_panel_caption_pt,
+    git_panel_path_pt,
+    git_panel_section_label_style,
+    hint_label_style,
     mono_font,
-    mono_font_pt,
     palette,
-    sidebar_section_label_style,
+    primary_button_style,
 )
-from ui.widgets.git_status_icon import git_status_description, git_status_icon
+from ui.widgets.git_status_icon import git_status_description, git_status_icon, paint_git_status_badge
 
 _ROLE_ABS_PATH = Qt.ItemDataRole.UserRole
 _ROLE_REL_PATH = Qt.ItemDataRole.UserRole + 1
+_ROLE_STATUS_CODE = Qt.ItemDataRole.UserRole + 2
+_ROLE_IS_HEADER = Qt.ItemDataRole.UserRole + 3
+_ROLE_STATUS_LABEL = Qt.ItemDataRole.UserRole + 4
 _GIT_CHANGE_MIME = "application/x-aichs-git-change-paths"
 _GENERATING_FRAME_COUNT = 4
+_FOLDER_GROUP_THRESHOLD = 20
+_STATUS_ICON_GAP = 6
 
 
-class _GitChangesRefreshThread(QThread):
-    done = pyqtSignal(int, object)
+class _GitChangeDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        if index.data(_ROLE_IS_HEADER):
+            self._paint_header(painter, option, index)
+            return
 
-    def __init__(self, generation: int, repo_path: str, parent=None):
-        super().__init__(parent)
-        self._generation = generation
-        self._repo_path = repo_path
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""
+        opt.icon = QIcon()
+        opt.showDecorationSelected = False
+        widget = opt.widget
+        from PyQt6.QtWidgets import QApplication
+        style = widget.style() if widget else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
 
-    def run(self):
-        self.done.emit(self._generation, build_git_snapshot(self._repo_path))
+        icon_w = 12
+        if widget is not None and hasattr(widget, "iconSize"):
+            icon_w = max(12, widget.iconSize().width())
+        icon_left = option.rect.left() + 8
+        icon_top = option.rect.center().y() - icon_w // 2
+        badge_inset = max(1, icon_w // 6)
+        badge_size = icon_w - badge_inset * 2
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        paint_git_status_badge(
+            painter,
+            str(index.data(_ROLE_STATUS_CODE) or ""),
+            str(index.data(_ROLE_STATUS_LABEL) or ""),
+            QRectF(icon_left + badge_inset, icon_top + badge_inset, badge_size, badge_size),
+        )
+        painter.restore()
+
+        p = palette()
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        path_color = p["SELECTION_TEXT"] if selected else p["TEXT"]
+        path = str(index.data(Qt.ItemDataRole.DisplayRole) or index.data(_ROLE_REL_PATH) or "")
+
+        text_left = option.rect.left() + 8 + icon_w + _STATUS_ICON_GAP
+        path_rect = option.rect.adjusted(text_left - option.rect.left(), 0, -8, 0)
+        path_font = mono_font(git_panel_path_pt())
+
+        painter.save()
+        painter.setFont(path_font)
+        painter.setPen(QColor(path_color))
+        elided = QFontMetrics(path_font).elidedText(
+            path,
+            Qt.TextElideMode.ElideMiddle,
+            max(0, path_rect.width()),
+        )
+        painter.drawText(path_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elided)
+        painter.restore()
+
+    def _paint_header(self, painter, option, index):
+        p = palette()
+        rect = option.rect.adjusted(8, 1, -8, 0)
+        font = app_font()
+        font.setPointSize(git_panel_caption_pt())
+        font.setWeight(QFont.Weight.Medium)
+        painter.save()
+        painter.setFont(font)
+        painter.setPen(QColor(p["TEXT_DIM"]))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, str(index.data(Qt.ItemDataRole.DisplayRole)))
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        if index.data(_ROLE_IS_HEADER):
+            font = app_font()
+            font.setPointSize(git_panel_caption_pt())
+            size.setHeight(max(size.height(), QFontMetrics(font).height() + 2))
+            return size
+        size.setHeight(max(size.height(), QFontMetrics(option.font).height() + 5))
+        return size
+
+
+class _GitSectionLabel(QLabel):
+    clicked = pyqtSignal()
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Click for bulk actions")
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
 
 
 class _GitChangeList(QListWidget):
     files_dropped = pyqtSignal(bool, bool, list)
+    drag_active_changed = pyqtSignal(bool)
 
     def __init__(self, staged: bool, parent=None):
         super().__init__(parent)
         self.staged = staged
+        self._filter_text = ""
+        self._drag_active = False
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.viewport().setAcceptDrops(True)
         self.setDropIndicatorShown(False)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setItemDelegate(_GitChangeDelegate(self))
+        self.setUniformItemSizes(True)
+        self.setIconSize(QSize(12, 12))
+
+    def set_filter_text(self, text: str):
+        self._filter_text = str(text or "").strip().lower()
+        for row in range(self.count()):
+            item = self.item(row)
+            if item.data(_ROLE_IS_HEADER):
+                continue
+            rel = str(item.data(_ROLE_REL_PATH) or "").lower()
+            item.setHidden(bool(self._filter_text) and self._filter_text not in rel)
 
     def mimeData(self, items: list[QListWidgetItem]) -> QMimeData:
         paths = []
         for item in items:
+            if item.data(_ROLE_IS_HEADER):
+                continue
             rel = str(item.data(_ROLE_REL_PATH) or "").strip()
             if rel:
                 paths.append(rel)
@@ -96,35 +217,67 @@ class _GitChangeList(QListWidget):
             mime.setText(file_drop_text(paths))
         return mime
 
+    def _cross_section_drop_payload(self, mime: QMimeData) -> tuple[bool, list[str]] | None:
+        payload = _decode_drop_payload(mime)
+        if not payload:
+            return None
+        source_staged, paths = payload
+        if source_staged == self.staged or not paths:
+            return None
+        return payload
+
     def dragEnterEvent(self, event):
+        self._set_drag_active(True)
         if event.mimeData().hasFormat(_GIT_CHANGE_MIME):
-            event.setDropAction(Qt.DropAction.MoveAction)
-            event.accept()
+            if self._cross_section_drop_payload(event.mimeData()):
+                event.setDropAction(Qt.DropAction.MoveAction)
+                event.accept()
+            else:
+                event.ignore()
             return
         super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event):
         if event.mimeData().hasFormat(_GIT_CHANGE_MIME):
-            event.setDropAction(Qt.DropAction.MoveAction)
-            event.accept()
+            if self._cross_section_drop_payload(event.mimeData()):
+                event.setDropAction(Qt.DropAction.MoveAction)
+                event.accept()
+            else:
+                event.ignore()
             return
         super().dragMoveEvent(event)
 
+    def dragLeaveEvent(self, event):
+        self._set_drag_active(False)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event):
-        payload = _decode_drop_payload(event.mimeData())
-        if not payload:
+        self._set_drag_active(False)
+        payload = self._cross_section_drop_payload(event.mimeData())
+        if payload is None:
+            if _decode_drop_payload(event.mimeData()) is not None:
+                event.ignore()
+                return
             super().dropEvent(event)
             return
         source_staged, paths = payload
-        if source_staged != self.staged and paths:
-            self.files_dropped.emit(source_staged, self.staged, paths)
+        self.files_dropped.emit(source_staged, self.staged, paths)
         event.setDropAction(Qt.DropAction.MoveAction)
         event.accept()
+
+    def _set_drag_active(self, active: bool):
+        if self._drag_active == active:
+            return
+        self._drag_active = active
+        self.drag_active_changed.emit(active)
 
 
 class GitChangesList(QWidget):
     file_open = pyqtSignal(str)
     git_changed = pyqtSignal()
+    commit_summarized = pyqtSignal(str)
+    refresh_pause_changed = pyqtSignal(bool)
+    lists_split_changed = pyqtSignal(list)
 
     def __init__(
         self,
@@ -146,57 +299,89 @@ class GitChangesList(QWidget):
         self._auto_refresh_started = False
         self._refresh_generation = 0
         self._refresh_threads: list[_GitChangesRefreshThread] = []
+        self._lists_split_restored = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 0, 6, 0)
         layout.setSpacing(4)
 
-        self.summary = QLineEdit()
-        self.summary.setPlaceholderText("Commit Message")
-        self.summary.textChanged.connect(self._update_action_state)
-        self._generate_action = QAction(self._generate_icon, "", self)
-        self._generate_action.setToolTip("Generate commit message from staged files")
-        self._generate_action.triggered.connect(self._generate_commit_message)
-        self.summary.addAction(
-            self._generate_action,
-            QLineEdit.ActionPosition.TrailingPosition,
-        )
-        layout.addWidget(self.summary)
+        message_row = QHBoxLayout()
+        message_row.setContentsMargins(0, 0, 0, 0)
+        message_row.setSpacing(4)
+        self.message = QTextEdit()
+        self.message.setPlaceholderText("Commit message")
+        self.message.setMaximumHeight(76)
+        self.message.textChanged.connect(self._update_action_state)
+        message_row.addWidget(self.message, 1)
+        self._generate_btn = QToolButton()
+        self._generate_btn.setIcon(self._generate_icon)
+        self._generate_btn.setToolTip("Generate commit message from staged files")
+        self._generate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._generate_btn.clicked.connect(self._generate_commit_message)
+        message_row.addWidget(self._generate_btn, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(message_row)
+
+        commit_actions = QHBoxLayout()
+        commit_actions.setContentsMargins(0, 0, 0, 0)
+        self._commit_btn = QPushButton("Commit")
+        self._commit_btn.setToolTip("Stage files and enter a commit message")
+        self._commit_btn.clicked.connect(self._commit)
+        self._commit_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._commit_btn.customContextMenuRequested.connect(self._commit_context_menu)
+        commit_actions.addWidget(self._commit_btn, 1)
+        layout.addLayout(commit_actions)
 
         self._generate_timer = QTimer(self)
         self._generate_timer.setInterval(180)
         self._generate_timer.timeout.connect(self._advance_generate_animation)
 
-        self.body = QTextEdit()
-        self.body.setPlaceholderText("Optional body")
-        self.body.setMaximumHeight(70)
-        layout.addWidget(self.body)
+        self._lists_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._lists_splitter.setChildrenCollapsible(False)
 
-        commit_actions = QHBoxLayout()
-        commit_actions.setContentsMargins(0, 0, 0, 0)
-        commit_actions.setSpacing(4)
-        self._commit_btn = QPushButton("Commit")
-        self._commit_btn.setToolTip("Commit staged files")
-        self._commit_btn.clicked.connect(self._commit)
-        commit_actions.addWidget(self._commit_btn)
-        layout.addLayout(commit_actions)
-        layout.addSpacing(2)
-
-        self._staged_label = QLabel("Staged")
-        layout.addWidget(self._staged_label)
-
+        staged_wrap = QWidget()
+        staged_layout = QVBoxLayout(staged_wrap)
+        staged_layout.setContentsMargins(0, 0, 0, 0)
+        staged_layout.setSpacing(4)
+        self._staged_label = _GitSectionLabel("Staged")
+        self._staged_label.clicked.connect(lambda: self._section_menu(staged=True))
+        staged_layout.addWidget(self._staged_label)
         self.staged_list = _GitChangeList(staged=True)
         self._configure_list(self.staged_list)
-        layout.addWidget(self.staged_list)
+        staged_layout.addWidget(self.staged_list, 1)
+        self._lists_splitter.addWidget(staged_wrap)
 
-        self._unstaged_label = QLabel("Unstaged")
-        layout.addWidget(self._unstaged_label)
-
+        unstaged_wrap = QWidget()
+        unstaged_layout = QVBoxLayout(unstaged_wrap)
+        unstaged_layout.setContentsMargins(0, 0, 0, 0)
+        unstaged_layout.setSpacing(4)
+        unstaged_header = QHBoxLayout()
+        unstaged_header.setContentsMargins(0, 0, 0, 0)
+        self._unstaged_label = _GitSectionLabel("Unstaged")
+        self._unstaged_label.clicked.connect(lambda: self._section_menu(staged=False))
+        unstaged_header.addWidget(self._unstaged_label, 1)
+        self._filter_btn = QToolButton()
+        self._filter_btn.setText("⌕")
+        self._filter_btn.setToolTip("Filter unstaged files")
+        self._filter_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._filter_btn.clicked.connect(self._toggle_filter)
+        unstaged_header.addWidget(self._filter_btn)
+        unstaged_layout.addLayout(unstaged_header)
+        self._filter_edit = QLineEdit()
+        self._filter_edit.setPlaceholderText("Filter paths")
+        self._filter_edit.setClearButtonEnabled(True)
+        self._filter_edit.setVisible(False)
+        unstaged_layout.addWidget(self._filter_edit)
         self.unstaged_list = _GitChangeList(staged=False)
+        self._filter_edit.textChanged.connect(self.unstaged_list.set_filter_text)
         self._configure_list(self.unstaged_list)
-        layout.addWidget(self.unstaged_list)
+        unstaged_layout.addWidget(self.unstaged_list, 1)
+        self._lists_splitter.addWidget(unstaged_wrap)
+
+        layout.addWidget(self._lists_splitter, 1)
+        self._lists_splitter.splitterMoved.connect(self._on_lists_split_moved)
 
         self.apply_appearance()
+        self._restore_lists_split()
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self.refresh)
         if defer_refresh:
@@ -206,27 +391,58 @@ class GitChangesList(QWidget):
         if not defer_refresh:
             self.start_auto_refresh()
 
-    def _configure_list(self, widget: QListWidget):
+    def _configure_list(self, widget: _GitChangeList):
         widget.itemDoubleClicked.connect(self._on_open)
         widget.itemSelectionChanged.connect(self._update_action_state)
         widget.files_dropped.connect(self._move_paths)
+        widget.drag_active_changed.connect(self._on_drag_active)
         widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         widget.customContextMenuRequested.connect(lambda pos, w=widget: self._context_menu(w, pos))
 
+    def _on_drag_active(self, active: bool):
+        self.refresh_pause_changed.emit(active)
+
+    def _toggle_filter(self):
+        visible = not self._filter_edit.isVisible()
+        self._filter_edit.setVisible(visible)
+        if visible:
+            self._filter_edit.setFocus()
+        else:
+            self._filter_edit.clear()
+
+    def _restore_lists_split(self):
+        split = git_panel_lists_split(self._settings.load())
+        if len(split) == 2 and sum(split) > 0:
+            self._lists_splitter.setSizes(split)
+        else:
+            self._lists_splitter.setSizes([120, 220])
+        self._lists_split_restored = True
+
+    def _on_lists_split_moved(self, _pos: int, _index: int):
+        if not self._lists_split_restored:
+            return
+        self.lists_split_changed.emit(self._lists_splitter.sizes())
+
     def apply_appearance(self):
         for label in (self._staged_label, self._unstaged_label):
-            label.setStyleSheet(sidebar_section_label_style())
-        font = mono_font(mono_font_pt())
+            label.setStyleSheet(git_panel_section_label_style())
+        self._filter_btn.setStyleSheet(hint_label_style())
         for widget in (self.staged_list, self.unstaged_list):
-            widget.setFont(font)
             widget.setStyleSheet(git_changes_list_style())
-        field_style = _git_change_field_style()
-        self.summary.setStyleSheet(field_style)
-        self.body.setStyleSheet(field_style)
-        action_style = _git_change_button_style()
-        self._commit_btn.setStyleSheet(action_style)
+        self.message.setFont(app_font())
+        self._apply_field_styles()
+        self._update_action_state()
+
+    def _apply_field_styles(self):
+        ready = self._staged_count > 0 and bool(self._commit_summary().strip())
+        self.message.setStyleSheet(git_commit_field_style(ready=ready))
+
+    def _commit_summary(self) -> str:
+        return split_commit_message(self.message.toPlainText())[0]
 
     def _on_open(self, item: QListWidgetItem):
+        if item.data(_ROLE_IS_HEADER):
+            return
         path = item.data(_ROLE_ABS_PATH)
         if path:
             self.file_open.emit(path)
@@ -245,7 +461,12 @@ class GitChangesList(QWidget):
             return
         if snapshot.repo_path != self.repo_path:
             return
-        self.set_repo_state(snapshot.is_repo, list(snapshot.changes))
+        with time_operation(
+            "git_changes.apply",
+            detail=f"changes={len(snapshot.changes)}",
+            slow_ms=50,
+        ):
+            self.set_repo_state(snapshot.is_repo, list(snapshot.changes))
 
     def _release_refresh_thread(self, thread: _GitChangesRefreshThread):
         if thread in self._refresh_threads:
@@ -268,26 +489,78 @@ class GitChangesList(QWidget):
         self.unstaged_list.clear()
         self._staged_count = 0
 
+        staged_items: list[GitFileChange] = []
+        unstaged_items: list[GitFileChange] = []
         for ch in changes:
             if ch.staged:
-                self._add_change(self.staged_list, ch, ch.staged_label or ch.label)
+                staged_items.append(ch)
             if ch.unstaged:
-                self._add_change(self.unstaged_list, ch, ch.unstaged_label or ch.label)
+                unstaged_items.append(ch)
+
+        for ch in staged_items:
+            self._add_change(self.staged_list, ch, ch.staged_label or ch.label)
+        self._populate_unstaged(unstaged_items)
 
         staged_count = self.staged_list.count()
-        unstaged_count = self.unstaged_list.count()
+        unstaged_count = sum(
+            1 for i in range(self.unstaged_list.count())
+            if not self.unstaged_list.item(i).data(_ROLE_IS_HEADER)
+        )
         self._staged_count = staged_count
         self._staged_label.setText(f"Staged ({staged_count})" if staged_count else "Staged")
         self._unstaged_label.setText(
             f"Unstaged ({unstaged_count})" if unstaged_count else "Unstaged — clean"
         )
+        self.unstaged_list.set_filter_text(self._filter_edit.text())
         self._update_action_state()
+
+    def _populate_unstaged(self, items: list[GitFileChange]):
+        if len(items) <= _FOLDER_GROUP_THRESHOLD:
+            for ch in items:
+                self._add_change(self.unstaged_list, ch, ch.unstaged_label or ch.label)
+            return
+        groups: dict[str, list[GitFileChange]] = {}
+        for ch in items:
+            normalized = ch.rel_path.replace("\\", "/")
+            folder = PurePosixPath(normalized).parts[0] if "/" in normalized else ""
+            groups.setdefault(folder or "(root)", []).append(ch)
+        for folder in sorted(groups, key=lambda name: (name == "(root)", name.lower())):
+            label = f"{folder}/" if folder != "(root)" else "Repository root"
+            header = QListWidgetItem(label)
+            header.setFlags(Qt.ItemFlag.NoItemFlags)
+            header.setData(_ROLE_IS_HEADER, True)
+            self.unstaged_list.addItem(header)
+            for ch in sorted(groups[folder], key=lambda c: c.rel_path.lower()):
+                display_path = self._grouped_display_path(ch.rel_path, folder)
+                self._add_change(
+                    self.unstaged_list,
+                    ch,
+                    ch.unstaged_label or ch.label,
+                    display_path=display_path,
+                )
+
+    @staticmethod
+    def _grouped_display_path(rel_path: str, folder: str) -> str:
+        if folder == "(root)":
+            return rel_path
+        normalized = rel_path.replace("\\", "/")
+        prefix = f"{folder}/"
+        if normalized.startswith(prefix):
+            return normalized[len(prefix):]
+        return rel_path
 
     def start_auto_refresh(self):
         if self._auto_refresh_started:
             return
         self._auto_refresh_started = True
         self._refresh_timer.start(5000)
+
+    def pause_auto_refresh(self):
+        self._refresh_timer.stop()
+
+    def resume_auto_refresh(self):
+        if self._auto_refresh_started:
+            self._refresh_timer.start(5000)
 
     def _set_loading(self):
         self.staged_list.clear()
@@ -298,14 +571,23 @@ class GitChangesList(QWidget):
         self._add_disabled(self.unstaged_list, "(loading git status)")
         self._update_action_state()
 
-    def _add_change(self, widget: QListWidget, ch: GitFileChange, label: str):
+    def _add_change(
+        self,
+        widget: QListWidget,
+        ch: GitFileChange,
+        label: str,
+        *,
+        display_path: str | None = None,
+    ):
         prefix = label or "·"
-        item = QListWidgetItem(ch.rel_path)
+        shown_path = display_path if display_path is not None else ch.rel_path
+        item = QListWidgetItem(shown_path)
         item.setIcon(git_status_icon(ch.code, prefix))
         item.setToolTip(f"{git_status_description(ch.code, prefix)} — {ch.rel_path}")
         item.setData(_ROLE_ABS_PATH, ch.abs_path)
         item.setData(_ROLE_REL_PATH, ch.rel_path)
-        item.setForeground(QColor(git_status_color(ch.code)))
+        item.setData(_ROLE_STATUS_CODE, ch.code)
+        item.setData(_ROLE_STATUS_LABEL, prefix)
         widget.addItem(item)
 
     @staticmethod
@@ -314,15 +596,49 @@ class GitChangesList(QWidget):
         item.setFlags(Qt.ItemFlag.NoItemFlags)
         widget.addItem(item)
 
-    def _selected_rel_paths(self, widget: QListWidget) -> list[str]:
+    def _all_rel_paths(self, widget: QListWidget, *, selected_only: bool = False) -> list[str]:
         paths: list[str] = []
         seen: set[str] = set()
-        for item in widget.selectedItems():
+        items = widget.selectedItems() if selected_only else [
+            widget.item(row) for row in range(widget.count())
+        ]
+        for item in items:
+            if item is None or item.data(_ROLE_IS_HEADER):
+                continue
             rel = str(item.data(_ROLE_REL_PATH) or "").strip()
             if rel and rel not in seen:
                 paths.append(rel)
                 seen.add(rel)
         return paths
+
+    def _selected_rel_paths(self, widget: QListWidget) -> list[str]:
+        return self._all_rel_paths(widget, selected_only=True)
+
+    def _section_menu(self, *, staged: bool):
+        widget = self.staged_list if staged else self.unstaged_list
+        menu = QMenu(self)
+        selected = self._selected_rel_paths(widget)
+        all_paths = self._all_rel_paths(widget)
+        if staged:
+            unstage = QAction("Unstage all", self)
+            unstage.setEnabled(bool(all_paths))
+            unstage.triggered.connect(lambda: self._run_change_action("Back", unstage_files(self.repo_path, all_paths)))
+            menu.addAction(unstage)
+            if selected:
+                partial = QAction("Unstage selected", self)
+                partial.triggered.connect(lambda: self._run_change_action("Back", unstage_files(self.repo_path, selected)))
+                menu.addAction(partial)
+        else:
+            stage_all = QAction("Stage all", self)
+            stage_all.setEnabled(bool(all_paths))
+            stage_all.triggered.connect(lambda: self._run_change_action("Stage", stage_files(self.repo_path, all_paths)))
+            menu.addAction(stage_all)
+            if selected:
+                stage_sel = QAction("Stage selected", self)
+                stage_sel.triggered.connect(lambda: self._run_change_action("Stage", stage_files(self.repo_path, selected)))
+                menu.addAction(stage_sel)
+        anchor = self._staged_label if staged else self._unstaged_label
+        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
     def _move_paths(self, source_staged: bool, target_staged: bool, paths: list[str]):
         if source_staged == target_staged:
@@ -353,8 +669,7 @@ class GitChangesList(QWidget):
         self._message_thread.start()
 
     def _on_commit_message_generated(self, summary: str, body: str):
-        self.summary.setText(summary)
-        self.body.setPlainText(body)
+        self.message.setPlainText(format_commit_message(summary, body))
         self._update_action_state()
 
     def _on_commit_message_error(self, detail: str):
@@ -377,32 +692,36 @@ class GitChangesList(QWidget):
     def _advance_generate_animation(self):
         frame = self._generate_frame % _GENERATING_FRAME_COUNT
         self._generate_frame += 1
-        self._generate_action.setIcon(_commit_message_busy_icon(frame))
-        self._generate_action.setText("")
-        self._generate_action.setToolTip("Generating commit message...")
+        self._generate_btn.setIcon(_commit_message_busy_icon(frame))
+        self._generate_btn.setToolTip("Generating commit message...")
 
     def _stop_generate_animation(self):
         self._generate_timer.stop()
-        self._generate_action.setIcon(self._generate_icon)
-        self._generate_action.setText("")
-        self._generate_action.setToolTip("Generate commit message from staged files")
+        self._generate_btn.setIcon(self._generate_icon)
+        self._generate_btn.setToolTip("Generate commit message from staged files")
 
     def _context_menu(self, widget: QListWidget, pos):
         item = widget.itemAt(pos)
-        if item and not item.isSelected():
+        if item and not item.isSelected() and not item.data(_ROLE_IS_HEADER):
             widget.clearSelection()
             item.setSelected(True)
         paths = self._selected_rel_paths(widget)
         if not paths:
             return
         menu = QMenu(self)
-        stash = QAction("Stash selected...", self)
-        stash.triggered.connect(lambda: self._stash_selected(widget))
-        menu.addAction(stash)
-        discard = QAction("Discard changes...", self)
-        discard.triggered.connect(lambda: self._discard_selected(widget))
-        menu.addAction(discard)
+        menu.addAction("Stash selected...", lambda: self._stash_selected(widget))
+        menu.addAction("Discard changes...", lambda: self._discard_selected(widget))
         menu.exec(widget.viewport().mapToGlobal(pos))
+
+    def _commit_context_menu(self, pos):
+        if self._staged_count <= 0 or not self._commit_summary().strip():
+            return
+        menu = QMenu(self)
+        menu.addAction(
+            "Commit and summarize in chat",
+            lambda: self._commit(summarize_in_chat=True),
+        )
+        menu.exec(self._commit_btn.mapToGlobal(pos))
 
     def _stash_selected(self, widget: QListWidget):
         paths = self._selected_rel_paths(widget)
@@ -444,15 +763,14 @@ class GitChangesList(QWidget):
         )
         return answer == QMessageBox.StandardButton.Discard
 
-    def _commit(self):
-        result = commit_staged(
-            self.repo_path,
-            self.summary.text(),
-            self.body.toPlainText(),
-        )
+    def _commit(self, *, summarize_in_chat: bool = False):
+        summary, body = split_commit_message(self.message.toPlainText())
+        staged_count = self._staged_count
+        result = commit_staged(self.repo_path, summary, body)
         if result.ok:
-            self.summary.clear()
-            self.body.clear()
+            if summarize_in_chat:
+                self.commit_summarized.emit(_commit_chat_summary(summary, body, staged_count))
+            self.message.clear()
         self._run_change_action("Commit", result, refresh_history=True)
 
     def _run_change_action(
@@ -471,10 +789,19 @@ class GitChangesList(QWidget):
             self._update_action_state()
 
     def _update_action_state(self):
-        has_summary = bool(self.summary.text().strip())
-        self._commit_btn.setEnabled(self._staged_count > 0 and has_summary)
+        has_summary = bool(self._commit_summary().strip())
+        ready = self._staged_count > 0 and has_summary
+        self._commit_btn.setEnabled(ready)
+        if ready:
+            noun = "file" if self._staged_count == 1 else "files"
+            self._commit_btn.setToolTip(f"Commit {self._staged_count} staged {noun}")
+            self._commit_btn.setStyleSheet(primary_button_style())
+        else:
+            self._commit_btn.setToolTip("Stage files and enter a commit message")
+            self._commit_btn.setStyleSheet(git_change_button_style())
+        self._apply_field_styles()
         generating = bool(self._message_thread and self._message_thread.isRunning())
-        self._generate_action.setEnabled(self._staged_count > 0 and not generating)
+        self._generate_btn.setEnabled(self._staged_count > 0 and not generating)
 
     def _show_git_error(self, label: str, result: GitCommandResult):
         detail = _git_result_detail(result) or f"{label} failed."
@@ -520,6 +847,25 @@ class GitChangesList(QWidget):
     def closeEvent(self, event):
         self.shutdown()
         super().closeEvent(event)
+
+
+class _GitChangesRefreshThread(QThread):
+    done = pyqtSignal(int, object)
+
+    def __init__(self, generation: int, repo_path: str, parent=None):
+        super().__init__(parent)
+        self._generation = generation
+        self._repo_path = repo_path
+
+    def run(self):
+        self.done.emit(self._generation, build_git_snapshot(self._repo_path))
+
+
+def _commit_chat_summary(summary: str, body: str, staged_count: int) -> str:
+    lines = [f"I committed {staged_count} file(s):", f"- {summary}"]
+    if body.strip():
+        lines.extend(["", body.strip()])
+    return "\n".join(lines)
 
 
 def _default_stash_message(paths: list[str]) -> str:
@@ -575,11 +921,4 @@ def _git_change_button_style(theme: str | None = None) -> str:
 
 
 def _git_change_field_style(theme: str | None = None) -> str:
-    p = palette(theme)
-    return compact_field_style(
-        selector="QLineEdit, QTextEdit",
-        padding="4px 6px",
-        border_radius=6,
-        border_color=p["BORDER_SUBTLE"],
-        theme=theme,
-    )
+    return git_commit_field_style(theme=theme)

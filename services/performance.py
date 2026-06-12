@@ -15,6 +15,7 @@ import config
 
 DEFAULT_SLOW_MS = 100.0
 MAX_RECENT_EVENTS = 500
+DEFAULT_LOG_SUMMARY_BYTES = 2 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,17 @@ class PerformanceEvent:
     detail: str = ""
     thread: str = ""
     created_at: str = ""
+
+
+@dataclass(frozen=True)
+class PerformanceOperationSummary:
+    operation: str
+    count: int
+    total_ms: float
+    max_ms: float
+    avg_ms: float
+    latest_detail: str = ""
+    latest_at: str = ""
 
 
 class PerformanceRecorder:
@@ -47,6 +59,11 @@ class PerformanceRecorder:
     def recent(self) -> list[PerformanceEvent]:
         with self._lock:
             return list(self._events)
+
+    def slowest_operations(self, limit: int = 10) -> list[PerformanceOperationSummary]:
+        with self._lock:
+            events = list(self._events)
+        return summarize_events(events, limit=limit)
 
     def record(
         self,
@@ -146,3 +163,79 @@ def time_operation(
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         if elapsed_ms >= slow_ms:
             recorder.record(operation, elapsed_ms, detail=detail)
+
+
+def summarize_events(
+    events: list[PerformanceEvent],
+    *,
+    limit: int = 10,
+) -> list[PerformanceOperationSummary]:
+    grouped: dict[str, list[PerformanceEvent]] = {}
+    for event in events:
+        grouped.setdefault(event.operation, []).append(event)
+
+    summaries = []
+    for operation, operation_events in grouped.items():
+        total_ms = sum(event.elapsed_ms for event in operation_events)
+        max_ms = max(event.elapsed_ms for event in operation_events)
+        latest = operation_events[-1]
+        count = len(operation_events)
+        summaries.append(
+            PerformanceOperationSummary(
+                operation=operation,
+                count=count,
+                total_ms=round(total_ms, 3),
+                max_ms=round(max_ms, 3),
+                avg_ms=round(total_ms / count, 3),
+                latest_detail=latest.detail,
+                latest_at=latest.created_at,
+            )
+        )
+
+    summaries.sort(key=lambda item: (-item.total_ms, -item.max_ms, item.operation))
+    return summaries[:max(0, int(limit))]
+
+
+def slowest_logged_operations(
+    log_path: Path | None = None,
+    *,
+    limit: int = 10,
+    max_bytes: int = DEFAULT_LOG_SUMMARY_BYTES,
+) -> list[PerformanceOperationSummary]:
+    path = log_path or recorder.log_path
+    return summarize_events(_read_logged_events(path, max_bytes=max_bytes), limit=limit)
+
+
+def _read_logged_events(path: Path, *, max_bytes: int) -> list[PerformanceEvent]:
+    if max_bytes <= 0 or not path.exists():
+        return []
+    size = path.stat().st_size
+    with path.open("rb") as f:
+        if size > max_bytes:
+            f.seek(size - max_bytes)
+            f.readline()
+        raw = f.read(max_bytes)
+
+    events: list[PerformanceEvent] = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        try:
+            operation = str(data["operation"])
+            elapsed_ms = float(data["elapsed_ms"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        events.append(
+            PerformanceEvent(
+                operation=operation,
+                elapsed_ms=round(elapsed_ms, 3),
+                detail=str(data.get("detail") or ""),
+                thread=str(data.get("thread") or ""),
+                created_at=str(data.get("created_at") or ""),
+            )
+        )
+    return events

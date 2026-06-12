@@ -1101,7 +1101,7 @@ def test_text_file_tab_right_click_diagnostic_marker_drafts_fix_request(qapp, wo
     assert event.accepted is True
     _wait_until(qapp, lambda: bool(drafted))
     assert drafted
-    assert "Please fix this diagnostic in @src/main.py:2." in drafted[0][0]
+    assert "Fix this ruff F841 issue in @src/main.py:2." in drafted[0][0]
     assert "Diagnostic tool: ruff F841" in drafted[0][0]
     assert "Local variable app is assigned to but never used" in drafted[0][0]
     assert drafted[0][1] == ["src/main.py"]
@@ -1120,7 +1120,7 @@ def test_text_file_tab_uses_configured_chat_prompt_templates(qapp, workspace):
         str(workspace),
         None,
         file_review_prompt="Inspect {mention} from {path}.",
-        diagnostic_fix_prompt="Resolve {mention} in {path} line {line}.",
+        diagnostic_fix_prompt="Resolve {mention} in {path} line {line} using {tool} for {file}.",
     )
     drafted = []
     tab.diagnostic_fix_requested.connect(lambda text, refs: drafted.append((text, refs)))
@@ -1143,10 +1143,43 @@ def test_text_file_tab_uses_configured_chat_prompt_templates(qapp, workspace):
         ),
     ])
 
-    assert drafted[-1][0].startswith("Resolve @src/main.py:2 in src/main.py line 2.")
+    assert drafted[-1][0].startswith(
+        "Resolve @src/main.py:2 in src/main.py line 2 using ruff F841 for @src/main.py."
+    )
     assert "Diagnostic tool: ruff F841" in drafted[-1][0]
     assert "Diagnostic output:" in drafted[-1][0]
     assert drafted[-1][1] == ["src/main.py"]
+    tab.close()
+    tab.deleteLater()
+    qapp.processEvents()
+
+
+def test_text_file_tab_ask_fix_all_includes_known_linter_command(qapp, workspace):
+    from services.language_features import Diagnostic
+
+    path = workspace / "docs" / "custom-models.md"
+    tab = _TextFileTab(str(path), "# Title\n", str(workspace), None)
+    drafted = []
+    tab.diagnostic_fix_requested.connect(lambda text, refs: drafted.append((text, refs)))
+
+    tab._draft_all_diagnostic_fixes([
+        Diagnostic(
+            path=str(path),
+            line=3,
+            column=0,
+            severity="warning",
+            source="pymarkdown",
+            code="MD022",
+            message="Headings should be surrounded by blank lines.",
+        ),
+    ])
+
+    assert drafted[-1][0] == (
+        "Run `pymarkdown scan docs/custom-models.md`, "
+        "then fix every issue reported by pymarkdown in @docs/custom-models.md."
+    )
+    assert "Diagnostic output:" not in drafted[-1][0]
+    assert drafted[-1][1] == ["docs/custom-models.md"]
     tab.close()
     tab.deleteLater()
     qapp.processEvents()
@@ -1389,24 +1422,28 @@ def test_file_viewer_markdown_uses_live_split_preview(qapp, workspace, monkeypat
 
     panel.open_file(str(path), repo_root=str(workspace))
     tab = panel._tabs.widget(0)
+    tab._preview_toggle.setChecked(True)
+    qapp.processEvents()
     tab._apply_markdown_preview()
     _wait_until(qapp, lambda: "<h1" in tab._preview.toHtml().lower())
 
     assert tab._status.text() == ""
     assert tab._status.isHidden()
-    assert tab._preview.isVisibleTo(tab)
     assert tab._editor.isVisibleTo(tab)
+    assert tab._preview.isHidden()
     assert tab._editor.isReadOnly() is False
     assert tab._edit_mode is True
+    assert tab.is_markdown_preview_pane_active() is True
     assert tab._preview_toggle.isChecked() is True
+    tab._apply_markdown_preview()
+    _wait_until(qapp, lambda: "<h1" in tab._preview.toHtml().lower())
     assert "<h1" in tab._preview.toHtml().lower()
     assert "<table" in tab._preview.toHtml().lower()
 
     tab._preview.edit_requested.emit()
     assert tab._editor.isVisibleTo(tab)
-    assert tab._preview.isVisibleTo(tab)
     assert tab._editor.isReadOnly() is False
-    assert tab._preview_toggle.isChecked() is True
+    assert tab._edit_mode is True
 
     tab._editor.setPlainText("# Saved\n")
     _wait_until(qapp, lambda: "Saved" in tab._preview.toPlainText())
@@ -1419,7 +1456,6 @@ def test_file_viewer_markdown_uses_live_split_preview(qapp, workspace, monkeypat
 
     assert path.read_text(encoding="utf-8") == "# Saved\n"
     assert tab._status.text() == "Saved"
-    assert tab._preview.isVisibleTo(tab)
     assert tab._editor.isVisibleTo(tab)
     assert tab._preview_toggle.isChecked() is True
     assert "Saved" in tab._preview.toPlainText()
@@ -1449,18 +1485,59 @@ def test_file_viewer_preview_checkbox_toggles_markdown_source(qapp, workspace):
     panel.open_file(str(path), repo_root=str(workspace))
     tab = panel._tabs.widget(0)
     assert tab._preview_toggle.text() == "Show preview"
-    assert "beside the source editor" in tab._preview_toggle.toolTip()
+    assert "in place of chat" in tab._preview_toggle.toolTip()
     tab._preview_toggle.setChecked(False)
 
     assert tab._editor.isVisibleTo(tab)
     assert tab._preview.isHidden()
-    assert tab._edit_mode is True
 
     tab._preview_toggle.setChecked(True)
+    qapp.processEvents()
 
-    assert tab._preview.isVisibleTo(tab)
     assert tab._editor.isVisibleTo(tab)
+    assert tab._preview.isHidden()
     assert tab._edit_mode is True
+    panel.close()
+
+
+def test_file_viewer_markdown_preview_populates_on_toggle(qapp, workspace, monkeypatch):
+    monkeypatch.setattr(_TextFileTab, "_refresh_diagnostics", lambda self, delay_ms=None: None)
+    path = workspace / "README.md"
+    path.write_text("# Hello\n", encoding="utf-8")
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace))
+    tab = panel._tabs.widget(0)
+    tab._preview_toggle.setChecked(True)
+    qapp.processEvents()
+    _wait_until(qapp, lambda: "Hello" in tab._preview.toPlainText())
+
+    panel.close()
+
+
+def test_file_viewer_take_preview_for_pane_refreshes_empty_preview(
+    qapp, workspace, monkeypatch,
+):
+    from PyQt6.QtWidgets import QVBoxLayout, QWidget
+
+    monkeypatch.setattr(_TextFileTab, "_refresh_diagnostics", lambda self, delay_ms=None: None)
+    path = workspace / "README.md"
+    path.write_text("# Hosted\n", encoding="utf-8")
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(path), repo_root=str(workspace))
+    tab = panel._tabs.widget(0)
+    tab._preview_toggle.setChecked(True)
+    tab._preview_pane_active = True
+    qapp.processEvents()
+
+    host = QWidget()
+    host.setLayout(QVBoxLayout())
+    host.show()
+    tab.take_preview_for_pane(host)
+    _wait_until(qapp, lambda: "Hosted" in tab._preview.toPlainText())
+    assert tab._preview.parent() is host
+
     panel.close()
 
 
@@ -1482,8 +1559,8 @@ def test_file_viewer_markdown_preview_and_changes_switch_directly(qapp, workspac
 
     assert tab._diff_toggle.isChecked() is False
     assert tab._preview_toggle.isChecked() is True
-    assert tab._preview.isVisibleTo(tab)
     assert tab._editor.isVisibleTo(tab)
+    assert tab._preview.isHidden()
 
     tab._diff_toggle.setChecked(True)
 
@@ -1500,6 +1577,8 @@ def test_file_viewer_escape_key_keeps_clean_markdown_live_split(qapp, workspace)
 
     panel.open_file(str(path), repo_root=str(workspace))
     tab = panel._tabs.widget(0)
+    tab._preview_toggle.setChecked(True)
+    qapp.processEvents()
     tab._preview.edit_requested.emit()
     tab._editor.setFocus()
     qapp.processEvents()
@@ -1509,8 +1588,8 @@ def test_file_viewer_escape_key_keeps_clean_markdown_live_split(qapp, workspace)
     assert tab._dirty is False
     assert tab._edit_mode is True
     assert tab._preview_toggle.isChecked() is True
-    assert tab._preview.isVisibleTo(tab)
     assert tab._editor.isVisibleTo(tab)
+    assert tab._preview.isHidden()
     panel.close()
 
 
@@ -1522,6 +1601,8 @@ def test_file_viewer_escape_discards_markdown_edit_and_returns_to_preview(qapp, 
 
     panel.open_file(str(path), repo_root=str(workspace))
     tab = panel._tabs.widget(0)
+    tab._preview_toggle.setChecked(True)
+    qapp.processEvents()
     tab._preview.edit_requested.emit()
     tab._editor.setPlainText("# Unsaved\n")
     assert tab._dirty is True
@@ -1536,8 +1617,8 @@ def test_file_viewer_escape_discards_markdown_edit_and_returns_to_preview(qapp, 
     assert tab._edit_mode is True
     assert tab._status.text() == "Reverted"
     assert tab._preview_toggle.isChecked() is True
-    assert tab._preview.isVisibleTo(tab)
     assert tab._editor.isVisibleTo(tab)
+    assert tab._preview.isHidden()
     _wait_until(qapp, lambda: "Original" in tab._preview.toPlainText())
     assert "Original" in tab._preview.toPlainText()
     panel.close()

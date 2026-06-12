@@ -81,8 +81,29 @@ def test_conversation_row_actions_are_quiet_until_active(qapp):
 
     unpinned.set_active(True)
 
+    assert unpinned.del_btn.isHidden()
+    assert unpinned.pin_btn.isHidden()
+
+    unpinned._hovered = True
+    unpinned._sync_action_visibility()
     assert not unpinned.del_btn.isHidden()
     assert not unpinned.pin_btn.isHidden()
+
+
+def test_conversation_item_height_is_compact(qapp):
+    from ui.widgets.conversation_panel import _conversation_item_height
+
+    assert _conversation_item_height() <= 36
+
+
+def test_conversation_item_shows_relative_ago_on_one_line(qapp):
+    item = ConversationItem("Demo chat", "4h", ago_tooltip="Jun 10, 2026 08:00")
+    item.show()
+    qapp.processEvents()
+    assert item.ago_lbl.text() == "4h"
+    assert item.ago_lbl.toolTip() == "Jun 10, 2026 08:00"
+    assert item.ago_lbl.isVisible()
+    assert item.title_lbl.isVisible()
 
 
 def test_refresh_clears_editing_item(store, qapp):
@@ -304,3 +325,62 @@ def test_trash_section_expands_and_restores_chat(store, qapp):
 
     assert store.list_trash() == []
     assert [summary["id"] for _, summary in store.list_all()] == ["panel_trash"]
+
+
+def test_trash_section_permanently_deletes_chat(store, qapp):
+    path = store.save(
+        "panel_purge",
+        {
+            "id": "panel_purge",
+            "title": "Gone",
+            "messages": [],
+            "updated_at": "2026-02-01T12:00:00",
+        },
+    )
+    panel = ConversationPanel(store)
+    pool = _WorkerPool()
+    panel._action_pool = pool
+    deleted = []
+    panel.deleted.connect(deleted.append)
+    panel._delete(str(path))
+    pool.workers.pop(0).run()
+    qapp.processEvents()
+    panel.refresh()
+
+    header_widget = panel.list.itemWidget(panel.list.item(0))
+    header_widget.clicked.emit()
+    qapp.processEvents()
+
+    widget = panel.list.itemWidget(panel.list.item(1))
+    deleted.clear()
+    widget.purge_requested.emit()
+    pool.workers.pop(0).run()
+    qapp.processEvents()
+    panel.refresh()
+
+    assert deleted == ["panel_purge"]
+    assert store.list_trash() == []
+    assert store.list_all() == []
+    assert panel.list.count() == 0
+
+
+def test_conversation_action_worker_purges_trashed_chat(store, qapp):
+    path = store.save(
+        "action_purge",
+        {
+            "id": "action_purge",
+            "title": "Purge me",
+            "messages": [],
+            "updated_at": "2026-02-01T12:00:00",
+        },
+    )
+    store.delete(str(path))
+    trash_path = store.list_trash()[0][0]
+    done = []
+    worker = _ConversationActionWorker(store, "purge", str(trash_path))
+    worker.signals.done.connect(lambda *args: done.append(args))
+
+    worker.run()
+
+    assert done == [("purge", "action_purge", "", "")]
+    assert store.list_trash() == []

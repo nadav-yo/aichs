@@ -1,3 +1,6 @@
+from contextlib import contextmanager
+from types import SimpleNamespace
+
 from services.code_completion import CompletionItem
 from services.language_features import (
     CodeAction,
@@ -6,6 +9,7 @@ from services.language_features import (
     LanguageCompletionProvider,
     LanguageService,
     Symbol,
+    clear_matching_language_cache,
     _iter_raw_items,
     _nonnegative_int,
     _normalize_code_action_result,
@@ -153,6 +157,120 @@ def test_language_diagnostics_match_file_patterns_and_context(workspace):
     assert items[0].data == {"rule_url": "https://example.test/rule"}
     state_path = workspace / ".aichs" / "state" / "python_lang" / "diagnostics.json"
     assert state_path.exists()
+
+
+def test_language_callbacks_are_timed(workspace, monkeypatch):
+    import services.language_features as language_features
+
+    operations = []
+
+    @contextmanager
+    def fake_time_operation(operation, *, detail="", slow_ms=100.0):
+        operations.append((operation, detail, slow_ms))
+        yield
+
+    monkeypatch.setattr(language_features, "time_operation", fake_time_operation)
+    path = workspace / "src" / "main.py"
+    write_extension(
+        workspace,
+        "timed_lang.py",
+        """
+        def register(registry):
+            registry.language(
+                name="python",
+                file_patterns=["*.py"],
+                diagnostics=lambda ctx: [{"line": 1, "message": "timed"}],
+                symbols=lambda ctx: [{"name": "App", "line": 1}],
+                completion=lambda ctx: ["append"],
+                code_actions=lambda ctx: [{"id": "timed.fix", "title": "Fix timed"}],
+                apply_code_action=lambda ctx: {"content": ctx.content.replace("bad", "good")},
+                format_document=lambda ctx: {"content": ctx.content.strip() + "\\n"},
+            )
+        """,
+    )
+    service = LanguageService(str(workspace))
+
+    service.diagnostics(str(path), "bad\n")
+    service.symbols(str(path), "bad\n")
+    service.completions(str(path), "bad\n", 3, "b")
+    service.code_actions(str(path), "bad\n")
+    service.apply_code_action(str(path), "bad\n", "timed.fix")
+    service.format_document(str(path), "bad\n\n")
+
+    timed = {(operation, detail) for operation, detail, _slow_ms in operations}
+    detail = f"extension=timed_lang language=python path={path}"
+    assert ("language.diagnostics", detail) in timed
+    assert ("language.symbols", detail) in timed
+    assert ("language.completion", detail) in timed
+    assert ("language.code_actions", detail) in timed
+    assert ("language.apply_code_action", detail) in timed
+    assert ("language.format_document", detail) in timed
+    assert {slow_ms for _operation, _detail, slow_ms in operations} == {100.0}
+
+
+def test_language_matching_cache_reuses_extension_languages_across_service_instances(workspace, monkeypatch):
+    import services.language_features as language_features
+
+    clear_matching_language_cache()
+    path = workspace / "src" / "main.py"
+    calls = []
+    language = SimpleNamespace(
+        extension_id="cached-lang",
+        name="python",
+        file_patterns=("*.py",),
+        diagnostics=lambda ctx: [{"line": 1, "message": ctx.content.strip()}],
+        symbols=None,
+        completion=None,
+        code_actions=lambda ctx: [{"id": "cached.fix", "title": "Fix cached"}],
+        apply_code_action=None,
+        format_document=None,
+    )
+    monkeypatch.setattr(language_features, "extension_cache_signature", lambda _cwd: ("sig", 1))
+    monkeypatch.setattr(
+        language_features,
+        "extension_languages",
+        lambda cwd: calls.append(cwd) or ([language], []),
+    )
+
+    first, first_errors = diagnostics(str(workspace), str(path), "first\n")
+    actions, action_errors = code_actions(str(workspace), str(path), "second\n")
+
+    assert first_errors == []
+    assert action_errors == []
+    assert first[0].message == "first"
+    assert actions[0].id == "cached.fix"
+    assert calls == [str(workspace.resolve())]
+
+
+def test_language_matching_cache_invalidates_when_extension_signature_changes(workspace, monkeypatch):
+    import services.language_features as language_features
+
+    clear_matching_language_cache()
+    path = workspace / "src" / "main.py"
+    calls = []
+    signatures = iter([("sig", 1), ("sig", 2)])
+    language = SimpleNamespace(
+        extension_id="cached-lang",
+        name="python",
+        file_patterns=("*.py",),
+        diagnostics=lambda ctx: [{"line": 1, "message": "ok"}],
+        symbols=None,
+        completion=None,
+        code_actions=None,
+        apply_code_action=None,
+        format_document=None,
+    )
+    monkeypatch.setattr(language_features, "extension_cache_signature", lambda _cwd: next(signatures))
+    monkeypatch.setattr(
+        language_features,
+        "extension_languages",
+        lambda cwd: calls.append(cwd) or ([language], []),
+    )
+
+    diagnostics(str(workspace), str(path), "first\n")
+    diagnostics(str(workspace), str(path), "second\n")
+
+    assert calls == [str(workspace.resolve()), str(workspace.resolve())]
 
 
 def test_language_diagnostics_accept_alias_metadata_and_fix_safety(workspace):

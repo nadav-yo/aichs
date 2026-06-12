@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from pathlib import Path
 
 import services.text_search as text_search
 from services.text_search import (
@@ -54,6 +55,84 @@ def test_search_file_contents_skips_binary_and_honors_limit(workspace):
 
     assert len(matches) == 2
     assert all(not match.path.endswith("binary.bin") for match in matches)
+
+
+def test_search_file_contents_reads_only_preview_window(workspace, monkeypatch):
+    path = workspace / "large.txt"
+    path.write_bytes(b"needle-" + (b"x" * 128))
+    read_sizes = []
+    original_open = Path.open
+
+    class RecordingFile:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._handle.__exit__(*args)
+
+        def read(self, size=-1):
+            read_sizes.append(size)
+            return self._handle.read(size)
+
+    def recording_open(self, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        handle = original_open(self, *args, **kwargs)
+        if self == path and "b" in mode:
+            return RecordingFile(handle)
+        return handle
+
+    def fail_read_bytes(self):
+        raise AssertionError("text search must not read whole files")
+
+    monkeypatch.setattr(text_search, "MAX_FILE_PREVIEW_BYTES", 8)
+    monkeypatch.setattr(text_search, "list_workspace_files", lambda _root, limit=800: [str(path)])
+    monkeypatch.setattr(Path, "open", recording_open)
+    monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
+
+    matches = search_file_contents(workspace, "needle")
+    visible, candidates = search_file_contents_with_candidates(workspace, "needle")
+
+    assert [match.rel_path for match in matches] == ["large.txt"]
+    assert [match.rel_path for match in visible] == ["large.txt"]
+    assert [match.rel_path for match in candidates] == ["large.txt"]
+    assert read_sizes == [8, 8]
+
+
+def test_search_file_contents_skips_line_scan_when_preview_has_no_match(workspace, monkeypatch):
+    path = workspace / "large.txt"
+    path.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    monkeypatch.setattr(text_search, "list_workspace_files", lambda _root, limit=800: [str(path)])
+    monkeypatch.setattr(
+        text_search,
+        "_line_match",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("line scan should be skipped")),
+    )
+
+    assert search_file_contents(workspace, "needle") == []
+    assert search_file_contents_with_candidates(workspace, "needle") == ([], ())
+
+
+def test_search_file_contents_reuses_folded_query_for_line_matches(workspace, monkeypatch):
+    path = workspace / "match.txt"
+    path.write_text("Needle here\n", encoding="utf-8")
+    folded_queries = []
+    original_line_match = text_search._line_match
+
+    def recording_line_match(path_text, rel_path, line_no, line, query, folded_query):
+        folded_queries.append(folded_query)
+        return original_line_match(path_text, rel_path, line_no, line, query, folded_query)
+
+    monkeypatch.setattr(text_search, "list_workspace_files", lambda _root, limit=800: [str(path)])
+    monkeypatch.setattr(text_search, "_line_match", recording_line_match)
+
+    matches = search_file_contents(workspace, "NEEDLE")
+
+    assert [match.rel_path for match in matches] == ["match.txt"]
+    assert folded_queries == ["needle"]
 
 
 def test_search_file_contents_keeps_uncapped_refinement_candidates(workspace):

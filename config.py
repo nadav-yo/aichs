@@ -29,7 +29,14 @@ MAX_TERMINAL_BLOCKS = 500
 MAX_INLINE_IMAGE_DIMENSION = 1280
 MAX_TREE_ENTRIES_PER_DIR = 80
 
-from services.model_registry import MODELS, MODEL_PROVIDER  # noqa: F401
+# Left activity panel (rail + stack: chats, files, git).
+ACTIVITY_RAIL_WIDTH = 64
+MIN_ACTIVITY_WIDTH = 304
+DEFAULT_ACTIVITY_WIDTH = 424
+MAX_ACTIVITY_WIDTH = 640
+ACTIVITY_STACK_MIN_WIDTH = MIN_ACTIVITY_WIDTH - ACTIVITY_RAIL_WIDTH
+
+from services.model_registry import MODELS, MODEL_PROVIDER  # noqa: E402, F401
 
 SYSTEM_PROMPT = """You are a precise senior coding agent. Solve engineering tasks with minimal fluff.
 Inspect code before claims. Prefer small, correct changes that follow existing patterns.

@@ -262,15 +262,25 @@ def load_ad_hoc_qss_baseline(
     }
 
 
+def _ad_hoc_qss_key(formatted_offender: str) -> str:
+    parts = formatted_offender.split(":", 2)
+    if len(parts) == 3 and parts[1].isdigit():
+        return f"{parts[0].replace(chr(92), '/')}:{parts[2]}"
+    return formatted_offender.replace(chr(92), "/")
+
+
 def find_new_ad_hoc_qss_offenders(
     baseline_path: Path | None = None,
 ) -> list[str]:
     current = {
-        format_ad_hoc_qss_offender(entry)
-        for entry in iter_ad_hoc_qss_stylesheet_offenders()
+        _ad_hoc_qss_key(formatted): formatted
+        for formatted in (
+            format_ad_hoc_qss_offender(entry)
+            for entry in iter_ad_hoc_qss_stylesheet_offenders()
+        )
     }
-    baseline = load_ad_hoc_qss_baseline(baseline_path)
-    return sorted(current - baseline)
+    baseline = {_ad_hoc_qss_key(line) for line in load_ad_hoc_qss_baseline(baseline_path)}
+    return sorted(formatted for key, formatted in current.items() if key not in baseline)
 
 
 def iter_double_close_brace_literals(*paths: Path) -> Iterator[tuple[str, int, str]]:
@@ -290,8 +300,37 @@ def iter_double_close_brace_literals(*paths: Path) -> Iterator[tuple[str, int, s
             yield str(path), node.lineno, node.value
 
 
+def _run_window_probe_inprocess(
+    script: Path,
+    probe_args: tuple[str, ...],
+) -> subprocess.CompletedProcess[str]:
+    """Run the probe in-process; Linux offscreen subprocesses can SIGSEGV on MainWindow."""
+    import io
+
+    from tests.qss_window_probe import main
+
+    args = [sys.executable, str(script), *probe_args]
+    stderr_buffer = io.StringIO()
+    old_stderr = sys.stderr
+    try:
+        sys.stderr = stderr_buffer
+        workspace = probe_args[0] if probe_args else None
+        returncode = main(workspace)
+    finally:
+        sys.stderr = old_stderr
+    return subprocess.CompletedProcess(
+        args=args,
+        returncode=returncode,
+        stdout="",
+        stderr=stderr_buffer.getvalue(),
+    )
+
+
 def run_offscreen_window_probe(*probe_args: str) -> subprocess.CompletedProcess[str]:
     repo_root = Path(__file__).resolve().parent.parent
+    script = Path(__file__).resolve().parent / "qss_window_probe.py"
+    if sys.platform == "linux":
+        return _run_window_probe_inprocess(script, probe_args)
     env = {
         key: value
         for key, value in os.environ.items()
@@ -299,7 +338,6 @@ def run_offscreen_window_probe(*probe_args: str) -> subprocess.CompletedProcess[
     }
     env["PYTHONPATH"] = str(repo_root)
     env["QT_QPA_PLATFORM"] = "offscreen"
-    script = Path(__file__).resolve().parent / "qss_window_probe.py"
     return subprocess.run(
         [sys.executable, str(script), *probe_args],
         capture_output=True,
@@ -387,7 +425,9 @@ def collect_theme_stylesheet_cases(theme_name: str = DEFAULT_THEME) -> list[Styl
             theme.navigation_list_style(border=nav_border),
         ),
         ("conversation list", QListWidget, theme.conversation_list_style()),
-        ("git changes list", QListWidget, theme.git_changes_list_style()),
+        ("git log list", QListWidget, theme.git_log_list_style()),
+        ("git mode button", QPushButton, theme.git_mode_button_style(active=True)),
+        ("git commit field", QLineEdit, theme.git_commit_field_style(ready=True)),
         ("overlay results", QListWidget, theme.overlay_results_list_style()),
         ("popover list", QListWidget, theme.popover_list_style()),
         ("contained tree", QTreeWidget, theme.contained_tree_style()),
@@ -456,6 +496,7 @@ def collect_theme_stylesheet_cases(theme_name: str = DEFAULT_THEME) -> list[Styl
         ("rail button active", QPushButton, theme.rail_button_style(font_size=font_pt, active=True)),
         ("rail button idle", QPushButton, theme.rail_button_style(font_size=font_pt, active=False)),
         ("git action button", QPushButton, theme.git_action_button_style()),
+        ("git action status error", QLabel, theme.git_action_status_error_style()),
         ("git change button", QPushButton, theme.git_change_button_style()),
         ("context title button", QPushButton, theme.context_panel_title_button_style()),
         ("toggle tab button", QPushButton, theme.toggle_tab_button_style()),
@@ -504,7 +545,6 @@ def collect_theme_branching_stylesheet_cases() -> list[StyleCase]:
 
 def collect_widget_module_stylesheet_cases(theme_name: str = DEFAULT_THEME) -> list[StyleCase]:
     from storage.settings import SettingsStore
-    import ui.theme as theme
     from ui.widgets.extension_contributions import _badge_style
     from ui.widgets.extension_panel_dialog import _action_button_style, _heading_style
     from ui.widgets.extensions_dialog import (
@@ -573,5 +613,3 @@ def collect_widget_module_stylesheet_cases(theme_name: str = DEFAULT_THEME) -> l
                 )
             )
     return cases
-
-

@@ -1,4 +1,5 @@
 import time
+from contextlib import contextmanager
 
 from PyQt6.QtWidgets import QMenu, QPushButton
 
@@ -114,7 +115,7 @@ def test_parse_commit_log_line_keeps_legacy_mock_shape():
 
 def test_git_action_button_text_adds_count_only_when_present():
     assert _git_action_button_text("↑", 0) == "↑"
-    assert _git_action_button_text("↑", 2) == "↑ (2)"
+    assert _git_action_button_text("↑", 2) == "↑2"
 
 
 def test_git_action_button_expands_only_when_count_needs_room(qapp):
@@ -122,10 +123,10 @@ def test_git_action_button_expands_only_when_count_needs_room(qapp):
     _fit_git_action_button(button)
     resting_width = button.width()
 
-    button.setText("↓ (12)")
+    button.setText("↓12")
     _fit_git_action_button(button)
 
-    assert resting_width == 30
+    assert resting_width == 28
     assert button.width() > resting_width
     assert button.height() == 24
 
@@ -135,8 +136,8 @@ def test_git_action_buttons_start_at_empty_state_size(qapp, workspace):
 
     assert panel._pull_btn.text() == "↓"
     assert panel._push_btn.text() == "↑"
-    assert panel._pull_btn.width() == 30
-    assert panel._push_btn.width() == 30
+    assert panel._pull_btn.width() == 28
+    assert panel._push_btn.width() == 28
     assert panel._pull_btn.height() == 24
     assert panel._push_btn.height() == 24
 
@@ -173,13 +174,120 @@ def test_git_panel_shutdown_clears_refresh_threads(qapp, workspace):
     assert panel._changes._refresh_threads == []
 
 
-def test_git_panel_log_area_has_horizontal_inset(qapp, workspace):
+def test_git_panel_history_area_has_horizontal_inset(qapp, workspace):
     panel = GitPanel(str(workspace), defer_refresh=True)
-    splitter = panel.layout().itemAt(0).widget()
-    log_wrap = splitter.widget(1)
-    margins = log_wrap.layout().contentsMargins()
+    history_layout = panel._history_page.layout()
+    margins = history_layout.contentsMargins()
 
-    assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (6, 4, 6, 0)
+    assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (10, 4, 10, 8)
+
+
+def test_git_panel_apply_snapshot_is_timed(qapp, workspace, monkeypatch):
+    import ui.widgets.git_panel as git_panel
+
+    operations = []
+
+    @contextmanager
+    def fake_time_operation(operation, *, detail="", slow_ms=100.0):
+        operations.append((operation, detail, slow_ms))
+        yield
+
+    monkeypatch.setattr(git_panel, "time_operation", fake_time_operation)
+    panel = GitPanel(str(workspace), defer_refresh=True)
+    snapshot = _snapshot(
+        workspace,
+        log_line="abcdef123456\x1fabcdef1\x1fHEAD -> main\x1finitial",
+    )
+
+    panel.apply_snapshot(snapshot)
+
+    assert operations == [("git.apply", "changes=0 commits=1", 50)]
+
+
+def test_git_panel_deferred_auto_refresh_starts_only_when_ensured(qapp, workspace):
+    panel = GitPanel(str(workspace), defer_refresh=True, auto_refresh=False)
+    snapshot = _snapshot(
+        workspace,
+        log_line="abcdef123456\x1fabcdef1\x1fHEAD -> main\x1finitial",
+    )
+
+    panel.apply_snapshot(snapshot)
+
+    assert not panel._refresh_timer.isActive()
+    assert panel._auto_refresh_started is False
+
+    panel.ensure_loaded()
+
+    assert panel._refresh_timer.isActive()
+    assert panel._auto_refresh_started is True
+    panel.shutdown()
+
+
+def test_git_panel_refresh_coalesces_while_snapshot_worker_runs(qapp, workspace, monkeypatch):
+    import ui.widgets.git_panel as git_panel
+
+    snapshot = _snapshot(
+        workspace,
+        log_line="abcdef123456\x1fabcdef1\x1fHEAD -> main\x1finitial",
+    )
+    started = []
+
+    class FakeSignal:
+        def __init__(self):
+            self._callbacks = []
+
+        def connect(self, callback):
+            self._callbacks.append(callback)
+
+        def disconnect(self):
+            self._callbacks.clear()
+
+        def emit(self, *args):
+            for callback in list(self._callbacks):
+                callback(*args)
+
+    class FakeRefreshThread:
+        def __init__(self, generation, repo_path, parent=None):
+            self._generation = generation
+            self._repo_path = repo_path
+            self.done = FakeSignal()
+            self.finished = FakeSignal()
+            self._running = False
+
+        def start(self):
+            self._running = True
+            started.append(self)
+
+        def isRunning(self):
+            return self._running
+
+        def deleteLater(self):
+            pass
+
+        def finish(self):
+            self.done.emit(self._generation, snapshot)
+            self._running = False
+            self.finished.emit()
+
+    monkeypatch.setattr(git_panel, "_GitRefreshThread", FakeRefreshThread)
+    panel = GitPanel(str(workspace), defer_refresh=True)
+
+    panel.refresh()
+    panel.refresh()
+
+    assert len(started) == 1
+    assert panel._refresh_pending is True
+
+    started[0].finish()
+
+    assert len(started) == 2
+    assert panel._refresh_pending is False
+    assert panel._refresh_generation == 2
+
+    started[1].finish()
+
+    assert len(started) == 2
+    assert panel.log.count() == 1
 
 
 def test_git_log_skips_git_command_outside_repo(qapp, workspace, monkeypatch):
@@ -229,7 +337,36 @@ def test_git_log_context_menu_offers_copy_actions(qapp, workspace, monkeypatch):
 
     panel.log._context_menu(panel.log.visualItemRect(item).center())
 
-    assert action_texts == ["Copy commit message", "Copy commit hash"]
+    assert action_texts == [
+        "Copy commit message",
+        "Copy commit hash",
+        "Ask about this commit in chat",
+    ]
+
+
+def test_git_log_context_menu_copy_survives_list_refresh(qapp, workspace, monkeypatch):
+    _install_snapshot(
+        monkeypatch,
+        _snapshot(workspace, log_line="abcdef123456\x1fabcdef1\x1finitial"),
+    )
+    panel = GitPanel(str(workspace))
+    _wait_until(qapp, lambda: panel.log.count() == 1)
+    item = panel.log.item(0)
+    panel.log.setCurrentItem(item)
+    monkeypatch.setattr(panel.log, "itemAt", lambda _pos: item)
+
+    def exec_copy_message(menu, _pos):
+        panel.log.clear()
+        for action in menu.actions():
+            if str(action.data() or "") == "message":
+                return action
+        return None
+
+    monkeypatch.setattr(QMenu, "exec", exec_copy_message)
+    qapp.clipboard().clear()
+    panel.log._context_menu(panel.log.visualItemRect(item).center())
+
+    assert qapp.clipboard().text() == "initial"
 
 
 def test_git_log_copy_helpers_copy_commit_message_and_hash(qapp, workspace, monkeypatch):
@@ -242,11 +379,11 @@ def test_git_log_copy_helpers_copy_commit_message_and_hash(qapp, workspace, monk
     item = panel.log.item(0)
     qapp.clipboard().clear()
 
-    panel.log._copy_commit_message(item)
+    panel.log._copy_commit_message("initial")
 
     assert qapp.clipboard().text() == "initial"
 
-    panel.log._copy_commit_hash(item)
+    panel.log._copy_commit_hash("abcdef123456")
 
     assert qapp.clipboard().text() == item.data(_ROLE_HASH)
 
@@ -270,10 +407,10 @@ def test_git_log_push_button_follows_ahead_state(qapp, workspace, monkeypatch):
 
     ahead["count"] = 2
     panel.refresh()
-    _wait_until(qapp, lambda: panel._push_btn.text() == "↑ (2)")
+    _wait_until(qapp, lambda: panel._push_btn.text() == "↑2")
 
     assert panel._push_btn.isEnabled()
-    assert panel._push_btn.text() == "↑ (2)"
+    assert panel._push_btn.text() == "↑2"
     assert "2 local commits" in panel._push_btn.toolTip()
 
 
@@ -284,9 +421,9 @@ def test_git_log_pull_button_shows_behind_count(qapp, workspace, monkeypatch):
     )
 
     panel = GitPanel(str(workspace))
-    _wait_until(qapp, lambda: panel._pull_btn.text() == "↓ (3)")
+    _wait_until(qapp, lambda: panel._pull_btn.text() == "↓3")
 
-    assert panel._pull_btn.text() == "↓ (3)"
+    assert panel._pull_btn.text() == "↓3"
     assert panel._pull_btn.isEnabled()
     assert "3 upstream commits" in panel._pull_btn.toolTip()
 
@@ -344,7 +481,7 @@ def test_git_action_failure_status_keeps_detail_and_prompt(qapp, workspace):
         str(workspace),
         result,
     )
-    assert "Help me diagnose this git pull failure." in prompt
+    assert "Diagnose this git pull failure and suggest a fix." in prompt
     assert "Command: git pull --ff-only" in prompt
     assert "Exit code: 128" in prompt
     assert "fatal: refusing to merge unrelated histories" in prompt
@@ -390,7 +527,7 @@ def test_git_action_failure_prompt_uses_custom_template(workspace):
         "Bad {missing}",
     )
 
-    assert fallback.startswith("Help me diagnose this git push failure.")
+    assert fallback.startswith("Diagnose this git push failure and suggest a fix.")
 
 
 def test_git_action_failure_context_menu_can_ask_agent(qapp, workspace, monkeypatch):

@@ -60,3 +60,9 @@ class TestContextBudget:
         window = 100_000
         budget = self._budget([], window_tokens=window)
         assert budget.compaction_limit_tokens == compaction_threshold(window)
+
+    def test_compaction_limit_is_window_minus_reserve(self):
+        window = 32_768
+        budget = self._budget([], window_tokens=window)
+        assert budget.compaction_limit_tokens == window - budget.reserve_tokens
+        assert budget.compaction_limit_tokens < window

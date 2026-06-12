@@ -23,13 +23,15 @@ from services.usage import usage_summary
 from ui.avatars import AVATAR_SIZE, avatar_label, avatar_pixmap
 from ui.markdown_html import code_from_copy_url, markdown_body
 from ui.theme import (
-    palette, chat_font_pt, bubble_label_style, composer_style, edit_bubble_style,
+    chat_font_pt, bubble_label_style, edit_bubble_style,
     markdown_css, markdown_file_link_style, timestamp_style, crew_name_style, crew_tone,
-    user_reference_style,
+    inline_code_style, user_reference_style,
 )
 
 _CODE_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
 _STREAM_RENDER_INTERVAL_MS = 50
+_STREAM_PREFIX_RENDER_INTERVAL_MS = 350
+_MIN_STREAM_PREFIX_GROWTH_CHARS = 1
 _ASYNC_MARKDOWN_RENDER_CHARS = 16_000
 _FILE_RE = re.compile(
     r"(?P<path>[\w./\\-]+\.(?:py|md|json|yaml|yml|toml|sh|js|ts|tsx|jsx|css|html|txt|rs|go|java|c|cpp|h|hpp|cs|php|rb|swift|kt|sql|xml))",
@@ -109,6 +111,25 @@ def _linkify_path_text(text: str) -> str:
     return "".join(parts)
 
 
+def _safe_paragraph_boundary(text: str) -> int:
+    """Index after the last blank-line paragraph break outside an open code fence."""
+    fence_count = 0
+    best = 0
+    i = 0
+    n = len(text)
+    while i < n - 1:
+        if text.startswith("```", i):
+            fence_count += 1
+            i += 3
+            continue
+        if fence_count % 2 == 0 and text[i] == "\n" and text[i + 1] == "\n":
+            best = i + 2
+            i += 2
+            continue
+        i += 1
+    return best
+
+
 def _to_html(text: str) -> str:
     body = markdown_body(text, extensions=["fenced_code", "nl2br", "tables"])
     return f"<style>{markdown_css()}</style>{_linkify_paths(body)}"
@@ -132,10 +153,10 @@ class _MarkdownRenderWorker(QRunnable):
 
 
 _MENTION_RE = re.compile(r'@(?:"([^"]+)"|([^\s@]*[^\s@.,:;!?)\]}]))')
+_USER_INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 
 
-def _linkify_user_text(text: str) -> str:
-    """Turn @file mentions in user messages into clickable file links."""
+def _linkify_user_mentions(text: str) -> str:
     link_style = user_reference_style()
 
     def repl(match: re.Match) -> str:
@@ -156,6 +177,20 @@ def _linkify_user_text(text: str) -> str:
         parts.append(repl(match))
         last = match.end()
     parts.append(html.escape(text[last:]))
+    return "".join(parts)
+
+
+def _linkify_user_text(text: str) -> str:
+    """Render minimal user-message rich text: @file mentions and `inline code`."""
+    parts: list[str] = []
+    last = 0
+    code_style = inline_code_style()
+    for match in _USER_INLINE_CODE_RE.finditer(text):
+        parts.append(_linkify_user_mentions(text[last:match.start()]))
+        code = html.escape(match.group(1))
+        parts.append(f'<code style="{code_style}">{code}</code>')
+        last = match.end()
+    parts.append(_linkify_user_mentions(text[last:]))
     return "".join(parts)
 
 
@@ -357,6 +392,14 @@ class MessageBubble(QFrame):
         self._stream_render_timer.setSingleShot(True)
         self._stream_render_timer.setInterval(_STREAM_RENDER_INTERVAL_MS)
         self._stream_render_timer.timeout.connect(self._flush_stream_text)
+        self._stream_stable_end = 0
+        self._stream_prefix_html: str | None = None
+        self._stream_prefix_render_generation = 0
+        self._stream_prefix_render_pending = False
+        self._stream_prefix_timer = QTimer(self)
+        self._stream_prefix_timer.setSingleShot(True)
+        self._stream_prefix_timer.setInterval(_STREAM_PREFIX_RENDER_INTERVAL_MS)
+        self._stream_prefix_timer.timeout.connect(self._flush_stream_prefix_render)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
 
         if timestamp:
@@ -544,7 +587,6 @@ class MessageBubble(QFrame):
             self._typing = False
             self._timer.stop()
             self.label.setText("")
-        self.label.setTextFormat(Qt.TextFormat.PlainText)
         self._copy_text += text
         if not hasattr(self, "_stream_render_chunks"):
             self._stream_render_chunks = []
@@ -575,11 +617,83 @@ class MessageBubble(QFrame):
         if stream_view is None:
             self.label.setText(self._copy_text)
             return
-        if hasattr(self.label, "hide"):
+        prefix_html = getattr(self, "_stream_prefix_html", None)
+        if prefix_html and self._stream_stable_end > 0:
+            if hasattr(self.label, "show"):
+                self.label.show()
+        elif hasattr(self.label, "hide"):
             self.label.hide()
         if hasattr(stream_view, "show"):
             stream_view.show()
         stream_view.append_text(text)
+        self._schedule_stream_prefix_render()
+
+    def _schedule_stream_prefix_render(self):
+        if self._is_user:
+            return
+        boundary = _safe_paragraph_boundary(self._copy_text)
+        if boundary <= self._stream_stable_end:
+            return
+        if self._stream_prefix_timer.isActive():
+            self._stream_prefix_render_pending = True
+            return
+        self._stream_prefix_render_pending = False
+        self._maybe_render_stream_prefix()
+        self._stream_prefix_timer.start()
+
+    def _flush_stream_prefix_render(self):
+        if not self._stream_prefix_render_pending:
+            self._maybe_render_stream_prefix()
+            return
+        self._stream_prefix_render_pending = False
+        self._maybe_render_stream_prefix()
+
+    def _maybe_render_stream_prefix(self):
+        boundary = _safe_paragraph_boundary(self._copy_text)
+        if boundary <= self._stream_stable_end:
+            return
+        if boundary - self._stream_stable_end < _MIN_STREAM_PREFIX_GROWTH_CHARS:
+            return
+        prefix = self._copy_text[:boundary]
+        self._stream_stable_end = boundary
+        self._render_stream_prefix(prefix)
+
+    def _render_stream_prefix(self, prefix: str):
+        if len(prefix) < _ASYNC_MARKDOWN_RENDER_CHARS:
+            self._apply_stream_prefix_html(_to_html(prefix))
+            return
+        self._stream_prefix_render_generation += 1
+        generation = self._stream_prefix_render_generation
+        worker = _MarkdownRenderWorker(generation, prefix)
+        worker.signals.done.connect(self._on_stream_prefix_render_done)
+        self._markdown_render_pool.start(worker)
+
+    def _on_stream_prefix_render_done(self, generation: int, source: str, html_text: str):
+        if self._is_user:
+            return
+        if generation != self._stream_prefix_render_generation:
+            return
+        if len(source) != self._stream_stable_end:
+            return
+        if source != self._copy_text[:len(source)]:
+            return
+        self._apply_stream_prefix_html(html_text)
+
+    def _apply_stream_prefix_html(self, html_text: str):
+        self._stream_prefix_html = html_text
+        self.label.setTextFormat(Qt.TextFormat.RichText)
+        self.label.setText(html_text)
+        self.label.show()
+        stream_view = getattr(self, "_stream_view", None)
+        if stream_view is None:
+            return
+        tail = self._copy_text[self._stream_stable_end:]
+        stream_view.clear_text()
+        if tail:
+            stream_view.append_text(tail)
+            stream_view.show()
+        else:
+            stream_view.hide()
 
     def is_empty_typing(self) -> bool:
         return self._typing and not self._copy_text
@@ -590,6 +704,14 @@ class MessageBubble(QFrame):
             return
         self._stream_render_timer.stop()
         self._stream_render_pending = False
+        prefix_timer = getattr(self, "_stream_prefix_timer", None)
+        if prefix_timer is not None:
+            prefix_timer.stop()
+        self._stream_prefix_render_pending = False
+        if hasattr(self, "_stream_prefix_render_generation"):
+            self._stream_prefix_render_generation += 1
+        self._stream_stable_end = 0
+        self._stream_prefix_html = None
         if hasattr(self, "_stream_render_chunks"):
             self._stream_render_chunks.clear()
         stream_view = getattr(self, "_stream_view", None)
@@ -665,6 +787,9 @@ class MessageBubble(QFrame):
         if self._md_html:
             self.label.setTextFormat(Qt.TextFormat.RichText)
             self.label.setText(self._md_html)
+        elif self._stream_prefix_html:
+            self.label.setTextFormat(Qt.TextFormat.RichText)
+            self.label.setText(self._stream_prefix_html)
 
     def _on_link(self, href: str):
         code = code_from_copy_url(href)

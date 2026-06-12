@@ -1,9 +1,7 @@
-from pathlib import Path
 
 import pytest
 
-from services.tools import execute, is_parallel_safe, registry_for, tool_names
-from tests.conftest import write_extension
+from services.tools import execute, is_parallel_safe, tool_names
 
 
 @pytest.fixture

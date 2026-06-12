@@ -6,7 +6,46 @@ from PyQt6.QtCore import QEvent, Qt
 from services.file_ref_clipboard import AICHS_MESSAGE_COPY_MIME, parse_file_refs_payload
 from ui.markdown_html import copy_code_url
 import ui.widgets.bubble as bubble_module
-from ui.widgets.bubble import MessageBubble, _ASYNC_MARKDOWN_RENDER_CHARS, _MarkdownRenderWorker, _to_html
+from ui.widgets.bubble import (
+    MessageBubble,
+    _ASYNC_MARKDOWN_RENDER_CHARS,
+    _MarkdownRenderWorker,
+    _linkify_user_text,
+    _safe_paragraph_boundary,
+    _to_html,
+)
+
+
+def test_user_text_renders_inline_code_without_full_markdown():
+    rendered = _linkify_user_text("Run `pymarkdown scan docs/custom-models.md`, not **bold**.")
+
+    assert "<code" in rendered
+    assert "pymarkdown scan docs/custom-models.md" in rendered
+    assert "`" not in rendered
+    assert "&lt;strong&gt;" not in rendered
+    assert "**bold**" in rendered
+
+
+def test_user_inline_code_takes_precedence_over_file_mentions():
+    rendered = _linkify_user_text("Check `@docs/custom-models.md` and @docs/configuration.md.")
+
+    assert '<code' in rendered
+    assert "@docs/custom-models.md" in rendered
+    assert "aichs-file:@docs/custom-models.md" not in rendered
+    assert "aichs-file:docs/configuration.md" in rendered
+
+
+def test_user_bubble_renders_inline_code(qapp):
+    bubble = MessageBubble(
+        "Run `pymarkdown scan docs/extensions.md`, then fix issues in @docs/extensions.md.",
+        is_user=True,
+    )
+
+    assert bubble.label.textFormat() == Qt.TextFormat.RichText
+    assert "<code" in bubble.label.text()
+    assert "`" not in bubble.label.text()
+    assert "pymarkdown scan docs/extensions.md" in bubble.label.text()
+    assert "aichs-file:docs/extensions.md" in bubble.label.text()
 
 
 def test_streamed_assistant_text_finalizes_to_rich_text(qapp):
@@ -30,23 +69,46 @@ def test_streamed_assistant_text_finalizes_to_rich_text(qapp):
     assert timer.stopped is True
 
 
+def test_safe_paragraph_boundary_respects_code_fences():
+    text = "Intro\n\n```python\nx = 1\n\ny = 2\n```\n\nAfter"
+    assert _safe_paragraph_boundary(text) == len("Intro\n\n```python\nx = 1\n\ny = 2\n```\n\n")
+
+
+def test_assistant_stream_renders_completed_paragraphs(qapp):
+    label = _FakeLabel()
+    stream_view = _FakeStreamView()
+    stream_timer = _FakeTimer()
+    prefix_timer = _FakeTimer()
+    bubble = _stream_bubble(
+        label=label,
+        stream_view=stream_view,
+        stream_timer=stream_timer,
+        prefix_timer=prefix_timer,
+    )
+
+    stable = "## Title\n\n"
+    MessageBubble.append(bubble, stable)
+    MessageBubble.append(bubble, "still typing")
+    stream_timer.active = False
+    MessageBubble._flush_stream_text(bubble)
+
+    assert label.textFormat() == Qt.TextFormat.RichText
+    assert "<h2>Title</h2>" in label.text()
+    assert stream_view.text() == "still typing"
+    assert bubble._stream_stable_end == len(stable)
+
+
 def test_assistant_stream_appends_coalesce_label_updates(qapp):
     label = _FakeLabel()
     stream_view = _FakeStreamView()
     stream_timer = _FakeTimer()
     typing_timer = _FakeTimer()
-    bubble = SimpleNamespace(
-        _typing=False,
-        _timer=typing_timer,
-        _copy_text="",
-        _stream_render_pending=False,
-        _stream_render_chunks=[],
-        _stream_view=stream_view,
+    bubble = _stream_bubble(
         label=label,
-        _stream_render_timer=stream_timer,
+        stream_view=stream_view,
+        stream_timer=stream_timer,
+        typing_timer=typing_timer,
     )
-    bubble._render_stream_text = lambda: MessageBubble._render_stream_text(bubble)
-
     MessageBubble.append(bubble, "one")
     MessageBubble.append(bubble, " two")
     MessageBubble.append(bubble, " three")
@@ -69,18 +131,11 @@ def test_single_stream_append_does_not_repaint_on_timer(qapp):
     label = _FakeLabel()
     stream_view = _FakeStreamView()
     stream_timer = _FakeTimer()
-    bubble = SimpleNamespace(
-        _typing=False,
-        _timer=_FakeTimer(),
-        _copy_text="",
-        _stream_render_pending=False,
-        _stream_render_chunks=[],
-        _stream_view=stream_view,
+    bubble = _stream_bubble(
         label=label,
-        _stream_render_timer=stream_timer,
+        stream_view=stream_view,
+        stream_timer=stream_timer,
     )
-    bubble._render_stream_text = lambda: MessageBubble._render_stream_text(bubble)
-
     MessageBubble.append(bubble, "one")
     MessageBubble._flush_stream_text(bubble)
 
@@ -314,6 +369,54 @@ class _FakeLabel:
         self.hidden = False
 
 
+def _stream_bubble(
+    *,
+    label,
+    stream_view,
+    stream_timer,
+    prefix_timer=None,
+    typing_timer=None,
+):
+    bubble = SimpleNamespace(
+        _is_user=False,
+        _typing=False,
+        _timer=typing_timer or _FakeTimer(),
+        _copy_text="",
+        _stream_render_pending=False,
+        _stream_render_chunks=[],
+        _stream_view=stream_view,
+        label=label,
+        _stream_render_timer=stream_timer,
+        _stream_stable_end=0,
+        _stream_prefix_html=None,
+        _stream_prefix_render_pending=False,
+        _stream_prefix_render_generation=0,
+        _stream_prefix_timer=prefix_timer or _FakeTimer(),
+        _markdown_render_pool=_FakePool(),
+    )
+    bubble._render_stream_text = lambda: MessageBubble._render_stream_text(bubble)
+    bubble._flush_stream_text = lambda: MessageBubble._flush_stream_text(bubble)
+    bubble._schedule_stream_prefix_render = (
+        lambda: MessageBubble._schedule_stream_prefix_render(bubble)
+    )
+    bubble._flush_stream_prefix_render = (
+        lambda: MessageBubble._flush_stream_prefix_render(bubble)
+    )
+    bubble._maybe_render_stream_prefix = (
+        lambda: MessageBubble._maybe_render_stream_prefix(bubble)
+    )
+    bubble._render_stream_prefix = (
+        lambda prefix: MessageBubble._render_stream_prefix(bubble, prefix)
+    )
+    bubble._apply_stream_prefix_html = (
+        lambda html: MessageBubble._apply_stream_prefix_html(bubble, html)
+    )
+    bubble._on_stream_prefix_render_done = (
+        lambda *args: MessageBubble._on_stream_prefix_render_done(bubble, *args)
+    )
+    return bubble
+
+
 class _FakeStreamView:
     def __init__(self):
         self.appended = []
@@ -337,6 +440,7 @@ class _FakeStreamView:
     def clear_text(self):
         self.cleared = True
         self._text = ""
+        self.appended = []
 
 
 class _FakeTimer:

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 
 def pytest_configure(config):
@@ -57,16 +57,19 @@ def close_qt_windows():
 def clear_service_caches():
     from services.file_search import clear_workspace_file_cache
     from services.git_snapshot import clear_git_snapshot_cache
+    from services.language_features import clear_matching_language_cache
     from services.language_snapshot import clear_language_status_cache
     from services.tool_registry import clear_all_extension_caches
 
     clear_workspace_file_cache()
     clear_git_snapshot_cache()
+    clear_matching_language_cache()
     clear_language_status_cache()
     clear_all_extension_caches()
     yield
     clear_workspace_file_cache()
     clear_git_snapshot_cache()
+    clear_matching_language_cache()
     clear_language_status_cache()
     clear_all_extension_caches()
 

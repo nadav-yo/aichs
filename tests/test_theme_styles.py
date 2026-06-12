@@ -11,6 +11,7 @@ from tests.qss_helpers import (
     iter_inline_dim_label_stylesheet_offenders,
     run_offscreen_window_probe,
 )
+from tests import qss_helpers
 from ui import theme
 
 
@@ -45,7 +46,19 @@ def test_widget_modules_avoid_new_ad_hoc_qss_stylesheets():
     )
 
 
-def test_window_stylesheets_parse_without_qt_warnings(workspace):
+def test_ad_hoc_qss_baseline_ignores_line_number_drift(tmp_path, monkeypatch):
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text("ui\\widgets\\demo.py:12:f\"QLabel {{ color:{p['TEXT']}; }}\"\n", encoding="utf-8")
+    monkeypatch.setattr(
+        qss_helpers,
+        "iter_ad_hoc_qss_stylesheet_offenders",
+        lambda: [("ui\\widgets\\demo.py", 99, "f\"QLabel {{ color:{p['TEXT']}; }}\"")],
+    )
+
+    assert qss_helpers.find_new_ad_hoc_qss_offenders(baseline) == []
+
+
+def test_window_stylesheets_parse_without_qt_warnings(workspace, qapp):
     result = run_offscreen_window_probe(str(workspace))
     assert result.returncode == 0, result.stderr or result.stdout
 

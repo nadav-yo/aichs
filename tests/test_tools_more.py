@@ -1,9 +1,7 @@
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 
-from services.tools import execute, tools_anthropic, tools_openai
+from services.tools import execute, tools_openai
 
 
 def test_tools_openai_shape(workspace):

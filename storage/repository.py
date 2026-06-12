@@ -110,6 +110,16 @@ class ConversationStore:
         source.unlink(missing_ok=True)
         return restored
 
+    def purge(self, path: str) -> str:
+        source = Path(path).resolve()
+        trash_dir = self.trash_dir.resolve()
+        if not source.exists() or trash_dir not in source.parents:
+            return ""
+        data = _load_json(source)
+        conv_id = str((data or {}).get("id") or source.stem)
+        source.unlink(missing_ok=True)
+        return conv_id
+
     def prune_trash(self, retention_days: int | None = None) -> int:
         if retention_days is None:
             retention_days = trash_retention_days(SettingsStore().load())

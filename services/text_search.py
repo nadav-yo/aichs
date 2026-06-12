@@ -41,29 +41,15 @@ def search_file_contents(
                 return matches
             path = Path(file_path)
             try:
-                raw = path.read_bytes()[:MAX_FILE_PREVIEW_BYTES]
+                raw = _read_preview_bytes(path)
             except OSError:
                 continue
             if b"\0" in raw:
                 continue
-            text = raw.decode("utf-8", errors="replace")
-            for line_no, line in enumerate(text.splitlines(), start=1):
+            for match in _iter_preview_matches(path, root_path, raw, q, folded_query):
                 if cancelled and cancelled():
                     return matches
-                start = line.casefold().find(folded_query)
-                if start < 0:
-                    continue
-                rel_path = str(path.relative_to(root_path))
-                matches.append(
-                    TextSearchMatch(
-                        path=str(path),
-                        rel_path=rel_path,
-                        line_no=line_no,
-                        line_text=line.strip(),
-                        start=start,
-                        end=start + len(q),
-                    )
-                )
+                matches.append(match)
                 if len(matches) >= limit:
                     return matches
         return matches
@@ -99,6 +85,7 @@ def search_file_contents_with_candidates(
             )
 
         root_path = Path(root).resolve()
+        folded_query = q.casefold()
         matches: list[TextSearchMatch] = []
         next_candidates: list[TextSearchMatch] = []
         for file_path in list_workspace_files(root_path, limit=scan_limit):
@@ -106,18 +93,14 @@ def search_file_contents_with_candidates(
                 return matches, tuple(next_candidates)
             path = Path(file_path)
             try:
-                raw = path.read_bytes()[:MAX_FILE_PREVIEW_BYTES]
+                raw = _read_preview_bytes(path)
             except OSError:
                 continue
             if b"\0" in raw:
                 continue
-            text = raw.decode("utf-8", errors="replace")
-            for line_no, line in enumerate(text.splitlines(), start=1):
+            for match in _iter_preview_matches(path, root_path, raw, q, folded_query):
                 if cancelled and cancelled():
                     return matches, tuple(next_candidates)
-                match = _line_match(path, root_path, line_no, line, q)
-                if match is None:
-                    continue
                 next_candidates.append(match)
                 if len(matches) < limit:
                     matches.append(match)
@@ -159,19 +142,44 @@ def _filter_text_candidates(
     return matches, tuple(next_candidates)
 
 
-def _line_match(
+def _read_preview_bytes(path: Path) -> bytes:
+    with path.open("rb") as handle:
+        return handle.read(MAX_FILE_PREVIEW_BYTES)
+
+
+def _iter_preview_matches(
     path: Path,
     root_path: Path,
+    raw: bytes,
+    query: str,
+    folded_query: str,
+) -> Iterable[TextSearchMatch]:
+    text = raw.decode("utf-8", errors="replace")
+    if folded_query not in text.casefold():
+        return
+
+    path_text = str(path)
+    rel_path = str(path.relative_to(root_path))
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        match = _line_match(path_text, rel_path, line_no, line, query, folded_query)
+        if match is not None:
+            yield match
+
+
+def _line_match(
+    path: str,
+    rel_path: str,
     line_no: int,
     line: str,
     query: str,
+    folded_query: str,
 ) -> TextSearchMatch | None:
-    start = line.casefold().find(query.casefold())
+    start = line.casefold().find(folded_query)
     if start < 0:
         return None
     return TextSearchMatch(
-        path=str(path),
-        rel_path=str(path.relative_to(root_path)),
+        path=path,
+        rel_path=rel_path,
         line_no=line_no,
         line_text=line.strip(),
         start=start,

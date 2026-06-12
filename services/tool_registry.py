@@ -343,10 +343,30 @@ class _OverviewCacheEntry:
     overview: ExtensionOverview
 
 
+@dataclass(frozen=True)
+class _ExtensionTreeFile:
+    rel_path: str
+    path: Path
+    signature: tuple
+
+
+@dataclass(frozen=True)
+class _ExtensionFileMetadata:
+    entrypoint: Path
+    normalized: str
+    files: tuple[_ExtensionTreeFile, ...]
+    folder_entrypoint: bool = False
+    manifest_path: Path | None = None
+
+
 _EXTENSION_CACHE_LOCK = threading.RLock()
 _REGISTRY_CACHE: dict[tuple[str, str, str], _RegistryCacheEntry] = {}
 _OVERVIEW_CACHE: dict[tuple[str, str, str], _OverviewCacheEntry] = {}
 _EXTENSION_CACHE_EPOCHS: dict[tuple[str, str, str], int] = {}
+_CONTENT_HASH_CACHE: dict[tuple, str] = {}
+_CONTENT_HASH_CACHE_LIMIT = 256
+_IGNORED_EXTENSION_TREE_NAMES = {".git", "__pycache__"}
+_CONTENT_HASH_CHUNK_SIZE = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -787,25 +807,57 @@ def set_extension_enabled(path: str | Path, enabled: bool, cwd: str | None = Non
 
 
 def extension_content_hash(path: str | Path) -> str:
-    entrypoint = _extension_entrypoint_path(Path(path))
-    root = entrypoint.parent if entrypoint.name == "extension.py" else entrypoint
-    hasher = hashlib.sha256()
-    if entrypoint.name == "extension.py" and (root / "aichs-extension.json").exists():
-        files = [
-            item for item in root.rglob("*")
-            if item.is_file() and not any(part in {".git", "__pycache__"} for part in item.parts)
-        ]
-        for item in sorted(files):
-            rel = item.relative_to(root).as_posix()
-            hasher.update(rel.encode("utf-8"))
+    return _extension_content_hash_from_metadata(_extension_file_metadata(Path(path)))
+
+
+def _extension_content_hash_from_metadata(metadata: _ExtensionFileMetadata) -> str:
+    signature = _extension_file_signature_from_metadata(metadata)
+    with _EXTENSION_CACHE_LOCK:
+        cached = _CONTENT_HASH_CACHE.get(signature)
+    if cached is not None:
+        return cached
+
+    with time_operation(
+        "extension.content_hash",
+        detail=_extension_content_hash_detail(metadata),
+        slow_ms=50,
+    ):
+        entrypoint = metadata.entrypoint
+        hasher = hashlib.sha256()
+        if metadata.folder_entrypoint and metadata.manifest_path is not None:
+            for item in metadata.files:
+                hasher.update(item.rel_path.encode("utf-8"))
+                hasher.update(b"\0")
+                _hash_file_into(hasher, item.path)
+                hasher.update(b"\0")
+        elif entrypoint.exists():
+            hasher.update(entrypoint.name.encode("utf-8"))
             hasher.update(b"\0")
-            hasher.update(item.read_bytes())
-            hasher.update(b"\0")
-    elif entrypoint.exists():
-        hasher.update(entrypoint.name.encode("utf-8"))
-        hasher.update(b"\0")
-        hasher.update(entrypoint.read_bytes())
-    return hasher.hexdigest()
+            _hash_file_into(hasher, entrypoint)
+        digest = hasher.hexdigest()
+    with _EXTENSION_CACHE_LOCK:
+        if signature not in _CONTENT_HASH_CACHE and len(_CONTENT_HASH_CACHE) >= _CONTENT_HASH_CACHE_LIMIT:
+            _CONTENT_HASH_CACHE.pop(next(iter(_CONTENT_HASH_CACHE)))
+        _CONTENT_HASH_CACHE[signature] = digest
+    return digest
+
+
+def _extension_content_hash_detail(metadata: _ExtensionFileMetadata) -> str:
+    size = 0
+    for item in metadata.files:
+        try:
+            item_size = int(item.signature[2])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if item_size > 0:
+            size += item_size
+    return f"path={metadata.entrypoint} files={len(metadata.files)} bytes={size}"
+
+
+def _hash_file_into(hasher, path: Path) -> None:
+    with path.open("rb") as handle:
+        while chunk := handle.read(_CONTENT_HASH_CHUNK_SIZE):
+            hasher.update(chunk)
 
 
 def is_extension_reviewed(path: str | Path, cwd: str | None = None) -> bool:
@@ -922,6 +974,7 @@ def extension_languages(cwd: str | None = None) -> tuple[list[LanguageContributi
 def clear_extension_cache(cwd: str | None = None) -> None:
     scope = _extension_cache_scope(cwd)
     with _EXTENSION_CACHE_LOCK:
+        _CONTENT_HASH_CACHE.clear()
         _REGISTRY_CACHE.pop(scope, None)
         _OVERVIEW_CACHE.pop(scope, None)
         _EXTENSION_CACHE_EPOCHS[scope] = _EXTENSION_CACHE_EPOCHS.get(scope, 0) + 1
@@ -929,6 +982,7 @@ def clear_extension_cache(cwd: str | None = None) -> None:
 
 def clear_all_extension_caches() -> None:
     with _EXTENSION_CACHE_LOCK:
+        _CONTENT_HASH_CACHE.clear()
         _REGISTRY_CACHE.clear()
         _OVERVIEW_CACHE.clear()
         _EXTENSION_CACHE_EPOCHS.clear()
@@ -945,7 +999,8 @@ def extension_cache_signature(cwd: str | None = None) -> tuple:
 def _cached_registry_snapshot(cwd: str | None) -> _RegistrySnapshot:
     scope = _extension_cache_scope(cwd)
     extension_files = _extension_files(cwd)
-    signature = _extension_cache_signature_for_files(cwd, extension_files)
+    metadata = tuple(_extension_file_metadata(path) for path in extension_files)
+    signature = _extension_cache_signature_for_metadata(cwd, metadata)
     with _EXTENSION_CACHE_LOCK:
         entry = _REGISTRY_CACHE.get(scope)
         if entry is not None and entry.signature == signature:
@@ -964,7 +1019,8 @@ def _cached_registry_snapshot(cwd: str | None) -> _RegistrySnapshot:
 def _cached_extension_overview(cwd: str | None) -> ExtensionOverview:
     scope = _extension_cache_scope(cwd)
     extension_files = _extension_files(cwd)
-    signature = _extension_cache_signature_for_files(cwd, extension_files)
+    metadata = tuple(_extension_file_metadata(path) for path in extension_files)
+    signature = _extension_cache_signature_for_metadata(cwd, metadata)
     with _EXTENSION_CACHE_LOCK:
         entry = _OVERVIEW_CACHE.get(scope)
         if entry is not None and entry.signature == signature:
@@ -972,7 +1028,10 @@ def _cached_extension_overview(cwd: str | None) -> ExtensionOverview:
 
     with time_operation("extension.overview", detail=f"cwd={cwd or ''}"):
         overview = ExtensionOverview(
-            files=[_extension_file_summary(path, cwd) for path in extension_files]
+            files=[
+                _extension_file_summary(item.entrypoint, cwd, metadata=item)
+                for item in metadata
+            ]
         )
 
     with _EXTENSION_CACHE_LOCK:
@@ -1051,38 +1110,84 @@ def _extension_cache_signature(cwd: str | None) -> tuple:
 
 
 def _extension_cache_signature_for_files(cwd: str | None, extension_files: list[Path]) -> tuple:
+    return _extension_cache_signature_for_metadata(
+        cwd,
+        tuple(_extension_file_metadata(path) for path in extension_files),
+    )
+
+
+def _extension_cache_signature_for_metadata(
+    cwd: str | None,
+    extension_metadata: tuple[_ExtensionFileMetadata, ...],
+) -> tuple:
     return (
-        tuple(_extension_file_signature(path) for path in extension_files),
+        tuple(_extension_file_signature_from_metadata(item) for item in extension_metadata),
         _path_signature(_disabled_extensions_path(cwd)),
         _path_signature(_reviewed_extensions_path(cwd)),
     )
 
 
 def _extension_file_signature(path: Path) -> tuple:
+    return _extension_file_signature_from_metadata(_extension_file_metadata(path))
+
+
+def _extension_file_signature_from_metadata(metadata: _ExtensionFileMetadata) -> tuple:
+    if not metadata.folder_entrypoint:
+        return (metadata.normalized, tuple(item.signature for item in metadata.files))
+    return (
+        metadata.normalized,
+        tuple((item.rel_path, item.signature) for item in metadata.files),
+    )
+
+
+def _extension_file_metadata(path: Path) -> _ExtensionFileMetadata:
     entrypoint = _extension_entrypoint_path(path)
     try:
         normalized = str(entrypoint.resolve())
     except OSError:
         normalized = str(entrypoint)
     if entrypoint.name != "extension.py":
-        return (normalized, ((_path_signature(entrypoint)),))
+        return _ExtensionFileMetadata(
+            entrypoint=entrypoint,
+            normalized=normalized,
+            files=(_ExtensionTreeFile(entrypoint.name, entrypoint, _path_signature(entrypoint)),),
+        )
 
     root = entrypoint.parent
-    files = []
-    try:
-        candidates = sorted(
-            item for item in root.rglob("*")
-            if item.is_file() and not any(part in {".git", "__pycache__"} for part in item.parts)
-        )
-    except OSError:
-        candidates = [entrypoint]
-    for item in candidates:
+    files: list[_ExtensionTreeFile] = []
+    for item in _iter_extension_tree_files(root):
         try:
             rel = item.relative_to(root).as_posix()
         except ValueError:
             rel = item.name
-        files.append((rel, _path_signature(item)))
-    return (normalized, tuple(files))
+        files.append(_ExtensionTreeFile(rel, item, _path_signature(item)))
+    manifest_path = root / "aichs-extension.json"
+    return _ExtensionFileMetadata(
+        entrypoint=entrypoint,
+        normalized=normalized,
+        files=tuple(files),
+        folder_entrypoint=True,
+        manifest_path=manifest_path if manifest_path.exists() else None,
+    )
+
+
+def _iter_extension_tree_files(root: Path):
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            children = sorted(current.iterdir(), key=lambda item: item.name.casefold())
+        except OSError:
+            continue
+        dirs: list[Path] = []
+        for child in children:
+            if child.name in _IGNORED_EXTENSION_TREE_NAMES:
+                continue
+            if child.is_dir():
+                dirs.append(child)
+            elif child.is_file():
+                yield child
+        stack.extend(reversed(dirs))
 
 
 def _path_signature(path: Path) -> tuple:
@@ -1103,13 +1208,31 @@ def _extension_files(cwd: str | None) -> list[Path]:
     for root in roots:
         if not root.exists():
             continue
-        candidates = list(root.glob("*.py")) + list(root.glob("*/extension.py"))
-        for path in sorted(candidates):
+        for path in _iter_extension_entrypoints(root):
             resolved = path.resolve()
             if resolved not in seen and path.name != "__init__.py":
                 files.append(path)
                 seen.add(resolved)
     return files
+
+
+def _iter_extension_entrypoints(root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    try:
+        children = sorted(root.iterdir(), key=lambda item: item.name.casefold())
+    except OSError:
+        return candidates
+    for child in children:
+        if child.name == "__init__.py":
+            continue
+        if child.is_file() and child.suffix == ".py":
+            candidates.append(child)
+            continue
+        if child.is_dir():
+            entrypoint = child / "extension.py"
+            if entrypoint.is_file():
+                candidates.append(entrypoint)
+    return sorted(candidates)
 
 
 def _load_extension_file(registry: ToolRegistry, path: Path) -> None:
@@ -1145,19 +1268,21 @@ def _extension_file_summary(
     cwd: str | None = None,
     *,
     load_code: bool = True,
+    metadata: _ExtensionFileMetadata | None = None,
 ) -> ExtensionFileSummary:
-    path = _extension_entrypoint_path(path)
+    metadata = metadata or _extension_file_metadata(path)
+    path = metadata.entrypoint
     manifest = _extension_manifest_metadata(path)
-    static_description = _static_extension_description(path)
     display_name = _clean_description(str(manifest.get("name") or ""))
     requirements = _extension_manifest_requirements(manifest)
     missing_requirements = _missing_extension_requirements(requirements)
     permissions = _extension_manifest_permissions(manifest)
-    content_hash = extension_content_hash(path)
+    content_hash = _extension_content_hash_from_metadata(metadata)
     reviewed = _extension_reviewed(path, cwd, content_hash)
     review_required = not reviewed
     risk_messages = _extension_risk_messages(permissions)
     if is_extension_disabled(path, cwd) or not load_code:
+        static_description = _static_extension_description(path, manifest=manifest)
         static = _static_extension_contributions(path)
         return ExtensionFileSummary(
             path=str(path),
@@ -1196,7 +1321,7 @@ def _extension_file_summary(
         badges=list(registry._badges.values()),
         panels=registry.panels(),
         errors=errors,
-        description=registry._description or static_description,
+        description=registry._description or _static_extension_description(path, manifest=manifest),
         display_name=display_name,
         languages=registry.languages(),
         requirements=requirements,
@@ -1250,9 +1375,9 @@ def _extension_entrypoint_path(path: Path) -> Path:
     return path
 
 
-def _static_extension_description(path: Path) -> str:
+def _static_extension_description(path: Path, *, manifest: dict | None = None) -> str:
     manifest_description = _clean_description(
-        str(_extension_manifest_metadata(path).get("description") or "")
+        str((manifest if manifest is not None else _extension_manifest_metadata(path)).get("description") or "")
     )
     if manifest_description:
         return manifest_description

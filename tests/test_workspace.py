@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from services.workspace import agents_md, build_system, system_parts
 from tests.conftest import write_extension

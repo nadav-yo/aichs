@@ -152,6 +152,16 @@ def meta_font_pt(size_name: str | None = None) -> int:
     return max(10, chat_font_pt(size_name) - 3)
 
 
+def conversation_caption_pt(size_name: str | None = None) -> int:
+    """Conversation sidebar dates and secondary labels."""
+    return max(10, meta_font_pt(size_name) - 1)
+
+
+def conversation_title_pt(size_name: str | None = None) -> int:
+    """Primary chat title in the conversation sidebar."""
+    return max(12, chat_font_pt(size_name) - 1)
+
+
 def mono_font_pt(size_name: str | None = None) -> int:
     """Monospace areas (git, terminal, code viewer)."""
     return max(11, chat_font_pt(size_name) - 1)
@@ -813,13 +823,13 @@ def floating_button_style() -> str:
 def new_chat_button_style(theme: str | None = None) -> str:
     theme_name = theme or current_theme()
     p = palette(theme_name)
-    fs = max(12, chat_font_pt() - 1)
+    fs = conversation_caption_pt()
     soft = ACCENT_SOFT_LIGHT if theme_name == "light" else ACCENT_SOFT_DARK
     hover_bg = p["SELECTION"]
     hover_fg = ACCENT_DIM if theme_name == "light" else "#dbeafe"
     return (
         f"QPushButton {{ background:{soft}; color:{ACCENT}; border:none;"
-        f"border-radius:8px; margin:8px 14px 6px 14px; padding:7px 12px;"
+        f"border-radius:7px; margin:6px 10px 4px 10px; padding:5px 10px;"
         f"font-size:{fs}px; font-weight:600; }}"
         f"QPushButton:hover {{ background:{hover_bg}; color:{hover_fg}; }}"
     )
@@ -834,6 +844,14 @@ def icon_button_style(size_px: int = 28) -> str:
         f"min-height:{size_px}px; max-height:{size_px}px; }}"
         f"QPushButton:hover {{ background:{p['BG3']}; color:{p['TEXT']}; }}"
         f"QPushButton:pressed {{ background:{p['BORDER']}; }}"
+    )
+
+
+def accent_icon_button_style(size_px: int = 30, *, border_radius: int = 6) -> str:
+    return (
+        primary_button_style(border_radius=border_radius, padding="0", font_weight="600")
+        + f"QPushButton {{ min-width:{size_px}px; max-width:{size_px}px;"
+        f"min-height:{size_px}px; max-height:{size_px}px; }}"
     )
 
 
@@ -901,6 +919,15 @@ def git_action_button_style(
         f"QPushButton:pressed {{ background:{p['BORDER']}; }}"
         f"QPushButton:disabled {{ background:{p['BG2']}; color:{p['TEXT_DIM']};"
         f"border-color:{p['BORDER_SUBTLE']}; }}"
+    )
+
+
+def git_action_status_error_style(theme: str | None = None) -> str:
+    """Failure state for git pull/push status text."""
+    p = palette(theme)
+    return (
+        f"QLabel {{ color:#ef4444; background:{p['BG2']}; border:1px solid #ef4444;"
+        "border-radius:6px; padding:8px 10px; }"
     )
 
 
@@ -986,10 +1013,8 @@ def attachment_remove_button_style(
 
 def conversation_row_title_style(*, theme: str | None = None) -> str:
     p = palette(theme)
-    fs = max(12, chat_font_pt() - 1)
     return (
-        f"font-size:{fs}px; color:{p['TEXT']};"
-        "background:transparent; font-weight:500;"
+        f"color:{p['TEXT']}; background:transparent; font-weight:500;"
     )
 
 
@@ -1263,9 +1288,76 @@ def _flat_list_style(
     return style
 
 
+def git_panel_caption_pt(size_name: str | None = None) -> int:
+    """Staged/Unstaged headers and folder group labels."""
+    return max(10, meta_font_pt(size_name) - 1)
+
+
+def git_panel_path_pt(size_name: str | None = None) -> int:
+    """Monospace file paths in the git changes list."""
+    return max(10, mono_font_pt(size_name) - 1)
+
+
+def git_panel_section_label_style(theme: str | None = None) -> str:
+    return hint_label_style(
+        padding="1px 4px",
+        font_pt=git_panel_caption_pt(),
+        font_weight="600",
+        theme=theme,
+    )
+
+
+def conversation_list_style() -> str:
+    """Conversation sidebar — compact rounded rows."""
+    p = palette()
+    sel = "#1d2d4d" if current_theme() != "light" else list_selection_bg()
+    hover = "#171b24" if current_theme() != "light" else p["BG3"]
+    return _flat_list_style(
+        item_padding="0px 0px",
+        item_radius=5,
+        item_margin="0px 6px",
+        hover_bg=hover,
+        selected_bg=sel,
+        include_focus_reset=False,
+    )
+
+
 def git_changes_list_style() -> str:
-    """Flat sidebar list — compact rows, filled selection (git/file changes)."""
-    return _flat_list_style(item_padding="2px 6px")
+    """Flat sidebar list — git file rows, filled selection."""
+    return _flat_list_style(item_padding="1px 6px")
+
+
+def git_log_list_style() -> str:
+    """Commit history rows — slightly taller for sans subject text."""
+    return _flat_list_style(item_padding="5px 8px")
+
+
+def git_mode_button_style(*, active: bool = False, theme: str | None = None) -> str:
+    """Segmented mode control for the git panel (Changes / History / Sync)."""
+    p = palette(theme)
+    if active:
+        return (
+            f"QPushButton {{ background:{p['BG3']}; color:{p['TEXT']}; border:none;"
+            f"border-radius:{FIELD_BORDER_RADIUS}px; padding:7px 12px; font-weight:600; }}"
+        )
+    return (
+        f"QPushButton {{ background:transparent; color:{p['TEXT_DIM']}; border:none;"
+        f"border-radius:{FIELD_BORDER_RADIUS}px; padding:7px 12px; font-weight:500; }}"
+        f"QPushButton:hover {{ color:{p['TEXT']}; background:{p['BG3']}; }}"
+    )
+
+
+def git_commit_field_style(*, ready: bool = False, theme: str | None = None) -> str:
+    """Commit summary/body fields; accent border when commit is ready."""
+    p = palette(theme)
+    border = ACCENT if ready else p["BORDER_SUBTLE"]
+    return compact_field_style(
+        selector="QLineEdit, QTextEdit",
+        padding="6px 8px",
+        border_radius=6,
+        border_color=border,
+        theme=theme,
+    )
 
 
 def file_tree_sidebar_style() -> str:
@@ -1425,14 +1517,50 @@ def splitter_style(
     )
 
 
+WORKBENCH_HEADER_MARGINS = (16, 8, 12, 8)
+WORKBENCH_HEADER_SPACING = 8
+
+
+def workbench_header_frame_style(*, object_name: str = "workbenchHeader") -> str:
+    p = palette()
+    sep = separator_color()
+    return (
+        f"QWidget#{object_name}, QFrame#{object_name} {{ "
+        f"background:{p['BG']}; border-bottom:1px solid {sep}; }}"
+    )
+
+
+def workbench_header_title_style(*, object_name: str = "workbenchHeaderTitle") -> str:
+    title_fs = max(13, chat_font_pt())
+    p = palette()
+    return (
+        f"QLabel#{object_name} {{ color:{p['TEXT']};"
+        f"font-size:{title_fs}px; font-weight:600; }}"
+    )
+
+
+def workbench_header_subtitle_style(*, object_name: str = "workbenchHeaderSubtitle") -> str:
+    return hint_label_style(
+        selector=f"QLabel#{object_name}",
+        font_pt=meta_font_pt(),
+    )
+
+
+def chat_header_style() -> str:
+    return (
+        workbench_header_frame_style(object_name="chatHeader")
+        + workbench_header_title_style(object_name="chatHeaderTitle")
+        + workbench_header_subtitle_style(object_name="chatHeaderSubtitle")
+    )
+
+
 def files_header_style() -> str:
     p = palette()
     fs = max(11, chat_font_pt() - 2)
     return (
-        f"QWidget#filesHeader {{ background:{p['BG2']};"
-        f"border-bottom:1px solid {p['BORDER_SUBTLE']}; }}"
-        f"{hint_label_style(selector='QLabel#filesPath')}"
-        f"QLineEdit#filesFilter {{ background:{p['BG3']}; color:{p['TEXT']};"
+        workbench_header_frame_style(object_name="filesHeader")
+        + workbench_header_title_style(object_name="filesPath")
+        + f"QLineEdit#filesFilter {{ background:{p['BG3']}; color:{p['TEXT']};"
         f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:{FIELD_BORDER_RADIUS}px;"
         f"padding:4px 8px; font-size:{fs}px; }}"
         f"QLineEdit#filesFilter:focus {{ border:1px solid {ACCENT}; }}"
@@ -1480,20 +1608,6 @@ def overlay_results_list_style() -> str:
     return _flat_list_style(
         selected_bg=p["BG3"],
         selected_border_left=f"3px solid {ACCENT}",
-        include_focus_reset=False,
-    )
-
-
-def conversation_list_style() -> str:
-    """Conversation sidebar — rounded rows, softer selection fill."""
-    p = palette()
-    sel = "#1d2d4d" if current_theme() != "light" else list_selection_bg()
-    hover = "#171b24" if current_theme() != "light" else p["BG3"]
-    return _flat_list_style(
-        item_radius=7,
-        item_margin="1px 7px",
-        hover_bg=hover,
-        selected_bg=sel,
         include_focus_reset=False,
     )
 
@@ -1677,22 +1791,91 @@ def extension_panel_heading_style(*, tone: str = "") -> str:
     return section_label_style(text_color=color)
 
 
+COMBO_POPUP_MIN_VISIBLE_ROWS = 4
+COMBO_POPUP_MAX_VISIBLE_ROWS = 10
+COMBO_POPUP_VIEW_PADDING = 6
+
+
+def combo_popup_item_hover_bg(theme: str | None = None) -> str:
+    """Lift hover rows above the popup surface (BG3), not darken them."""
+    p = palette(theme)
+    if (theme or current_theme()) == "light":
+        return p["BG2"]
+    return p["BORDER"]
+
+
+def combo_popup_visible_row_count(
+    item_count: int,
+    *,
+    min_rows: int = COMBO_POPUP_MIN_VISIBLE_ROWS,
+    max_rows: int = COMBO_POPUP_MAX_VISIBLE_ROWS,
+) -> int:
+    if item_count <= 0:
+        return 0
+    if item_count <= min_rows:
+        return item_count
+    return min(item_count, max_rows)
+
+
+def _combo_popup_item_row_height(view, *, font_pt: int | None = None) -> int:
+    from PyQt6.QtWidgets import QAbstractItemView
+
+    if not isinstance(view, QAbstractItemView):
+        return max(24, (font_pt or chat_font_pt()) + 10)
+    hinted = view.sizeHintForRow(0)
+    if hinted > 0:
+        return hinted
+    metrics = view.fontMetrics()
+    return max(24, metrics.height() + 10)
+
+
+def resize_combo_popup_container(
+    container,
+    *,
+    min_rows: int = COMBO_POPUP_MIN_VISIBLE_ROWS,
+    max_rows: int = COMBO_POPUP_MAX_VISIBLE_ROWS,
+    view_padding: int = COMBO_POPUP_VIEW_PADDING,
+    font_pt: int | None = None,
+) -> None:
+    from PyQt6.QtWidgets import QAbstractItemView, QListView
+
+    view = container.findChild(QListView) or container.findChild(QAbstractItemView)
+    if view is None:
+        return
+    model = view.model()
+    count = model.rowCount() if model is not None else 0
+    visible = combo_popup_visible_row_count(count, min_rows=min_rows, max_rows=max_rows)
+    if visible <= 0:
+        return
+
+    row_h = _combo_popup_item_row_height(view, font_pt=font_pt)
+    list_h = visible * row_h
+    chrome = view_padding * 2
+    height = list_h + chrome
+
+    view.setMinimumHeight(list_h)
+    view.setMaximumHeight(list_h if count > visible else 16777215)
+    container.setMinimumHeight(height)
+    container.resize(container.width(), height)
+
+
 def combo_box_popup_style(
     theme: str | None = None,
     *,
     bg: str | None = None,
     border_radius: int = 8,
     font_pt: int | None = None,
-    view_padding: int = 4,
-    item_padding: str = "6px 10px",
+    view_padding: int = 6,
+    item_padding: str = "5px 10px",
 ) -> str:
     p = palette(theme)
     surface = bg or p["BG3"]
     fs = font_pt or chat_font_pt()
     min_height = max(24, fs + 8)
+    hover = combo_popup_item_hover_bg(theme)
     return (
         f"QComboBoxPrivateContainer {{ background:{surface}; border:none;"
-        f"margin:0; padding:0; outline:none; }}"
+        f"margin:0; padding:{view_padding}px; outline:none; }}"
         f"QComboBoxPrivateContainer QWidget {{ background:{surface}; border:none; }}"
         f"QComboBox QAbstractItemView, QComboBox QListView {{ "
         f"background:{surface}; alternate-background-color:{surface};"
@@ -1705,12 +1888,49 @@ def combo_box_popup_style(
         f"background:{surface}; color:{p['TEXT']}; padding:{item_padding};"
         f"min-height:{min_height}px; border:none; border-radius:4px; }}"
         f"QComboBox QAbstractItemView::item:hover, QComboBox QListView::item:hover {{ "
-        f"background:{p['BG2']}; color:{p['TEXT']}; }}"
+        f"background:{hover}; color:{p['TEXT']}; }}"
         f"QComboBox QAbstractItemView::item:selected, QComboBox QListView::item:selected {{ "
         f"background:{p['SELECTION']}; color:{p['SELECTION_TEXT']}; }}"
         f"QComboBoxPrivateContainer QListView::indicator, "
         f"QComboBox QAbstractItemView::indicator {{ width:0; height:0; border:none;"
         f"background:transparent; margin:0; padding:0; }}"
+    )
+
+
+def combo_box_popup_container_style(
+    theme: str | None = None,
+    *,
+    bg: str | None = None,
+    border_radius: int = 8,
+    font_pt: int | None = None,
+    view_padding: int = 6,
+    item_padding: str = "5px 10px",
+) -> str:
+    """Stylesheet applied directly to QComboBoxPrivateContainer when the popup opens."""
+    p = palette(theme)
+    surface = bg or p["BG3"]
+    fs = font_pt or chat_font_pt()
+    min_height = max(24, fs + 8)
+    hover = combo_popup_item_hover_bg(theme)
+    return (
+        f"background:{surface}; color:{p['TEXT']};"
+        f"border:1px solid {p['BORDER']}; border-radius:{border_radius}px;"
+        f"margin:0; padding:{view_padding}px; outline:none;"
+        f"QWidget {{ background:transparent; border:none; }}"
+        f"QListView, QAbstractItemView {{ "
+        f"background:{surface}; color:{p['TEXT']}; border:none; outline:none;"
+        f"margin:0; padding:0; font-size:{fs}px;"
+        f"selection-background-color:{p['SELECTION']};"
+        f"selection-color:{p['SELECTION_TEXT']}; }}"
+        f"QListView::item, QAbstractItemView::item {{ "
+        f"background:transparent; color:{p['TEXT']}; padding:{item_padding};"
+        f"min-height:{min_height}px; border:none; border-radius:4px; }}"
+        f"QListView::item:hover, QAbstractItemView::item:hover {{ "
+        f"background:{hover}; color:{p['TEXT']}; }}"
+        f"QListView::item:selected, QAbstractItemView::item:selected {{ "
+        f"background:{p['SELECTION']}; color:{p['SELECTION_TEXT']}; }}"
+        f"QListView::indicator, QAbstractItemView::indicator {{ width:0; height:0;"
+        f"border:none; background:transparent; margin:0; padding:0; }}"
     )
 
 
@@ -1916,7 +2136,7 @@ def edit_bubble_style(font_pt: int | None = None) -> str:
 
 
 def _install_combo_popup_filter(app) -> None:
-    from PyQt6.QtCore import QEvent, QObject
+    from PyQt6.QtCore import QEvent, QObject, QTimer
 
     if not hasattr(app, "installEventFilter"):
         return
@@ -1929,12 +2149,13 @@ def _install_combo_popup_filter(app) -> None:
                 return False
             if obj.metaObject().className() != "QComboBoxPrivateContainer":
                 return False
-            colors = palette()
-            surface = colors["BG3"]
-            obj.setStyleSheet(
-                f"background:{surface}; border:none; margin:0; padding:0;"
-                f"QWidget {{ background:{surface}; border:none; }}"
-            )
+            obj.setStyleSheet(combo_box_popup_container_style(current_theme()))
+
+            def _fit(container=obj):
+                resize_combo_popup_container(container)
+                container.updateGeometry()
+
+            QTimer.singleShot(0, _fit)
             return False
 
     app.installEventFilter(_ComboPopupFilter(app))

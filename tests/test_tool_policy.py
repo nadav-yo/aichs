@@ -1,6 +1,4 @@
-from pathlib import Path
 
-import pytest
 
 from services.tool_policy import (
     path_in_repo,

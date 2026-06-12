@@ -10,7 +10,7 @@ from services.tool_registry import (
     extension_panel_data,
     extension_status_badges,
 )
-from ui.theme import ACCENT, meta_font_pt, palette, tone_badge_button_style
+from ui.theme import tone_badge_button_style
 from ui.widgets.extension_panel_dialog import ExtensionPanelDialog
 
 

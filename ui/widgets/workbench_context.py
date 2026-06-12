@@ -88,6 +88,7 @@ class WorkbenchContextPanel(QWidget):
     language_chat_file_requested = pyqtSignal()
     language_quick_fix_requested = pyqtSignal(object)
     language_chat_fix_requested = pyqtSignal(object)
+    language_chat_fix_all_requested = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -103,6 +104,8 @@ class WorkbenchContextPanel(QWidget):
         self._language_diagnostics_data: list[Diagnostic] = []
         self._language_status_generation = 0
         self._language_status_key: tuple[str, str, bool] = ("", "", False)
+        self._language_status_loaded_key: tuple[str, str, bool] = ("", "", False)
+        self._language_status_inflight_key: tuple[str, str, bool] = ("", "", False)
         self._language_status_threads: list[_LanguageStatusThread] = []
 
         layout = QVBoxLayout(self)
@@ -254,6 +257,8 @@ class WorkbenchContextPanel(QWidget):
         self._language_diagnostics = QListWidget()
         self._language_diagnostics.setMinimumHeight(92)
         self._language_diagnostics.setMaximumHeight(132)
+        self._language_diagnostics.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._language_diagnostics.customContextMenuRequested.connect(self._show_language_diagnostics_menu)
         language_body_layout.addWidget(self._language_diagnostics)
 
         language_actions = QHBoxLayout()
@@ -266,9 +271,9 @@ class WorkbenchContextPanel(QWidget):
         self._language_quick_fix_btn.clicked.connect(self._request_language_quick_fix)
         language_actions.addWidget(self._language_quick_fix_btn)
 
-        self._language_ask_btn = QPushButton("Ask Fix")
-        self._language_ask_btn.setToolTip("Ask chat to fix the selected problem")
-        self._language_ask_btn.clicked.connect(self._request_language_chat_fix)
+        self._language_ask_btn = QPushButton("Ask Fix all")
+        self._language_ask_btn.setToolTip("Ask chat to fix all current problems")
+        self._language_ask_btn.clicked.connect(self._request_language_chat_fix_all)
         language_actions.addWidget(self._language_ask_btn)
         language_actions.addStretch(1)
         language_body_layout.addLayout(language_actions)
@@ -283,11 +288,12 @@ class WorkbenchContextPanel(QWidget):
     def set_language_context(self, context: dict):
         self._language_context = dict(context or {})
         self._language_diagnostics_data = list(self._language_context.get("diagnostics") or [])
-        self._language_status_generation += 1
-        generation = self._language_status_generation
         key = _language_context_key(self._language_context)
         if not _can_load_language_status(self._language_context):
+            self._language_status_generation += 1
             self._language_status_key = key
+            self._language_status_loaded_key = ("", "", False)
+            self._language_status_inflight_key = ("", "", False)
             self._language_statuses = []
             self._language_errors = []
             self._set_language_available(False)
@@ -295,12 +301,24 @@ class WorkbenchContextPanel(QWidget):
             return
 
         if key != self._language_status_key:
+            self._language_status_generation += 1
             self._language_status_key = key
+            self._language_status_loaded_key = ("", "", False)
             self._language_statuses = []
             self._language_errors = []
             self._set_language_available(False)
+            self._render_language()
+            self._start_language_status_refresh(self._language_status_generation, self._language_context)
+            return
+
         self._render_language()
-        self._start_language_status_refresh(generation, self._language_context)
+        if self._language_status_loaded_key == key or self._language_status_inflight_key == key:
+            return
+        self._language_status_generation += 1
+        self._start_language_status_refresh(self._language_status_generation, self._language_context)
+
+    def active_panel(self) -> str:
+        return self._active_panel
 
     def set_active_panel(self, panel: str):
         self._active_panel = panel if panel in {"run_log", "language"} else "run_log"
@@ -313,6 +331,7 @@ class WorkbenchContextPanel(QWidget):
         self._collapse_btn.setToolTip(f"Collapse {title.lower()}")
 
     def _start_language_status_refresh(self, generation: int, context: dict):
+        self._language_status_inflight_key = _language_context_key(context)
         thread = _LanguageStatusThread(generation, context, self)
         self._language_status_threads.append(thread)
         thread.done.connect(self._apply_language_status_snapshot)
@@ -327,6 +346,9 @@ class WorkbenchContextPanel(QWidget):
             return
         self._language_statuses = list(snapshot.statuses)
         self._language_errors = list(snapshot.errors)
+        self._language_status_loaded_key = self._language_status_key
+        if self._language_status_inflight_key == self._language_status_key:
+            self._language_status_inflight_key = ("", "", False)
         self._set_language_available(bool(self._language_statuses))
         self._render_language()
 
@@ -403,21 +425,45 @@ class WorkbenchContextPanel(QWidget):
         if diagnostics:
             self.language_chat_fix_requested.emit(diagnostics)
 
+    def _request_language_chat_fix_all(self):
+        diagnostics = list(self._language_diagnostics_data)
+        if diagnostics:
+            self.language_chat_fix_all_requested.emit(diagnostics)
+
+    def _show_language_diagnostics_menu(self, pos):
+        if not self._language_diagnostics_data:
+            return
+        item = self._language_diagnostics.itemAt(pos)
+        if item is not None:
+            self._language_diagnostics.setCurrentItem(item)
+        menu = QMenu(self)
+        ask_fix = menu.addAction("Ask Fix")
+        selected = menu.exec(self._language_diagnostics.viewport().mapToGlobal(pos))
+        if selected == ask_fix:
+            self._request_language_chat_fix()
+
+    def _has_open_text_file(self) -> bool:
+        return bool(
+            self._language_context.get("path")
+            and self._language_context.get("is_text")
+        )
+
     def _sync_language_actions(self):
         supported = bool(self._language_statuses)
+        has_text_file = self._has_open_text_file()
         has_diagnostics = bool(self._language_diagnostics_data)
         editable = bool(self._language_context.get("editable", True))
         has_diagnostic_provider = self._has_ready_language_feature("diagnostics")
         has_formatter = self._has_ready_language_feature("format_document")
         has_code_actions = self._has_ready_language_feature("code_actions")
 
-        self._language_actions_label.setVisible(supported)
+        self._language_actions_label.setVisible(supported or has_text_file)
         self._language_format_btn.setVisible(has_formatter)
         self._language_format_btn.setEnabled(has_formatter and editable)
         self._language_fix_safe_btn.setVisible(has_code_actions and has_diagnostics)
         self._language_fix_safe_btn.setEnabled(has_code_actions and has_diagnostics and editable)
-        self._language_ask_file_btn.setVisible(supported)
-        self._language_ask_file_btn.setEnabled(supported)
+        self._language_ask_file_btn.setVisible(has_text_file)
+        self._language_ask_file_btn.setEnabled(has_text_file)
         self._language_refresh_btn.setVisible(has_diagnostic_provider)
         self._language_refresh_btn.setEnabled(has_diagnostic_provider)
 
@@ -625,6 +671,7 @@ class WorkbenchContextPanel(QWidget):
 
     def shutdown(self):
         self._language_status_generation += 1
+        self._language_status_inflight_key = ("", "", False)
         for thread in list(self._language_status_threads):
             if thread.isRunning():
                 thread.wait(3000)

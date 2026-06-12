@@ -15,7 +15,7 @@ from PyQt6.QtGui import (
     QPainter, QPen, QPixmap, QShortcut,
 )
 
-from config import IGNORED, MAX_TREE_ENTRIES_PER_DIR
+from config import IGNORED, ACTIVITY_RAIL_WIDTH, MIN_ACTIVITY_WIDTH, MAX_ACTIVITY_WIDTH, ACTIVITY_STACK_MIN_WIDTH
 from services.chat_drag import AICHS_FILE_DROP_MIME, file_drop_payload, file_drop_text
 from services.file_tree_snapshot import (
     FileTreeSnapshot,
@@ -24,13 +24,15 @@ from services.file_tree_snapshot import (
 )
 from services.file_search import clear_workspace_file_cache
 from services.git_snapshot import GitSnapshot
-from services.git_status import discard_files
+from services.git_status import discard_files, list_file_changes
+from services.performance import time_operation
 from storage.repository import ConversationStore
 from storage.settings import SettingsStore
 from ui.theme import (
     palette, ACCENT, git_status_color, icon_button_style, files_header_style,
+    WORKBENCH_HEADER_MARGINS, WORKBENCH_HEADER_SPACING,
     file_tree_sidebar_style, mono_font_pt, mono_font,
-    meta_font_pt, chat_font_pt, current_theme, rail_button_style,
+    chat_font_pt, current_theme, rail_button_style,
     sidebar_footer_button_style,
 )
 from ui.widgets.conversation_panel import ConversationPanel
@@ -103,6 +105,7 @@ _FILE_NAME_ICON_TYPES = {
 _ICON_CACHE: dict[tuple, QIcon] = {}
 _DISPLAY_NAME_ROLE = Qt.ItemDataRole.UserRole.value + 1
 _LOAD_GENERATION_ROLE = Qt.ItemDataRole.UserRole.value + 2
+_IS_DIR_ROLE = Qt.ItemDataRole.UserRole.value + 3
 
 
 def _path_key(path: str) -> str:
@@ -206,13 +209,15 @@ def _file_icon_type(name: str) -> tuple[str, str]:
 def _tree_item_icon(
     path: str,
     *,
+    is_dir: bool | None = None,
     dirty: bool = False,
     dirty_descendant: bool = False,
     git_code: str = "",
     git_label: str = "",
 ) -> QIcon:
     theme = current_theme()
-    is_dir = os.path.isdir(path)
+    if is_dir is None:
+        is_dir = os.path.isdir(path)
     name = os.path.basename(path)
     label, color = ("folder", "#d6a84f") if is_dir else _file_icon_type(name)
     key = (
@@ -299,17 +304,32 @@ def _paint_file_icon(
 class _PathLabel(QLabel):
     """Workspace folder name; elides when the sidebar is narrow."""
 
+    def set_path(self, path: str):
+        self._full_path = path
+        self._full_text = os.path.basename(path.rstrip(os.sep)) or path
+        self._refresh_tooltip()
+        self._elide()
+
+    def set_path_hint(self, hint: str):
+        self._path_hint = str(hint or "").strip()
+        self._refresh_tooltip()
+
+    def _refresh_tooltip(self):
+        full_path = getattr(self, "_full_path", "")
+        hint = getattr(self, "_path_hint", "")
+        if hint:
+            self.setToolTip(f"{full_path}\n{hint}" if full_path else hint)
+        else:
+            self.setToolTip(full_path)
+
     def __init__(self, path: str = "", parent=None):
         super().__init__(parent)
         self.setObjectName("filesPath")
         self._full_text = ""
+        self._full_path = ""
+        self._path_hint = ""
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.set_path(path)
-
-    def set_path(self, path: str):
-        self._full_text = os.path.basename(path.rstrip(os.sep)) or path
-        self.setToolTip(path)
-        self._elide()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -342,8 +362,8 @@ class _FilesHeader(QWidget):
         self._filter_enabled = filter_enabled
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(12, 6, 6, 6)
-        row.setSpacing(4)
+        row.setContentsMargins(*WORKBENCH_HEADER_MARGINS)
+        row.setSpacing(WORKBENCH_HEADER_SPACING)
 
         self._path = None
         self._filter = None
@@ -359,6 +379,11 @@ class _FilesHeader(QWidget):
             self._path = _PathLabel(path)
             row.addWidget(self._path, 1)
 
+        self._trailing = QHBoxLayout()
+        self._trailing.setContentsMargins(0, 0, 0, 0)
+        self._trailing.setSpacing(4)
+        row.addLayout(self._trailing)
+
         self._refresh = QPushButton("↻")
         self._refresh.setToolTip(refresh_tooltip)
         self._refresh.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -367,6 +392,12 @@ class _FilesHeader(QWidget):
         row.addWidget(self._refresh)
 
         self.apply_appearance()
+
+    def add_trailing_widget(self, widget: QWidget):
+        self._trailing.addWidget(widget)
+
+    def refresh_button(self) -> QPushButton:
+        return self._refresh
 
     def set_path(self, path: str):
         if self._path is not None:
@@ -377,6 +408,10 @@ class _FilesHeader(QWidget):
             self._filter.blockSignals(True)
             self._filter.clear()
             self._filter.blockSignals(False)
+
+    def set_path_hint(self, hint: str):
+        if self._path is not None:
+            self._path.set_path_hint(hint)
 
     def apply_appearance(self):
         self.setStyleSheet(files_header_style())
@@ -432,6 +467,18 @@ class _FileTreeChildrenThread(QThread):
 
     def run(self):
         self.done.emit(self._generation, self._path, build_directory_snapshot(self._path))
+
+
+class _FileTreeGitStatusThread(QThread):
+    done = pyqtSignal(int, object)
+
+    def __init__(self, generation: int, root_path: str, parent=None):
+        super().__init__(parent)
+        self._generation = generation
+        self._root_path = root_path
+
+    def run(self):
+        self.done.emit(self._generation, list_file_changes(self._root_path))
 
 
 class _FileTreeActionThread(QThread):
@@ -500,13 +547,16 @@ class FileTree(QTreeWidget):
         self._shutting_down = False
         self._refresh_generation = 0
         self._children_generation = 0
+        self._git_status_generation = 0
         self._pending_expanded_path_keys: set[str] = set()
         self._pending_current_path = ""
         self._refresh_threads: list[_FileTreeRefreshThread] = []
         self._children_threads: list[_FileTreeChildrenThread] = []
+        self._git_status_threads: list[_FileTreeGitStatusThread] = []
         self._action_threads: list[_FileTreeActionThread] = []
         self.setHeaderHidden(True)
         self.setAnimated(False)
+        self.setUniformRowHeights(True)
         self.setAllColumnsShowFocus(False)
         self.setIconSize(QSize(18, 18))
         self.setStyle(QStyleFactory.create("Fusion"))
@@ -960,11 +1010,15 @@ class FileTree(QTreeWidget):
         return None
 
     def _append_path_item(self, parent: QTreeWidgetItem, path: str) -> QTreeWidgetItem:
-        item = QTreeWidgetItem([self._display_name(os.path.basename(path), path)])
+        is_dir = os.path.isdir(path)
+        item = QTreeWidgetItem([
+            self._display_name(os.path.basename(path), path, is_dir=is_dir)
+        ])
         item.setData(0, Qt.ItemDataRole.UserRole, path)
-        self._apply_item_icon(item, path)
+        item.setData(0, _IS_DIR_ROLE, is_dir)
+        self._apply_item_icon(item, path, is_dir=is_dir)
         parent.addChild(item)
-        if os.path.isdir(path):
+        if is_dir:
             item.addChild(QTreeWidgetItem([""]))
         self._apply_decorations()
         return item
@@ -977,11 +1031,31 @@ class FileTree(QTreeWidget):
 
     def _refresh_git_status(self, changes=None):
         if changes is None:
-            self.refresh()
+            self._request_git_status_refresh()
             return
         self._load_git_status(changes)
         self._update_git_labels()
         self._apply_decorations()
+
+    def _request_git_status_refresh(self):
+        if self._shutting_down:
+            return
+        self._git_status_generation += 1
+        thread = _FileTreeGitStatusThread(self._git_status_generation, self.root_path, self)
+        self._git_status_threads.append(thread)
+        thread.done.connect(self._apply_git_status_result)
+        thread.finished.connect(lambda t=thread: self._release_git_status_thread(t))
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _apply_git_status_result(self, generation: int, changes):
+        if generation != self._git_status_generation:
+            return
+        self._refresh_git_status(changes)
+
+    def _release_git_status_thread(self, thread: _FileTreeGitStatusThread):
+        if thread in self._git_status_threads:
+            self._git_status_threads.remove(thread)
 
     def _populate(
         self,
@@ -1056,23 +1130,36 @@ class FileTree(QTreeWidget):
         expanded_paths: set[str] | None = None,
         current_path: str = "",
     ):
-        expanded_paths = expanded_paths or set()
-        self._pending_expanded_path_keys = set() if snapshot.filter_text else set(expanded_paths)
-        self._pending_current_path = current_path
-        self.clear()
-        self._git_by_path = {
-            _path_key(status.abs_path): (status.code, status.label)
-            for status in snapshot.git_status
-        }
-        self._fill_from_snapshot(self.invisibleRootItem(), snapshot)
-        if not snapshot.filter_text:
-            self._restore_expanded_paths(expanded_paths)
-        if current_path:
-            item = self._find_item_for_path(current_path)
-            if item is not None:
-                self.setCurrentItem(item)
-                self._pending_current_path = ""
-        self._apply_decorations()
+        with time_operation(
+            "file_tree.apply",
+            detail=(
+                f"entries={len(snapshot.entries)} "
+                f"filtered={bool(snapshot.filter_text)} "
+                f"git={len(snapshot.git_status)}"
+            ),
+            slow_ms=50,
+        ):
+            updates_enabled = self._begin_tree_update_batch()
+            try:
+                expanded_paths = expanded_paths or set()
+                self._pending_expanded_path_keys = set() if snapshot.filter_text else set(expanded_paths)
+                self._pending_current_path = current_path
+                self.clear()
+                self._git_by_path = {
+                    _path_key(status.abs_path): (status.code, status.label)
+                    for status in snapshot.git_status
+                }
+                self._fill_from_snapshot(self.invisibleRootItem(), snapshot, apply_icons=False)
+                if not snapshot.filter_text:
+                    self._restore_expanded_paths(expanded_paths)
+                if current_path:
+                    item = self._find_item_for_path(current_path)
+                    if item is not None:
+                        self.setCurrentItem(item)
+                        self._pending_current_path = ""
+                self._apply_decorations()
+            finally:
+                self._end_tree_update_batch(updates_enabled)
 
     def _release_refresh_thread(self, thread: _FileTreeRefreshThread):
         if thread in self._refresh_threads:
@@ -1175,8 +1262,20 @@ class FileTree(QTreeWidget):
                 pass
             if thread.isRunning():
                 thread.wait(3000)
+        for thread in list(self._git_status_threads):
+            try:
+                thread.done.disconnect()
+            except TypeError:
+                pass
+            try:
+                thread.finished.disconnect()
+            except TypeError:
+                pass
+            if thread.isRunning():
+                thread.wait(3000)
         self._refresh_threads.clear()
         self._children_threads.clear()
+        self._git_status_threads.clear()
         self._action_threads.clear()
 
     def closeEvent(self, event):
@@ -1196,7 +1295,7 @@ class FileTree(QTreeWidget):
 
     def _on_item_expanded(self, item: QTreeWidgetItem):
         path = item.data(0, Qt.ItemDataRole.UserRole)
-        if path and os.path.isdir(path) and self._has_placeholder(item):
+        if path and self._item_is_dir(item, path) and self._has_placeholder(item):
             self._request_children(item, path)
 
     def _request_children(self, item: QTreeWidgetItem, path: str):
@@ -1218,30 +1317,50 @@ class FileTree(QTreeWidget):
             return
         if item.data(0, _LOAD_GENERATION_ROLE) != generation:
             return
-        item.takeChildren()
-        self._fill_from_snapshot(item, snapshot)
-        item.setExpanded(True)
-        if self._pending_expanded_path_keys:
-            self._restore_expanded_paths(self._pending_expanded_path_keys)
-        if self._pending_current_path:
-            current = self._find_item_for_path(self._pending_current_path)
-            if current is not None:
-                self.setCurrentItem(current)
-                self._pending_current_path = ""
-        self._apply_decorations()
+        with time_operation(
+            "file_tree.children.apply",
+            detail=f"entries={len(snapshot.entries)} path={path}",
+            slow_ms=50,
+        ):
+            updates_enabled = self._begin_tree_update_batch()
+            try:
+                item.takeChildren()
+                self._fill_from_snapshot(item, snapshot, apply_icons=False)
+                item.setExpanded(True)
+                if self._pending_expanded_path_keys:
+                    self._restore_expanded_paths(self._pending_expanded_path_keys)
+                if self._pending_current_path:
+                    current = self._find_item_for_path(self._pending_current_path)
+                    if current is not None:
+                        self.setCurrentItem(current)
+                        self._pending_current_path = ""
+                self._apply_decorations(item)
+            finally:
+                self._end_tree_update_batch(updates_enabled)
 
     def _release_children_thread(self, thread: _FileTreeChildrenThread):
         if thread in self._children_threads:
             self._children_threads.remove(thread)
 
-    def _display_name(self, name: str, path: str) -> str:
+    def _begin_tree_update_batch(self) -> bool:
+        updates_enabled = self.updatesEnabled()
+        if updates_enabled:
+            self.setUpdatesEnabled(False)
+        return updates_enabled
+
+    def _end_tree_update_batch(self, updates_enabled: bool):
+        self.setUpdatesEnabled(updates_enabled)
+
+    def _display_name(self, name: str, path: str, *, is_dir: bool | None = None) -> str:
         parts = []
-        if os.path.isfile(path) and _path_key(path) in self._dirty_paths:
+        if is_dir is None:
+            is_dir = os.path.isdir(path)
+        if not is_dir and _path_key(path) in self._dirty_paths:
             parts.append("*")
         parts.append(name)
         return " ".join(parts)
 
-    def _apply_decorations(self):
+    def _apply_decorations(self, root: QTreeWidgetItem | None = None):
         accent = QColor(ACCENT)
         default = QColor(palette()["TEXT"])
 
@@ -1251,35 +1370,52 @@ class FileTree(QTreeWidget):
                 for i in range(item.childCount()):
                     walk(item.child(i))
                 return
-            item.setText(0, self._display_name(self._item_display_name(item, path), path))
-            self._apply_item_icon(item, path)
+            is_dir = self._item_is_dir(item, path)
+            item.setText(
+                0,
+                self._display_name(self._item_display_name(item, path), path, is_dir=is_dir),
+            )
+            self._apply_item_icon(item, path, is_dir=is_dir)
             font = item.font(0)
-            font.setBold(os.path.isdir(path))
+            font.setBold(is_dir)
             item.setFont(0, font)
             git = self._git_by_path.get(_path_key(path))
             if git:
                 code, label = git
                 item.setForeground(0, QColor(git_status_color(code)))
-                item.setToolTip(0, self._tooltip(path, git_code=code, git_label=label))
+                item.setToolTip(0, self._tooltip(path, is_dir=is_dir, git_code=code, git_label=label))
             elif _path_key(path) in self._highlighted:
                 item.setForeground(0, accent)
-                item.setToolTip(0, self._tooltip(path))
+                item.setToolTip(0, self._tooltip(path, is_dir=is_dir))
             else:
                 item.setForeground(0, default)
-                item.setToolTip(0, self._tooltip(path))
+                item.setToolTip(0, self._tooltip(path, is_dir=is_dir))
             for i in range(item.childCount()):
                 walk(item.child(i))
 
+        if root is not None:
+            walk(root)
+            return
         for i in range(self.topLevelItemCount()):
             walk(self.topLevelItem(i))
 
-    def _fill_from_snapshot(self, parent: QTreeWidgetItem, snapshot: FileTreeSnapshot):
+    def _fill_from_snapshot(
+        self,
+        parent: QTreeWidgetItem,
+        snapshot: FileTreeSnapshot,
+        *,
+        apply_icons: bool = True,
+    ):
         for entry in snapshot.entries:
             display_name = entry.display_name or entry.name
-            item = QTreeWidgetItem([self._display_name(display_name, entry.abs_path)])
+            item = QTreeWidgetItem([
+                self._display_name(display_name, entry.abs_path, is_dir=entry.is_dir)
+            ])
             item.setData(0, Qt.ItemDataRole.UserRole, entry.abs_path)
             item.setData(0, _DISPLAY_NAME_ROLE, display_name)
-            self._apply_item_icon(item, entry.abs_path)
+            item.setData(0, _IS_DIR_ROLE, entry.is_dir)
+            if apply_icons:
+                self._apply_item_icon(item, entry.abs_path, is_dir=entry.is_dir)
             parent.addChild(item)
             if entry.is_dir:
                 item.addChild(QTreeWidgetItem([""]))
@@ -1297,14 +1433,17 @@ class FileTree(QTreeWidget):
             and not item.child(0).text(0)
         )
 
-    def _apply_item_icon(self, item: QTreeWidgetItem, path: str):
+    def _apply_item_icon(self, item: QTreeWidgetItem, path: str, *, is_dir: bool | None = None):
+        if is_dir is None:
+            is_dir = self._item_is_dir(item, path)
         key = _path_key(path)
-        git = self._git_by_path.get(key) if os.path.isfile(path) else None
+        git = self._git_by_path.get(key) if not is_dir else None
         git_code, git_label = git or ("", "")
         item.setIcon(
             0,
             _tree_item_icon(
                 path,
+                is_dir=is_dir,
                 dirty=key in self._dirty_paths,
                 dirty_descendant=key in self._dirty_dir_paths,
                 git_code=git_code,
@@ -1316,12 +1455,29 @@ class FileTree(QTreeWidget):
     def _item_display_name(item: QTreeWidgetItem, path: str) -> str:
         return str(item.data(0, _DISPLAY_NAME_ROLE) or os.path.basename(path))
 
-    def _tooltip(self, path: str, *, git_code: str = "", git_label: str = "") -> str:
+    def _item_is_dir(self, item: QTreeWidgetItem, path: str) -> bool:
+        value = item.data(0, _IS_DIR_ROLE)
+        if isinstance(value, bool):
+            return value
+        is_dir = os.path.isdir(path)
+        item.setData(0, _IS_DIR_ROLE, is_dir)
+        return is_dir
+
+    def _tooltip(
+        self,
+        path: str,
+        *,
+        is_dir: bool | None = None,
+        git_code: str = "",
+        git_label: str = "",
+    ) -> str:
+        if is_dir is None:
+            is_dir = os.path.isdir(path)
         key = _path_key(path)
         notes = []
-        if os.path.isfile(path) and key in self._dirty_paths:
+        if not is_dir and key in self._dirty_paths:
             notes.append("Unsaved editor changes")
-        if os.path.isdir(path) and key in self._dirty_dir_paths:
+        if is_dir and key in self._dirty_dir_paths:
             notes.append("Contains unsaved editor changes")
         if git_label:
             notes.append(f"Git: {git_status_description(git_code, git_label)}")
@@ -1355,6 +1511,7 @@ class LeftPanel(QWidget):
     file_open        = pyqtSignal(str)
     git_file_open    = pyqtSignal(str)
     git_help_requested = pyqtSignal(str, object)
+    commit_summarized = pyqtSignal(str)
     file_attach      = pyqtSignal(str)
     file_search_requested = pyqtSignal()
     text_search_requested = pyqtSignal()
@@ -1379,9 +1536,10 @@ class LeftPanel(QWidget):
         self._activity_buttons: dict[str, QPushButton] = {}
         self._activity_widgets: dict[str, QWidget] = {}
         self._active_activity = "chats"
-        self._collapsed_width = 64
-        self._expanded_min_width = 280
-        self._expanded_max_width = 640
+        self._collapsed_width = ACTIVITY_RAIL_WIDTH
+        self._expanded_min_width = MIN_ACTIVITY_WIDTH
+        self._expanded_max_width = MAX_ACTIVITY_WIDTH
+        self._stack_panel_width = MAX_ACTIVITY_WIDTH - ACTIVITY_RAIL_WIDTH
         self._defer_refresh = defer_refresh
 
         root = QHBoxLayout(self)
@@ -1390,15 +1548,15 @@ class LeftPanel(QWidget):
 
         self._rail = QFrame()
         self._rail.setObjectName("activityRail")
-        self._rail.setFixedWidth(64)
+        self._rail.setFixedWidth(ACTIVITY_RAIL_WIDTH)
         rail_layout = QVBoxLayout(self._rail)
         rail_layout.setContentsMargins(6, 8, 6, 8)
         rail_layout.setSpacing(6)
 
         self._stack = QStackedWidget()
         self._stack.setObjectName("activityStack")
-        self._stack.setMinimumWidth(216)
-        self._stack.setMaximumWidth(576)
+        self._stack.setMinimumWidth(ACTIVITY_STACK_MIN_WIDTH)
+        self._stack.setMaximumWidth(MAX_ACTIVITY_WIDTH - ACTIVITY_RAIL_WIDTH)
 
         self._conv = ConversationPanel(store, settings=self._settings)
         self._conv.selected.connect(self.selected)
@@ -1427,9 +1585,11 @@ class LeftPanel(QWidget):
             settings=self._settings,
             current_model_getter=current_model_getter,
             defer_refresh=defer_refresh,
+            auto_refresh=False,
         )
         self._git.file_open.connect(self.git_file_open)
         self._git.git_help_requested.connect(self.git_help_requested)
+        self._git.commit_summarized.connect(self.commit_summarized)
 
         git_wrap = QWidget()
         git_layout = QVBoxLayout(git_wrap)
@@ -1438,6 +1598,10 @@ class LeftPanel(QWidget):
 
         self._git_header = _FilesHeader(root_path, refresh_tooltip="Refresh git status")
         self._git_header.refresh_clicked.connect(self._git.refresh)
+        self._git_header_sync = self._git.header_sync()
+        self._git_header.add_trailing_widget(self._git_header_sync)
+        self._git.attach_refresh_button(self._git_header.refresh_button())
+        self._git.attach_git_header(self._git_header)
         git_layout.addWidget(self._git_header)
         git_layout.addWidget(self._git, 1)
 
@@ -1535,28 +1699,30 @@ class LeftPanel(QWidget):
         return self._active_activity
 
     def is_activity_panel_collapsed(self) -> bool:
-        return self._stack.isHidden()
+        return self._stack.maximumWidth() == 0
 
     def collapse_activity_panel(self):
-        if self._stack.isHidden():
+        if self.is_activity_panel_collapsed():
             return
-        self._stack.hide()
+        self._stack.setMaximumWidth(0)
+        self._stack.setMinimumWidth(0)
         self.setMinimumWidth(self._collapsed_width)
         self.setMaximumWidth(self._collapsed_width)
         self._sync_activity_buttons()
         self.activity_panel_collapsed_changed.emit(True)
 
     def expand_activity_panel(self):
-        was_collapsed = self._stack.isHidden()
+        was_collapsed = self.is_activity_panel_collapsed()
         self.setMinimumWidth(self._expanded_min_width)
         self.setMaximumWidth(self._expanded_max_width)
-        self._stack.show()
+        self._stack.setMinimumWidth(ACTIVITY_STACK_MIN_WIDTH)
+        self._stack.setMaximumWidth(self._stack_panel_width)
         self._sync_activity_buttons()
         if was_collapsed:
             self.activity_panel_collapsed_changed.emit(False)
 
     def _sync_activity_buttons(self):
-        p = palette()
+        palette()
         fs = max(11, chat_font_pt() - 2)
         for key, button in self._activity_buttons.items():
             button.setStyleSheet(

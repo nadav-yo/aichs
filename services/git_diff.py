@@ -5,12 +5,13 @@ from __future__ import annotations
 import difflib
 import os
 import shlex
+import subprocess
 from dataclasses import dataclass
 
 from config import MAX_FILE_PREVIEW_BYTES
 from services.git_snapshot import GitSnapshot
 from services.git_status import GitFileChange, is_git_repo, list_file_changes, run_git
-from services.subprocess_utils import run_no_window
+from services.subprocess_utils import popen_no_window, run_no_window
 
 _CHANGE_UNSET = object()
 
@@ -81,13 +82,48 @@ def _read_text(path: str) -> tuple[str, bool]:
 
 
 def _head_text(repo_path: str, rel_path: str) -> str | None:
-    code, out = _run_git(["git", "show", f"HEAD:{rel_path}"], repo_path)
+    code, raw, truncated = _run_git_stdout_prefix(
+        ["git", "show", f"HEAD:{rel_path}"],
+        repo_path,
+        MAX_FILE_PREVIEW_BYTES,
+    )
     if code != 0:
         return None
-    if len(out.encode("utf-8")) > MAX_FILE_PREVIEW_BYTES:
-        out = out.encode("utf-8")[:MAX_FILE_PREVIEW_BYTES].decode("utf-8", errors="replace")
-        out += f"\n\n[Diff truncated at {MAX_FILE_PREVIEW_BYTES} bytes]"
-    return out
+    text = raw.decode("utf-8", errors="replace")
+    if truncated:
+        text += f"\n\n[Diff truncated at {MAX_FILE_PREVIEW_BYTES} bytes]"
+    return text
+
+
+def _run_git_stdout_prefix(cmd: list[str], cwd: str, limit: int) -> tuple[int, bytes, bool]:
+    try:
+        proc = popen_no_window(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return 1, b"", False
+    assert proc.stdout is not None
+    try:
+        raw = proc.stdout.read(limit + 1)
+    except Exception:
+        proc.kill()
+        proc.wait()
+        return 1, b"", False
+    truncated = len(raw) > limit
+    if truncated:
+        proc.kill()
+        proc.wait()
+        return 0, raw[:limit], True
+    try:
+        code = proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return 1, raw[:limit], False
+    return code, raw[:limit], False
 
 
 def _unified(old: str, new: str, rel_path: str) -> str:

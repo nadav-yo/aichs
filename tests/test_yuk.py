@@ -14,7 +14,6 @@ from storage.settings import (
     DEFAULT_ARCHIVIST_PROMPT,
     DEFAULT_AUTO_TITLE_PROMPT_INSTRUCTIONS,
     DEFAULT_COMPACT_RESUME_PROMPT,
-    DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE,
     DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
     DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY,
     FILE_REVIEW_PROMPT_TEMPLATE_KEY,
@@ -23,6 +22,7 @@ from storage.settings import (
 from services.tool_registry import is_extension_disabled, set_extension_enabled
 from services.yuk import (
     YukExportSelection,
+    _write_tree,
     apply_yuk,
     discover_export_items,
     export_yuk,
@@ -92,6 +92,40 @@ def test_export_yuk_prompt_items_only_include_non_defaults(workspace, tmp_path):
         DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY: "Please fix {mention} with tests.",
         GIT_FIX_PROMPT_TEMPLATE_KEY: "Debug git {action}: {command}.",
     }
+
+
+def test_yuk_discovery_uses_top_level_scans_without_glob(workspace, monkeypatch):
+    skills = workspace / ".aichs" / "skills"
+    skills.mkdir(parents=True)
+    (skills / "visible.md").write_text("---\nname: visible\n---\nVisible\n", encoding="utf-8")
+    nested_skill = skills / "nested"
+    nested_skill.mkdir()
+    (nested_skill / "hidden.md").write_text("---\nname: hidden\n---\nHidden\n", encoding="utf-8")
+    extensions = workspace / ".aichs" / "extensions"
+    extensions.mkdir(parents=True)
+    (extensions / "file_ext.py").write_text("def register(registry): pass\n", encoding="utf-8")
+    (extensions / "__init__.py").write_text("def register(registry): pass\n", encoding="utf-8")
+    folder_ext = extensions / "folder-ext"
+    folder_ext.mkdir()
+    (folder_ext / "extension.py").write_text("def register(registry): pass\n", encoding="utf-8")
+    nested_ext = extensions / "nested" / "inner"
+    nested_ext.mkdir(parents=True)
+    (nested_ext / "extension.py").write_text("def register(registry): pass\n", encoding="utf-8")
+
+    def fail_glob(self, pattern):
+        raise AssertionError(f"unexpected glob({pattern})")
+
+    monkeypatch.setattr(Path, "glob", fail_glob)
+
+    items = discover_export_items(str(workspace), settings={})
+    item_ids = {item.id for item in items}
+
+    assert "skill:project:visible.md" in item_ids
+    assert "skill:project:hidden.md" not in item_ids
+    assert "extension:project:file_ext.py" in item_ids
+    assert "extension:project:folder-ext" in item_ids
+    assert "extension:project:__init__.py" not in item_ids
+    assert "extension:project:inner" not in item_ids
 
 
 def test_yuk_round_trips_project_extension_disabled_state(workspace, tmp_path):
@@ -286,6 +320,26 @@ def test_yuk_folder_extension_overwrite_replaces_existing_tree(workspace, tmp_pa
     assert (old / "extension.py").exists()
     assert (old / "notes.txt").read_text(encoding="utf-8") == "new\n"
     assert is_extension_disabled(old, str(target))
+
+
+def test_yuk_write_tree_can_cancel_between_files(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.txt").write_text("a\n", encoding="utf-8")
+    (source / "b.txt").write_text("b\n", encoding="utf-8")
+    cancelled = False
+    writes = []
+
+    class FakeZip:
+        def write(self, path, archive_path):
+            nonlocal cancelled
+            writes.append((Path(path).name, archive_path))
+            cancelled = True
+
+    with pytest.raises(RuntimeError, match="cancelled"):
+        _write_tree(FakeZip(), source, "extensions/project/source", cancelled=lambda: cancelled)
+
+    assert writes == [("a.txt", "extensions/project/source/a.txt")]
 
 
 def test_yuk_exports_extension_permissions(workspace, tmp_path):

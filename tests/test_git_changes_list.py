@@ -1,8 +1,10 @@
 import json
 import time
+from contextlib import contextmanager
 
-from PyQt6.QtCore import QMimeData, Qt
-from PyQt6.QtWidgets import QAbstractItemView, QMessageBox, QPushButton
+from PyQt6.QtCore import QMimeData, Qt, QRect, QSize
+from PyQt6.QtGui import QColor, QPainter, QPixmap
+from PyQt6.QtWidgets import QAbstractItemView, QMessageBox, QStyle, QStyleOptionViewItem, QListWidget, QListWidgetItem
 
 from services.chat_drag import AICHS_FILE_DROP_MIME, parse_file_drop
 from services.git_snapshot import GitSnapshot
@@ -12,7 +14,11 @@ from ui.theme import ACCENT, palette
 from ui.widgets.git_changes_list import (
     GitChangesList,
     _GIT_CHANGE_MIME,
+    _GitChangeDelegate,
     _GitChangeList,
+    _ROLE_REL_PATH,
+    _ROLE_STATUS_CODE,
+    _ROLE_STATUS_LABEL,
     _default_stash_message,
     _commit_message_busy_icon,
     _git_change_button_style,
@@ -66,12 +72,15 @@ def test_git_changes_list_commit_controls_are_first_and_only_button(qapp, worksp
     widget = GitChangesList(str(workspace))
     margins = widget.layout().contentsMargins()
 
-    assert widget.layout().itemAt(0).widget() is widget.summary
+    assert widget.layout().itemAt(0).layout() is not None
+    assert widget.message is widget.layout().itemAt(0).layout().itemAt(0).widget()
     assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (6, 0, 6, 0)
-    assert widget.summary.placeholderText() == "Commit Message"
-    assert widget.layout().itemAt(3).spacerItem() is not None
-    assert widget.layout().itemAt(4).widget() is widget._staged_label
-    assert [button.text() for button in widget.findChildren(QPushButton)] == ["Commit"]
+    assert widget.message.placeholderText() == "Commit message"
+    assert widget.layout().itemAt(1).layout() is not None
+    assert widget.layout().itemAt(2).widget() is widget._lists_splitter
+    assert widget._staged_label.text() == "Staged"
+    assert widget._unstaged_label.text() == "Unstaged"
+    assert widget._commit_btn.text() == "Commit"
 
 
 def test_git_changes_list_commit_requires_staged_files_and_summary(qapp, workspace):
@@ -80,8 +89,25 @@ def test_git_changes_list_commit_requires_staged_files_and_summary(qapp, workspa
     widget._update_action_state()
 
     assert not widget._commit_btn.isEnabled()
-    widget.summary.setText("commit from ui")
+    widget.message.setPlainText("commit from ui")
     assert widget._commit_btn.isEnabled()
+
+
+def test_git_changes_list_commit_splits_first_line_and_body(qapp, workspace, monkeypatch):
+    widget = GitChangesList(str(workspace))
+    widget._staged_count = 1
+    widget.message.setPlainText("subject line\nmore detail")
+    captured = []
+
+    monkeypatch.setattr(
+        "ui.widgets.git_changes_list.commit_staged",
+        lambda repo_path, summary, body: captured.append((summary, body)) or GitCommandResult(0, "", ""),
+    )
+    monkeypatch.setattr(widget, "_run_change_action", lambda *args, **kwargs: None)
+
+    widget._commit()
+
+    assert captured == [("subject line", "more detail")]
 
 
 def test_git_changes_list_generate_action_tracks_staged_files(qapp, workspace, monkeypatch):
@@ -93,9 +119,8 @@ def test_git_changes_list_generate_action_tracks_staged_files(qapp, workspace, m
     widget = GitChangesList(str(workspace), current_model_getter=lambda: "model-a")
     _wait_until(qapp, lambda: not widget._refresh_threads)
 
-    assert widget._generate_action in widget.summary.actions()
-    assert widget._generate_action.toolTip() == "Generate commit message from staged files"
-    assert not widget._generate_action.isEnabled()
+    assert widget._generate_btn.toolTip() == "Generate commit message from staged files"
+    assert not widget._generate_btn.isEnabled()
 
     changes.append(
         GitFileChange(
@@ -109,9 +134,9 @@ def test_git_changes_list_generate_action_tracks_staged_files(qapp, workspace, m
         )
     )
     widget.refresh()
-    _wait_until(qapp, lambda: widget._generate_action.isEnabled())
+    _wait_until(qapp, lambda: widget._generate_btn.isEnabled())
 
-    assert widget._generate_action.isEnabled()
+    assert widget._generate_btn.isEnabled()
 
 
 def test_git_changes_list_generate_action_disables_while_running(qapp, workspace):
@@ -125,7 +150,7 @@ def test_git_changes_list_generate_action_disables_while_running(qapp, workspace
     widget._message_thread = Running()
     widget._update_action_state()
 
-    assert not widget._generate_action.isEnabled()
+    assert not widget._generate_btn.isEnabled()
     widget._on_commit_message_finished()
 
 
@@ -139,15 +164,36 @@ def test_git_changes_list_shutdown_clears_refresh_threads(qapp, workspace):
     assert widget._refresh_generation == 2
 
 
+def test_git_changes_list_apply_snapshot_is_timed(qapp, workspace, monkeypatch):
+    import ui.widgets.git_changes_list as git_changes_list
+
+    operations = []
+
+    @contextmanager
+    def fake_time_operation(operation, *, detail="", slow_ms=100.0):
+        operations.append((operation, detail, slow_ms))
+        yield
+
+    monkeypatch.setattr(git_changes_list, "time_operation", fake_time_operation)
+    widget = GitChangesList(str(workspace), defer_refresh=True)
+    widget._refresh_generation = 7
+    change = GitFileChange(" M", "M", "src/main.py", str(workspace / "src" / "main.py"))
+
+    widget._apply_snapshot(
+        7,
+        GitSnapshot(repo_path=str(workspace), is_repo=True, changes=(change,)),
+    )
+
+    assert operations == [("git_changes.apply", "changes=1", 50)]
+
+
 def test_git_changes_list_generated_message_replaces_summary_and_body(qapp, workspace):
     widget = GitChangesList(str(workspace))
-    widget.summary.setText("old summary")
-    widget.body.setPlainText("old body")
+    widget.message.setPlainText("old summary\n\nold body")
 
     widget._on_commit_message_generated("new summary", "new body")
 
-    assert widget.summary.text() == "new summary"
-    assert widget.body.toPlainText() == "new body"
+    assert widget.message.toPlainText() == "new summary\n\nnew body"
 
 
 def test_git_changes_list_generate_error_uses_dialog(qapp, workspace, monkeypatch):
@@ -197,11 +243,10 @@ def test_git_changes_list_generate_uses_current_model_and_guidance(qapp, workspa
     widget._generate_commit_message()
 
     assert created == [("model-a", str(workspace), "Use Jira keys")]
-    assert not widget._generate_action.icon().isNull()
-    assert widget._generate_action.toolTip() == "Generating commit message..."
+    assert not widget._generate_btn.icon().isNull()
+    assert widget._generate_btn.toolTip() == "Generating commit message..."
     widget._on_commit_message_finished()
-    assert widget._generate_action.text() == ""
-    assert widget._generate_action.toolTip() == "Generate commit message from staged files"
+    assert widget._generate_btn.toolTip() == "Generate commit message from staged files"
 
 
 def test_git_changes_list_generate_animation_advances_frames(qapp, workspace):
@@ -214,8 +259,7 @@ def test_git_changes_list_generate_animation_advances_frames(qapp, workspace):
     widget._stop_generate_animation()
 
     assert first != second
-    assert not widget._generate_action.icon().isNull()
-    assert widget._generate_action.text() == ""
+    assert not widget._generate_btn.icon().isNull()
 
 
 def test_git_changes_list_busy_icon_is_visible(qapp):
@@ -275,6 +319,28 @@ def test_git_changes_drop_releases_with_move_action(qapp):
     assert drop.accepted is True
     assert drop.drop_action == Qt.DropAction.MoveAction
     assert calls == [(False, True, ["src/main.py"])]
+    changes.close()
+
+
+def test_git_changes_same_section_drop_is_ignored(qapp):
+    changes = _GitChangeList(staged=True)
+    calls = []
+    changes.files_dropped.connect(lambda *args: calls.append(args))
+
+    mime = QMimeData()
+    mime.setData(
+        _GIT_CHANGE_MIME,
+        json.dumps({"staged": True, "paths": ["src/main.py"]}).encode("utf-8"),
+    )
+    enter = _FakeDropEvent(mime)
+    drop = _FakeDropEvent(mime)
+    changes.dragEnterEvent(enter)
+    changes.dropEvent(drop)
+
+    assert enter.accepted is False
+    assert drop.ignored is True
+    assert drop.accepted is False
+    assert calls == []
     changes.close()
 
 
@@ -405,6 +471,44 @@ def test_default_stash_message_summarizes_selected_paths():
     )
 
 
+def test_grouped_display_path_strips_top_level_folder():
+    assert GitChangesList._grouped_display_path("docs/readme.md", "docs") == "readme.md"
+    assert GitChangesList._grouped_display_path("docs/sub/a.py", "docs") == "sub/a.py"
+    assert GitChangesList._grouped_display_path("note.txt", "(root)") == "note.txt"
+
+
+def _delegate_icon_color(*, code: str, label: str, selected: bool) -> QColor:
+    widget = QListWidget()
+    widget.setIconSize(QSize(12, 12))
+    delegate = _GitChangeDelegate(widget)
+    item = QListWidgetItem("sample.py")
+    item.setData(_ROLE_REL_PATH, "sample.py")
+    item.setData(_ROLE_STATUS_CODE, code)
+    item.setData(_ROLE_STATUS_LABEL, label)
+    widget.addItem(item)
+
+    option = QStyleOptionViewItem()
+    option.rect = QRect(0, 0, 220, 24)
+    option.state = QStyle.StateFlag.State_Enabled
+    if selected:
+        option.state |= QStyle.StateFlag.State_Selected
+
+    pixmap = QPixmap(option.rect.size())
+    pixmap.fill(QColor(palette()["BG2"]))
+    painter = QPainter(pixmap)
+    delegate.paint(painter, option, widget.model().index(0, 0))
+    painter.end()
+    return pixmap.toImage().pixelColor(14, 12)
+
+
+def test_git_change_delegate_keeps_status_color_when_selected(qapp):
+    untracked = palette()["TEXT_DIM"]
+    modified = ACCENT
+    for selected in (False, True):
+        assert _delegate_icon_color(code="??", label="?", selected=selected).name() == QColor(untracked).name()
+        assert _delegate_icon_color(code=" M", label="M", selected=selected).name() == QColor(modified).name()
+
+
 def test_git_changes_list_styles_use_each_theme_palette(qapp):
     for theme in ("dark", "modern", "light"):
         p = palette(theme)
@@ -421,6 +525,7 @@ class _FakeDropEvent:
     def __init__(self, mime):
         self._mime = mime
         self.accepted = False
+        self.ignored = False
         self.drop_action = None
 
     def mimeData(self):
@@ -431,3 +536,6 @@ class _FakeDropEvent:
 
     def accept(self):
         self.accepted = True
+
+    def ignore(self):
+        self.ignored = True

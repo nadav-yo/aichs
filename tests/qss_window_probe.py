@@ -21,7 +21,7 @@ def main(workspace: str | None = None) -> int:
     from ui import theme
     from ui.widgets.settings_dialog import SettingsDialog
 
-    app = QApplication([])
+    app = QApplication.instance() or QApplication([])
     failures: list[str] = []
 
     store = SettingsStore()

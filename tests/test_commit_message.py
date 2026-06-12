@@ -76,6 +76,14 @@ def test_clean_and_split_commit_message():
     assert body == "Keep staging clear."
 
 
+def test_format_commit_message_joins_summary_and_body():
+    assert cm.format_commit_message("Fix git panel", "Drop separate description field.") == (
+        "Fix git panel\n\nDrop separate description field."
+    )
+    assert cm.format_commit_message("Summary only", "") == "Summary only"
+    assert cm.format_commit_message("", "Body only") == "Body only"
+
+
 def test_clean_commit_message_removes_chatml_control_tokens():
     raw = (
         "<|im_start|>assistant\n"

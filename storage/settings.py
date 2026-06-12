@@ -10,33 +10,47 @@ DEFAULT_FILE_EDITOR_TAB_SPACES = 4
 MIN_FILE_EDITOR_TAB_SPACES = 1
 MAX_FILE_EDITOR_TAB_SPACES = 12
 FILE_REVIEW_PROMPT_TEMPLATE_KEY = "file_review_prompt_template"
-DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE = "Please review {mention}."
+DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE = "Review {mention} for bugs, regressions, and missing tests."
 DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY = "diagnostic_fix_prompt_template"
-DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE = "Please fix this diagnostic in {mention}."
+DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE = (
+    "Run {command}, then fix every issue reported by {tool} in {file}."
+)
 GIT_FIX_PROMPT_TEMPLATE_KEY = "git_fix_prompt_template"
-DEFAULT_GIT_FIX_PROMPT_TEMPLATE = "Help me diagnose this git {action} failure."
+DEFAULT_GIT_FIX_PROMPT_TEMPLATE = "Diagnose this git {action} failure and suggest a fix."
 AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY = "auto_title_prompt_instructions"
 DEFAULT_AUTO_TITLE_PROMPT_INSTRUCTIONS = """\
-Write a short conversation title (5-7 words). No quotes, no punctuation at the end.
-Capture the main topic from the first user message. Reply with the title only."""
+Write a sidebar chat label (2-6 words). Name the task or topic, not the user's wording.
+Short noun phrase; verb + object when possible. No files, paths, @mentions, or quotes.
+No questions. Avoid "Help with" or "Question about". Reply with the title only.
+
+Examples:
+- "fix dropdown padding when open?" → Fix dropdown padding
+- "review @services/auto_title.py" → Auto title prompt
+- "header differs on Files vs Chats" → Header tab consistency"""
 DEFAULT_AUTO_TITLE_PROMPT = f"""\
 {DEFAULT_AUTO_TITLE_PROMPT_INSTRUCTIONS}
 
 First user message:
 {{user}}"""
 COMPACT_RESUME_PROMPT_KEY = "compact_resume_prompt"
-DEFAULT_COMPACT_RESUME_PROMPT = "Continue the active task from the compacted context."
+DEFAULT_COMPACT_RESUME_PROMPT = "Continue from the compacted summary. Pick up the next step."
 COMPACTION_SUMMARY_GUIDANCE_KEY = "compaction_summary_guidance"
 ARCHIVIST_PROMPT_KEY = "archivist_prompt"
 COMMIT_MESSAGE_PROMPT_ADDITION_KEY = "commit_message_prompt_addition"
 DEFAULT_ARCHIVIST_PROMPT = (
-    "Act as Archivist for this turn. Focus on saved chat memory, durable decisions, "
-    "open threads, and context worth carrying forward. Use read_project_chat for exact "
-    "dropped chat references and search_project_chats for fuzzy memory lookup. Keep the "
-    "answer concise and cite conversation titles or ids when useful."
+    "Act as Archivist. Recall durable decisions, open threads, and context worth keeping. "
+    "Use read_project_chat for dropped references and search_project_chats to search memory. "
+    "Be concise; cite chat titles or ids when useful."
 )
 TRASH_RETENTION_DAYS_KEY = "trash_retention_days"
 DEFAULT_TRASH_RETENTION_DAYS = 14
+GIT_PANEL_MODE_KEY = "git_panel_mode"
+GIT_PANEL_LISTS_SPLIT_KEY = "git_panel_lists_split"
+GIT_PANEL_BODY_EXPANDED_KEY = "git_panel_body_expanded"
+DEFAULT_GIT_PANEL_LISTS_SPLIT = [120, 220]
+RESUME_SESSION_KEY = "resume_session"
+DEFAULT_RESUME_SESSION = "always"
+_VALID_RESUME_SESSION = frozenset({"always", "ask", "never"})
 
 _LEGACY_PROVIDER_KEYS = {
     "claude": "anthropic_api_key",
@@ -108,6 +122,40 @@ def compaction_summary_guidance(data: dict | None) -> str:
 
 def archivist_prompt(data: dict | None) -> str:
     return _text_setting(data, ARCHIVIST_PROMPT_KEY, DEFAULT_ARCHIVIST_PROMPT)
+
+
+def git_panel_mode(data: dict | None) -> str:
+    data = data if isinstance(data, dict) else {}
+    mode = str(data.get(GIT_PANEL_MODE_KEY, "changes") or "changes").strip().lower()
+    if mode == "sync":
+        return "changes"
+    if mode not in {"changes", "history"}:
+        return "changes"
+    return mode
+
+
+def git_panel_lists_split(data: dict | None) -> list[int]:
+    data = data if isinstance(data, dict) else {}
+    raw = data.get(GIT_PANEL_LISTS_SPLIT_KEY, DEFAULT_GIT_PANEL_LISTS_SPLIT)
+    if not isinstance(raw, list) or len(raw) != 2:
+        return list(DEFAULT_GIT_PANEL_LISTS_SPLIT)
+    try:
+        return [max(40, int(raw[0])), max(40, int(raw[1]))]
+    except (TypeError, ValueError):
+        return list(DEFAULT_GIT_PANEL_LISTS_SPLIT)
+
+
+def git_panel_body_expanded(data: dict | None) -> bool:
+    data = data if isinstance(data, dict) else {}
+    return bool(data.get(GIT_PANEL_BODY_EXPANDED_KEY, False))
+
+
+def resume_session(data: dict | None) -> str:
+    data = data if isinstance(data, dict) else {}
+    mode = str(data.get(RESUME_SESSION_KEY, DEFAULT_RESUME_SESSION) or DEFAULT_RESUME_SESSION).strip().lower()
+    if mode not in _VALID_RESUME_SESSION:
+        return DEFAULT_RESUME_SESSION
+    return mode
 
 
 def _text_setting(data: dict | None, key: str, default: str) -> str:
@@ -212,8 +260,6 @@ class SettingsStore:
             if key:
                 if overwrite or not os.environ.get(env_var):
                     os.environ[env_var] = key
-            elif overwrite and provider in _LEGACY_PROVIDER_KEYS:
-                os.environ.pop(env_var, None)
 
     def apply(self) -> None:
         """Load settings at startup; only set env vars not already defined externally."""

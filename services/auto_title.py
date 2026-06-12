@@ -27,6 +27,16 @@ _BAD_TITLE_PATTERNS = (
     "ready to proceed",
     "provide task",
     "task instructions",
+    "help with",
+    "question about",
+)
+_PATH_TOKEN_RE = re.compile(
+    r"\.(py|ts|tsx|js|jsx|md|json|yaml|yml|toml|rs|go|java|cpp|c|h|cs|rb)$",
+    re.I,
+)
+_LEADING_FILLER_RE = re.compile(
+    r"^(?:can you|could you|please|how do i|help me|i need to|i want to)\s+",
+    re.I,
 )
 
 TITLE_PROMPT = DEFAULT_AUTO_TITLE_PROMPT
@@ -73,10 +83,40 @@ def generate_title(model: str, user_text: str) -> str:
 def clean_title(raw: str) -> str:
     t = raw.strip().strip("\"'").split("\n")[0].strip()
     t = re.sub(r"^(title:\s*)+", "", t, flags=re.I).strip()
+    t = re.sub(r"[?.!;:]+$", "", t).strip()
     t = re.sub(r"\s+", " ", t)
-    if len(t) > 60:
-        t = t[:57].rstrip() + "…"
+    t = _strip_leading_filler(t)
+    t = _strip_path_tokens(t)
+    t = _trim_title_words(t, max_words=6)
+    if len(t) > 45:
+        t = t[:42].rstrip() + "…"
     return t or "Untitled"
+
+
+def _strip_leading_filler(text: str) -> str:
+    current = text.strip()
+    while current:
+        stripped = _LEADING_FILLER_RE.sub("", current).strip()
+        if stripped == current:
+            break
+        current = stripped
+    return current
+
+
+def _strip_path_tokens(text: str) -> str:
+    kept = []
+    for word in text.split():
+        if "/" in word or "\\" in word or _PATH_TOKEN_RE.search(word):
+            continue
+        kept.append(word)
+    return " ".join(kept) if kept else text
+
+
+def _trim_title_words(text: str, *, max_words: int = 6) -> str:
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    return " ".join(words[:max_words])
 
 
 def _build_title_prompt(user_text: str) -> str:
@@ -105,9 +145,16 @@ def fallback_title(user_text: str) -> str:
     picked = [
         word.strip("-_/")
         for word in words
-        if len(word.strip("-_/")) >= 2 and word.casefold() not in _STOPWORDS
+        if len(word.strip("-_/")) >= 2
+        and word.casefold() not in _STOPWORDS
+        and not _PATH_TOKEN_RE.search(word.strip("-_/"))
+        and "/" not in word
+        and "\\" not in word
     ]
-    picked = picked[:6] or words[:6]
+    picked = picked[:6] or [
+        word for word in words[:6]
+        if not _PATH_TOKEN_RE.search(word) and "/" not in word and "\\" not in word
+    ]
     if not picked:
         return "Untitled"
     return clean_title(" ".join(_title_word(word) for word in picked))

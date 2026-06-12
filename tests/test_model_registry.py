@@ -1,5 +1,4 @@
 import json
-import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,9 +19,57 @@ def test_resolve_api_key_env_and_literal(monkeypatch):
 
 
 def test_resolve_api_key_command(monkeypatch):
+    reg._clear_api_key_command_cache()
     mock = MagicMock(returncode=0, stdout="cmd-key\n", stderr="")
     with patch("services.model_registry.subprocess.run", return_value=mock):
         assert reg.resolve_api_key("!echo key") == "cmd-key"
+
+
+def test_resolve_api_key_command_uses_success_cache():
+    reg._clear_api_key_command_cache()
+    first = MagicMock(returncode=0, stdout="cmd-key\n", stderr="")
+    second = MagicMock(returncode=0, stdout="other-key\n", stderr="")
+
+    with patch("services.model_registry.subprocess.run", side_effect=[first, second]) as run:
+        assert reg.resolve_api_key("!echo key") == "cmd-key"
+        assert reg.resolve_api_key("!echo key") == "cmd-key"
+
+    assert run.call_count == 1
+
+
+def test_resolve_api_key_command_failures_are_not_cached():
+    reg._clear_api_key_command_cache()
+    failed = MagicMock(returncode=1, stdout="", stderr="missing")
+    recovered = MagicMock(returncode=0, stdout="cmd-key\n", stderr="")
+
+    with patch("services.model_registry.subprocess.run", side_effect=[failed, recovered]) as run:
+        with pytest.warns(UserWarning, match="API key command failed"):
+            assert reg.resolve_api_key("!echo key") == ""
+        assert reg.resolve_api_key("!echo key") == "cmd-key"
+
+    assert run.call_count == 2
+
+
+def test_api_key_command_cache_clears_on_save_and_reload(tmp_path, monkeypatch):
+    path = tmp_path / ".aichs" / "models.json"
+    monkeypatch.setattr(reg, "_MODELS_PATH", path)
+    reg._clear_api_key_command_cache()
+
+    first = MagicMock(returncode=0, stdout="first\n", stderr="")
+    second = MagicMock(returncode=0, stdout="second\n", stderr="")
+    third = MagicMock(returncode=0, stdout="third\n", stderr="")
+
+    with patch("services.model_registry.subprocess.run", side_effect=[first, second, third]) as run:
+        assert reg.resolve_api_key("!echo key") == "first"
+        assert reg.resolve_api_key("!echo key") == "first"
+
+        reg.save_user_providers({})
+        assert reg.resolve_api_key("!echo key") == "second"
+
+        reg.reload(refresh_anthropic=False)
+        assert reg.resolve_api_key("!echo key") == "third"
+
+    assert run.call_count == 3
 
 
 def test_get_model_config_builtin():

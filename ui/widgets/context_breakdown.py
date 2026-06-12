@@ -1,20 +1,20 @@
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QPushButton, QWidget,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QWidget,
 )
 from PyQt6.QtCore import Qt
 
 from services.context_budget import ContextBudget, format_bytes
 from ui.theme import (
-    palette,
     meta_font_pt,
     chat_font_pt,
     MONO_FONT_CSS,
     dialog_shell_style,
-    separator_frame_style,
     hint_label_style,
     primary_button_style,
     title_label_style,
 )
+
+_ROW_OBJECT_NAME = "contextBreakdownRow"
 
 
 class ContextBreakdownDialog(QDialog):
@@ -23,12 +23,14 @@ class ContextBreakdownDialog(QDialog):
         self.setWindowTitle("Context usage")
         self.setMinimumWidth(420)
 
-        p = palette()
-        fs = chat_font_pt()
-        meta = meta_font_pt()
         hint = hint_label_style()
         mono_hint = hint_label_style(font_family=MONO_FONT_CSS)
-        self.setStyleSheet(dialog_shell_style())
+        fs = chat_font_pt()
+        meta = meta_font_pt()
+        self.setStyleSheet(
+            dialog_shell_style(include_labels=True)
+            + f"QWidget#{_ROW_OBJECT_NAME} {{ background: transparent; }}"
+        )
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 16)
@@ -49,12 +51,8 @@ class ContextBreakdownDialog(QDialog):
         model_lbl.setStyleSheet(hint)
         root.addWidget(model_lbl)
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(separator_frame_style())
-        root.addWidget(sep)
-
         cols = QHBoxLayout()
+        cols.setContentsMargins(0, 4, 0, 0)
         cols.addStretch()
         tok_hdr = QLabel("tokens")
         tok_hdr.setFixedWidth(56)
@@ -68,17 +66,19 @@ class ContextBreakdownDialog(QDialog):
         cols.addWidget(size_hdr)
         root.addLayout(cols)
 
+        segments = QVBoxLayout()
+        segments.setContentsMargins(0, 0, 0, 0)
+        segments.setSpacing(8)
         for seg in budget.segments:
-            root.addWidget(self._row(seg.label, seg.byte_count, seg.token_count, seg.detail, p, fs, hint, mono_hint))
-
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet(separator_frame_style())
-        root.addWidget(sep2)
+            segments.addWidget(
+                self._row(seg.label, seg.byte_count, seg.token_count, seg.detail, fs, hint, mono_hint)
+            )
+        root.addLayout(segments)
 
         footer = QLabel(
-            f"Auto-compaction when context exceeds {budget.compaction_limit_tokens:,} tokens "
-            f"({budget.reserve_tokens:,} reserved for the next response)."
+            f"Auto-compacts above {budget.compaction_limit_tokens:,} tokens "
+            f"({budget.window_tokens:,} context window minus "
+            f"{budget.reserve_tokens:,} reserved for the next reply)."
         )
         footer.setWordWrap(True)
         footer.setStyleSheet(hint)
@@ -93,14 +93,14 @@ class ContextBreakdownDialog(QDialog):
         root.addLayout(btn_row)
 
     @staticmethod
-    def _row(label: str, nbytes: int, tokens: int, detail: str, p: dict, fs: int, hint: str, mono_hint: str) -> QWidget:
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 4, 0, 4)
+    def _row(label: str, nbytes: int, tokens: int, detail: str, fs: int, hint: str, mono_hint: str) -> QWidget:
+        wrap = QWidget()
+        wrap.setObjectName(_ROW_OBJECT_NAME)
 
         left = QVBoxLayout()
         left.setSpacing(2)
         title = QLabel(label)
-        title.setStyleSheet(title_label_style(font_pt=fs, font_weight="normal"))
+        title.setStyleSheet(title_label_style(font_pt=fs, font_weight="600"))
         left.addWidget(title)
         if detail:
             sub = QLabel(detail)
@@ -109,14 +109,14 @@ class ContextBreakdownDialog(QDialog):
 
         size = QLabel(format_bytes(nbytes))
         size.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        size.setStyleSheet(hint_label_style(text_color=p["TEXT"], font_family=MONO_FONT_CSS))
+        size.setFixedWidth(64)
+        size.setStyleSheet(mono_hint)
 
         tokens_lbl = QLabel(f"{tokens:,}")
         tokens_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         tokens_lbl.setFixedWidth(56)
         tokens_lbl.setStyleSheet(mono_hint)
 
-        wrap = QWidget()
         outer = QHBoxLayout(wrap)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addLayout(left, 1)

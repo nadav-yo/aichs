@@ -1,6 +1,7 @@
 from pathlib import Path
 import os
 import re
+import threading
 
 import config
 from PyQt6.QtWidgets import (
@@ -63,13 +64,16 @@ from storage.settings import (
     compaction_summary_guidance,
     diagnostic_fix_prompt_template,
     file_editor_tab_spaces,
+    resume_session,
+    RESUME_SESSION_KEY,
+    DEFAULT_RESUME_SESSION,
     file_review_prompt_template,
     git_fix_prompt_template,
     trash_retention_days,
 )
 from ui.avatars import avatar_pixmap, clear_cache, persist_portrait
 from ui.theme import (
-    ACCENT, palette, DEFAULT_FONT_SIZE, DEFAULT_THEME,
+    palette, DEFAULT_FONT_SIZE, DEFAULT_THEME,
     avatar_preview_style,
     bordered_icon_button_style, checkbox_style,
     apply_flat_tab_style, compact_combo_box_style, contained_list_style,
@@ -77,8 +81,7 @@ from ui.theme import (
     dialog_button_box_style, dialog_shell_style,
     navigation_list_style, panel_stack_style,
     separator_color, separator_frame_style, surface_frame_style,
-    primary_button_style, chat_font_pt,
-    form_field_style, field_label_style, hint_label_style, meta_font_pt, secondary_button_style,
+    primary_button_style, form_field_style, field_label_style, hint_label_style, meta_font_pt, secondary_button_style,
     status_pill_style, title_label_style,
 )
 
@@ -307,7 +310,7 @@ class _PortraitPicker(QWidget):
         self._custom_path: str | None = None
         self._accent_color = _clean_color(accent_color)
         self._styles = styles
-        p = palette()
+        palette()
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
@@ -506,7 +509,7 @@ class _ProviderDialog(QDialog):
         root.setContentsMargins(18, 16, 18, 16)
         root.setSpacing(10)
 
-        p = palette()
+        palette()
         self.kind = QComboBox()
         self.kind.addItem("Anthropic", "anthropic")
         self.kind.addItem("OpenAI", "openai")
@@ -891,6 +894,10 @@ class _YukExportPackageWorker(QRunnable):
         self._path = path
         self._cwd = cwd
         self._selected_item_ids = set(selected_item_ids)
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
 
     def run(self) -> None:
         try:
@@ -898,6 +905,7 @@ class _YukExportPackageWorker(QRunnable):
                 self._path,
                 self._cwd,
                 YukExportSelection(selected_item_ids=self._selected_item_ids),
+                cancelled=self._cancel.is_set,
             )
         except Exception as exc:
             self.signals.done.emit(self._generation, None, str(exc))
@@ -1308,6 +1316,7 @@ class SettingsDialog(QDialog):
         self._yuk_export_active = False
         self._yuk_export_pool = QThreadPool(self)
         self._yuk_export_pool.setMaxThreadCount(1)
+        self._yuk_export_worker: _YukExportPackageWorker | None = None
         self._yuk_import_generation = 0
         self._yuk_import_active = False
         self._yuk_import_pool = QThreadPool(self)
@@ -1426,7 +1435,7 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(24, 20, 24, 24)
         layout.setSpacing(16)
-        p = palette()
+        palette()
         hdr = QLabel(title)
         hdr.setStyleSheet(title_label_style(font_pt=18, font_weight="700"))
         layout.addWidget(hdr)
@@ -1441,6 +1450,42 @@ class SettingsDialog(QDialog):
         lbl = QLabel(label)
         lbl.setStyleSheet(self._label_style)
         layout.addWidget(lbl)
+        layout.addWidget(widget)
+
+    @staticmethod
+    def _load_prompt_override(saved: dict, key: str, default: str = "") -> str:
+        raw = str(saved.get(key, "") or "").strip()
+        if not raw:
+            return ""
+        if default and raw == default.strip():
+            return ""
+        return raw
+
+    def _prompt_field(self, layout: QVBoxLayout, label: str, widget: QWidget):
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel(label)
+        lbl.setStyleSheet(self._label_style)
+        row.addWidget(lbl)
+        row.addStretch()
+        reset = QPushButton("Reset")
+        reset.setObjectName(
+            "promptReset_" + re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+        )
+        reset.setStyleSheet(self._btn_style)
+        reset.setFixedHeight(28)
+        reset.setToolTip("Clear custom text and use the built-in default")
+        reset.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        def _reset():
+            if isinstance(widget, QLineEdit):
+                widget.clear()
+            elif isinstance(widget, QTextEdit):
+                widget.clear()
+
+        reset.clicked.connect(_reset)
+        row.addWidget(reset)
+        layout.addLayout(row)
         layout.addWidget(widget)
 
     def _section_separator(self) -> QFrame:
@@ -1469,6 +1514,20 @@ class SettingsDialog(QDialog):
         self.enter_to_send_check = QCheckBox("Enter sends message")
         self.enter_to_send_check.setStyleSheet(self._checkbox_style)
         layout.addWidget(self.enter_to_send_check)
+
+        self.resume_session_combo = QComboBox()
+        self.resume_session_combo.addItem("Always", "always")
+        self.resume_session_combo.addItem("Ask each time", "ask")
+        self.resume_session_combo.addItem("Never", "never")
+        self.resume_session_combo.setStyleSheet(self._field_style)
+        self._field(layout, "Resume last session", self.resume_session_combo)
+
+        resume_hint = QLabel(
+            "When reopening a workspace, restore the last open chat, files, and editor layout."
+        )
+        resume_hint.setWordWrap(True)
+        resume_hint.setStyleSheet(self._hint_style)
+        layout.addWidget(resume_hint)
 
         enter_hint = QLabel("When enabled, Shift+Enter inserts a new line.")
         enter_hint.setWordWrap(True)
@@ -1535,7 +1594,7 @@ class SettingsDialog(QDialog):
     def _page_prompts(self, saved: dict) -> QWidget:
         page, layout = self._page_shell(
             "Prompts",
-            "Workflow prompt defaults. Templates replace defaults; guidance fields are optional add-ons. Crew personalities stay separate.",
+            "Workflow prompt defaults. Clear a field or use Reset to restore the built-in default; placeholders show what empty means.",
         )
         tabs = QTabWidget()
         apply_flat_tab_style(tabs, "promptSettingsTabs")
@@ -1550,7 +1609,7 @@ class SettingsDialog(QDialog):
             DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE
         )
         self.file_review_prompt_template.setStyleSheet(self._field_style)
-        self._field(drafts_layout, "Ask File first line", self.file_review_prompt_template)
+        self._prompt_field(drafts_layout, "Ask File first line", self.file_review_prompt_template)
         drafts_layout.addWidget(_hint_label(
             "Replaces the first line of Ask File drafts. Use {mention} for a safe @ file reference or {path} for the raw relative path.",
             self._hint_style,
@@ -1561,7 +1620,7 @@ class SettingsDialog(QDialog):
             DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE
         )
         self.diagnostic_fix_prompt_template.setStyleSheet(self._field_style)
-        self._field(
+        self._prompt_field(
             drafts_layout,
             "Diagnostic fix first line",
             self.diagnostic_fix_prompt_template,
@@ -1574,7 +1633,7 @@ class SettingsDialog(QDialog):
         self.git_fix_prompt_template = QLineEdit()
         self.git_fix_prompt_template.setPlaceholderText(DEFAULT_GIT_FIX_PROMPT_TEMPLATE)
         self.git_fix_prompt_template.setStyleSheet(self._field_style)
-        self._field(
+        self._prompt_field(
             drafts_layout,
             "Git fix first line",
             self.git_fix_prompt_template,
@@ -1587,7 +1646,7 @@ class SettingsDialog(QDialog):
         self.compact_resume_prompt = QLineEdit()
         self.compact_resume_prompt.setPlaceholderText(DEFAULT_COMPACT_RESUME_PROMPT)
         self.compact_resume_prompt.setStyleSheet(self._field_style)
-        self._field(drafts_layout, "Compact resume prompt", self.compact_resume_prompt)
+        self._prompt_field(drafts_layout, "Compact resume prompt", self.compact_resume_prompt)
         drafts_layout.addWidget(_hint_label(
             "Default resume message used when compact-and-resume does not provide its own text.",
             self._hint_style,
@@ -1606,7 +1665,7 @@ class SettingsDialog(QDialog):
         )
         self.auto_title_prompt_instructions.setMinimumHeight(104)
         self.auto_title_prompt_instructions.setStyleSheet(self._field_style)
-        self._field(
+        self._prompt_field(
             automation_layout,
             "Auto-title instructions",
             self.auto_title_prompt_instructions,
@@ -1629,7 +1688,7 @@ class SettingsDialog(QDialog):
         )
         self.compaction_summary_guidance.setMaximumHeight(96)
         self.compaction_summary_guidance.setStyleSheet(self._field_style)
-        self._field(memory_layout, "Extra compaction guidance", self.compaction_summary_guidance)
+        self._prompt_field(memory_layout, "Extra compaction guidance", self.compaction_summary_guidance)
         memory_layout.addWidget(_hint_label(
             "Optional additive guidance appended to the fixed summary prompt; leave blank for the built-in behavior.",
             self._hint_style,
@@ -1639,7 +1698,7 @@ class SettingsDialog(QDialog):
         self.archivist_prompt.setPlaceholderText(DEFAULT_ARCHIVIST_PROMPT)
         self.archivist_prompt.setMinimumHeight(120)
         self.archivist_prompt.setStyleSheet(self._field_style)
-        self._field(memory_layout, "Archivist slash-command prompt", self.archivist_prompt)
+        self._prompt_field(memory_layout, "Archivist slash-command prompt", self.archivist_prompt)
         memory_layout.addWidget(_hint_label(
             "Replaces /archivist instructions. Command name and allowed tools stay fixed.",
             self._hint_style,
@@ -1658,7 +1717,7 @@ class SettingsDialog(QDialog):
         )
         self.commit_message_guidance.setMaximumHeight(96)
         self.commit_message_guidance.setStyleSheet(self._field_style)
-        self._field(git_layout, "Extra commit guidance", self.commit_message_guidance)
+        self._prompt_field(git_layout, "Extra commit guidance", self.commit_message_guidance)
         git_layout.addWidget(_hint_label(
             "Optional additive guidance appended to generated commit-message requests; leave blank for the built-in behavior.",
             self._hint_style,
@@ -1978,7 +2037,7 @@ class SettingsDialog(QDialog):
             "Configure aichs and each optional crew member's voice, model, color, and portrait.",
         )
         self._crew_widgets = {}
-        p = palette()
+        palette()
         tabs = QTabWidget()
         apply_flat_tab_style(tabs, "crewSettingsTabs")
 
@@ -2099,7 +2158,7 @@ class SettingsDialog(QDialog):
             "User Kit",
             "Export or import portable AICHS personalization packages.",
         )
-        p = palette()
+        palette()
         hint = QLabel(
             "YUK packages can include prompts, personality, crew preferences, skills, "
             "extensions, extension enabled state, and selected avatars. Models, API keys, "
@@ -2169,6 +2228,11 @@ class SettingsDialog(QDialog):
             self.font_combo.setCurrentText(font)
 
         self.enter_to_send_check.setChecked(bool(saved.get("enter_to_send", False)))
+        resume_mode = resume_session(saved)
+        resume_index = self.resume_session_combo.findData(resume_mode)
+        if resume_index < 0:
+            resume_index = self.resume_session_combo.findData(DEFAULT_RESUME_SESSION)
+        self.resume_session_combo.setCurrentIndex(max(0, resume_index))
         self.trash_retention_spin.setValue(trash_retention_days(saved))
 
     def _load_editor_values(self, saved: dict):
@@ -2178,19 +2242,43 @@ class SettingsDialog(QDialog):
         self.file_editor_tab_spaces_spin.setValue(file_editor_tab_spaces(saved))
 
     def _load_prompts_values(self, saved: dict):
-        self.file_review_prompt_template.setText(file_review_prompt_template(saved))
+        self.file_review_prompt_template.setText(
+            self._load_prompt_override(
+                saved, FILE_REVIEW_PROMPT_TEMPLATE_KEY, DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
+            )
+        )
         self.diagnostic_fix_prompt_template.setText(
-            diagnostic_fix_prompt_template(saved)
+            self._load_prompt_override(
+                saved,
+                DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY,
+                DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE,
+            )
         )
-        self.git_fix_prompt_template.setText(git_fix_prompt_template(saved))
-        self.compact_resume_prompt.setText(compact_resume_prompt(saved))
+        self.git_fix_prompt_template.setText(
+            self._load_prompt_override(
+                saved, GIT_FIX_PROMPT_TEMPLATE_KEY, DEFAULT_GIT_FIX_PROMPT_TEMPLATE,
+            )
+        )
+        self.compact_resume_prompt.setText(
+            self._load_prompt_override(
+                saved, COMPACT_RESUME_PROMPT_KEY, DEFAULT_COMPACT_RESUME_PROMPT,
+            )
+        )
         self.auto_title_prompt_instructions.setPlainText(
-            auto_title_prompt_instructions(saved)
+            self._load_prompt_override(
+                saved,
+                AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY,
+                DEFAULT_AUTO_TITLE_PROMPT_INSTRUCTIONS,
+            )
         )
-        self.compaction_summary_guidance.setPlainText(compaction_summary_guidance(saved))
-        self.archivist_prompt.setPlainText(archivist_prompt(saved))
+        self.compaction_summary_guidance.setPlainText(
+            self._load_prompt_override(saved, COMPACTION_SUMMARY_GUIDANCE_KEY)
+        )
+        self.archivist_prompt.setPlainText(
+            self._load_prompt_override(saved, ARCHIVIST_PROMPT_KEY, DEFAULT_ARCHIVIST_PROMPT)
+        )
         self.commit_message_guidance.setPlainText(
-            str(saved.get(COMMIT_MESSAGE_PROMPT_ADDITION_KEY, ""))
+            self._load_prompt_override(saved, COMMIT_MESSAGE_PROMPT_ADDITION_KEY)
         )
 
     def _load_models_values(self, saved: dict):
@@ -2243,12 +2331,14 @@ class SettingsDialog(QDialog):
         self._yuk_export_active = True
         self._sync_yuk_export_state("Exporting YUK package...")
         worker = _YukExportPackageWorker(generation, path, self._cwd, selected_item_ids)
+        self._yuk_export_worker = worker
         worker.signals.done.connect(self._on_yuk_export_done)
         self._yuk_export_pool.start(worker)
 
     def _on_yuk_export_done(self, generation: int, _manifest: object, error: str) -> None:
         if generation != self._yuk_export_generation:
             return
+        self._yuk_export_worker = None
         self._yuk_export_active = False
         if error:
             self._sync_yuk_export_state("Export failed.")
@@ -2267,6 +2357,23 @@ class SettingsDialog(QDialog):
             self._yuk_import_btn.setText("Importing..." if self._yuk_import_active else "Import YUK...")
         if self._yuk_export_status is not None:
             self._yuk_export_status.setText(status)
+
+    def _cancel_yuk_export(self) -> None:
+        self._yuk_export_generation += 1
+        worker = self._yuk_export_worker
+        self._yuk_export_worker = None
+        self._yuk_export_active = False
+        if worker is not None:
+            worker.cancel()
+        self._sync_yuk_export_state("")
+
+    def reject(self) -> None:
+        self._cancel_yuk_export()
+        super().reject()
+
+    def closeEvent(self, event) -> None:
+        self._cancel_yuk_export()
+        super().closeEvent(event)
 
     def _import_yuk(self):
         if self._yuk_import_active or self._yuk_export_active:
@@ -2403,6 +2510,7 @@ class SettingsDialog(QDialog):
         provider_keys = {
             provider["id"]: provider.get("api_key", "").strip()
             for provider in self._providers
+            if provider.get("api_key", "").strip()
         }
         existing_defaults = data.get("default_models", {})
         default_models = {}
@@ -2504,6 +2612,7 @@ class SettingsDialog(QDialog):
             "theme": self.theme_combo.currentText(),
             "font_size": self.font_combo.currentText(),
             "enter_to_send": self.enter_to_send_check.isChecked(),
+            RESUME_SESSION_KEY: str(self.resume_session_combo.currentData() or DEFAULT_RESUME_SESSION),
             FILE_EDITOR_AUTO_SAVE_KEY: self.file_editor_auto_save_check.isChecked(),
             FILE_EDITOR_TAB_SPACES_KEY: self.file_editor_tab_spaces_spin.value(),
             FILE_REVIEW_PROMPT_TEMPLATE_KEY: self.file_review_prompt_template.text().strip(),

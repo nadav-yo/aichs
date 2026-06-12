@@ -25,9 +25,9 @@ from services.workspace_snapshot import (
     display_chat_time,
     display_updated_at,
 )
+from services.performance import time_operation
 from storage.repository import remove_workspace
 from ui.theme import (
-    ACCENT,
     chat_font_pt,
     contained_list_style,
     markdown_css,
@@ -104,7 +104,7 @@ class _DashboardListRow(QWidget):
     def apply_appearance(self):
         p = palette()
         fs = chat_font_pt()
-        meta = meta_font_pt()
+        meta_font_pt()
         title_color = p["TEXT_DIM"] if self._empty else p["TEXT"]
         self.setStyleSheet("background:transparent;")
         self.title.setStyleSheet(
@@ -495,15 +495,23 @@ class WorkspaceDashboard(QWidget):
             return
         if os.path.normcase(os.path.abspath(snapshot.root)) != os.path.normcase(os.path.abspath(self._current_workspace)):
             return
-        self._snapshot_applied = True
-        self._path.setText(snapshot.root)
-        self._current_name.setText(snapshot.name)
-        self._current_full_path.setText(snapshot.root)
-        self._apply_status(snapshot)
-        self._apply_readme(snapshot)
-        self._apply_agents(snapshot)
-        self._apply_chats(snapshot)
-        self._apply_recent_workspaces(snapshot)
+        with time_operation(
+            "workspace.apply",
+            detail=(
+                f"chats={len(snapshot.recent_chats)} "
+                f"workspaces={len(snapshot.recent_workspaces)}"
+            ),
+            slow_ms=50,
+        ):
+            self._snapshot_applied = True
+            self._path.setText(snapshot.root)
+            self._current_name.setText(snapshot.name)
+            self._current_full_path.setText(snapshot.root)
+            self._apply_status(snapshot)
+            self._apply_readme(snapshot)
+            self._apply_agents(snapshot)
+            self._apply_chats(snapshot)
+            self._apply_recent_workspaces(snapshot)
 
     def _release_refresh_thread(self, thread: _WorkspaceRefreshThread):
         if thread in self._refresh_threads:
