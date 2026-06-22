@@ -40,5 +40,6 @@ settings.local.json
 .aichs/settings.json
 .aichs/conversations/
 .aichs/avatars/
+.aichs/canvas/
 .aichs/extensions/
 .aichs/state/

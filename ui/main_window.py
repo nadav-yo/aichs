@@ -15,6 +15,7 @@ from PyQt6.QtCore import Qt, QByteArray, QSize, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap, QShortcut, QKeySequence
 
 from storage.repository import ConversationStore
+from storage.agent_canvas import CanvasSaveRefused, load_agent_canvas, save_agent_canvas
 from storage.settings import SettingsStore, resume_session
 from storage.workspace_session import (
     load_workspace_session,
@@ -30,6 +31,7 @@ from ui.theme import apply_app_theme, current_theme, palette, toggle_tab_button_
 from ui.widgets.left_panel import LeftPanel
 from ui.widgets.chat_panel import ChatPanel
 from ui.widgets.file_viewer import FileViewerPanel
+from ui.widgets.agent_canvas import AgentCanvasPanel
 from ui.widgets.workbench_context import WorkbenchContextPanel
 from ui.widgets.workspace_dashboard import WorkspaceDashboard
 import config
@@ -75,7 +77,7 @@ class _InitialGitStatusThread(QThread):
         self._repo = repo
 
     def run(self):
-        self.loaded.emit(self._repo, build_git_snapshot(self._repo))
+        self.loaded.emit(self._repo, build_git_snapshot(self._repo, untracked_mode="normal"))
 
 
 class _ExtensionReviewThread(QThread):
@@ -141,6 +143,15 @@ class MainWindow(QMainWindow):
         self._session_save_timer.setSingleShot(True)
         self._session_save_timer.setInterval(500)
         self._session_save_timer.timeout.connect(self._save_workspace_session)
+        self._canvas_save_timer = QTimer(self)
+        self._canvas_save_timer.setSingleShot(True)
+        self._canvas_save_timer.setInterval(500)
+        self._canvas_save_timer.timeout.connect(self._save_agent_canvas)
+        self._canvas_conversation_refresh_timer = QTimer(self)
+        self._canvas_conversation_refresh_timer.setSingleShot(True)
+        self._canvas_conversation_refresh_timer.setInterval(600)
+        self._canvas_conversation_refresh_timer.timeout.connect(self._flush_canvas_conversation_refresh)
+        self._pending_canvas_conversation_refreshes: set[str] = set()
 
         os.chdir(
             _startup_workspace(
@@ -151,6 +162,8 @@ class MainWindow(QMainWindow):
         )
 
         repo  = os.getcwd()
+        self._canvas_workspace = repo
+        self._agent_canvas_restore_pending_workspace: str | None = repo
         store = ConversationStore(repo)
 
         self._left = LeftPanel(
@@ -250,6 +263,19 @@ class MainWindow(QMainWindow):
         self._workbench_preview_layout.setContentsMargins(0, 0, 0, 0)
         self._workbench_preview_layout.setSpacing(0)
         self._workbench_left.addWidget(self._workbench_preview_host)
+        self._agent_canvas = AgentCanvasPanel(repo, settings=self._settings)
+        self._agent_canvas.set_lazy_restore_callback(self._ensure_agent_canvas_restored)
+        self._agent_canvas.open_file_requested.connect(self._open_file_from_canvas)
+        self._agent_canvas.open_conversation_requested.connect(self._open_canvas_conversation)
+        self._agent_canvas.conversation_created.connect(lambda _conv_id: self._left.refresh())
+        self._agent_canvas.conversation_updated.connect(self._on_canvas_conversation_updated)
+        self._agent_canvas.conversation_chunk.connect(self._on_canvas_conversation_chunk)
+        self._agent_canvas.conversation_tool_called.connect(self._on_canvas_conversation_tool_called)
+        self._agent_canvas.conversation_tool_result.connect(self._on_canvas_conversation_tool_result)
+        self._agent_canvas.conversation_run_finished.connect(self._on_canvas_conversation_run_finished)
+        self._agent_canvas.graph_changed.connect(self._schedule_canvas_save)
+        self._agent_canvas.attention_changed.connect(self._set_canvas_attention)
+        self._workbench_left.addWidget(self._agent_canvas)
 
         self._workbench = QSplitter(Qt.Orientation.Horizontal)
         self._workbench.addWidget(self._workbench_left)
@@ -292,6 +318,7 @@ class MainWindow(QMainWindow):
         self._left.text_search_requested.connect(self._open_text_search)
         self._left.extensions_requested.connect(self._chat.show_extensions)
         self._left.workspace_requested.connect(self._show_workspace_dashboard)
+        self._left.canvas_requested.connect(self._show_agent_canvas)
         self._left.activity_selected.connect(self._on_activity_selected)
         self._left.activity_panel_collapsed_changed.connect(self._on_activity_panel_collapsed)
         self._chat.saved.connect(self._left.refresh)
@@ -415,6 +442,14 @@ class MainWindow(QMainWindow):
     def _show_workbench(self):
         self._restore_context_after_workspace()
         self._center_stack.setCurrentWidget(self._workbench)
+        if self._left.active_activity() == "canvas":
+            self._ensure_agent_canvas_restored()
+            self._workbench_left.setCurrentWidget(self._agent_canvas)
+            self._hide_context_for_workspace()
+            self._sync_chat_width_mode()
+            self._apply_pending_workspace_session()
+            return
+        self._sync_workbench_markdown_preview_pane()
         self._sync_chat_width_mode()
         self._apply_pending_workspace_session()
 
@@ -423,7 +458,24 @@ class MainWindow(QMainWindow):
         self._center_stack.setCurrentWidget(self._workspace_dashboard)
         self._hide_context_for_workspace()
 
+    def _show_agent_canvas(self):
+        self._ensure_agent_canvas_restored()
+        self._center_stack.setCurrentWidget(self._workbench)
+        self._workbench_left.setCurrentWidget(self._agent_canvas)
+        self._hide_context_for_workspace()
+        self._sync_chat_width_mode()
+
+    def _set_canvas_attention(self, active: bool):
+        self._left.set_activity_attention("canvas", bool(active))
+
+    def _sync_selected_activity_view(self):
+        if self._left.active_activity() == "canvas":
+            self._show_agent_canvas()
+
     def _on_activity_selected(self, key: str):
+        if key == "canvas":
+            self._show_agent_canvas()
+            return
         if key == "chats":
             self._sync_workbench_markdown_preview_pane(force_chat=True)
         if key != "workspace":
@@ -452,6 +504,76 @@ class MainWindow(QMainWindow):
     def _load_conversation(self, path: str):
         self._show_workbench()
         self._chat.load_conversation(path)
+
+    def _open_canvas_conversation(self, conv_id: str):
+        conv_id = str(conv_id or "").strip()
+        if not conv_id:
+            return
+        try:
+            path = str(self._chat.store.path_for_id(conv_id))
+        except FileNotFoundError:
+            QMessageBox.warning(
+                self,
+                "Canvas chat missing",
+                "The linked canvas chat is no longer available.",
+            )
+            return
+        self._show_workbench()
+        self._left.set_active_activity("chats")
+        self._left.refresh()
+        self._left.select_conversation(conv_id)
+        self._chat.load_conversation(path)
+
+    def _on_canvas_conversation_updated(self, conv_id: str):
+        conv_id = str(conv_id or "").strip()
+        if not conv_id:
+            return
+        self._pending_canvas_conversation_refreshes.add(conv_id)
+        if not self._canvas_conversation_refresh_timer.isActive():
+            self._canvas_conversation_refresh_timer.start()
+
+    def _on_canvas_conversation_chunk(self, conv_id: str, text: str):
+        conv_id = str(conv_id or "").strip()
+        if not conv_id:
+            return
+        self._chat.append_external_conversation_chunk(conv_id, str(text or ""))
+
+    def _on_canvas_conversation_tool_called(self, conv_id: str, name: str, inputs: dict):
+        conv_id = str(conv_id or "").strip()
+        if not conv_id:
+            return
+        self._chat.show_external_conversation_tool_called(conv_id, str(name or "tool"), dict(inputs or {}))
+
+    def _on_canvas_conversation_tool_result(self, conv_id: str, name: str, output: str):
+        conv_id = str(conv_id or "").strip()
+        if not conv_id:
+            return
+        self._chat.show_external_conversation_tool_result(conv_id, str(name or "tool"), str(output or ""))
+
+    def _on_canvas_conversation_run_finished(self, conv_id: str):
+        conv_id = str(conv_id or "").strip()
+        if not conv_id:
+            return
+        self._chat.finish_external_conversation_stream(conv_id)
+        self._pending_canvas_conversation_refreshes.add(conv_id)
+        self._canvas_conversation_refresh_timer.start(0)
+
+    def _flush_canvas_conversation_refresh(self):
+        pending = set(self._pending_canvas_conversation_refreshes)
+        self._pending_canvas_conversation_refreshes.clear()
+        if not pending:
+            return
+        self._left.refresh()
+        active_conv_id = self._chat.current_conversation_id()
+        if active_conv_id not in pending:
+            return
+        if self._chat.is_external_conversation_streaming(active_conv_id):
+            return
+        try:
+            path = str(self._chat.store.path_for_id(active_conv_id))
+        except FileNotFoundError:
+            return
+        self._chat.load_conversation(path, force=True)
 
     def _close_viewer_tab(self):
         if self._viewer.isVisible():
@@ -492,7 +614,10 @@ class MainWindow(QMainWindow):
             self._workbench.setSizes([620, 500])
 
         active_activity = str(saved.get("active_activity") or "chats")
-        self._left.set_active_activity(active_activity)
+        if active_activity == "canvas":
+            self._left.show_canvas_activity()
+        else:
+            self._left.set_active_activity(active_activity)
         if bool(saved.get("activity_collapsed", False)):
             self._left.collapse_activity_panel()
         if bool(saved.get("context_collapsed", True)):
@@ -513,11 +638,13 @@ class MainWindow(QMainWindow):
                 right = 30 if self._is_context_collapsed() else min(300, max(240, total // 5))
                 left = min(DEFAULT_ACTIVITY_WIDTH, max(MIN_ACTIVITY_WIDTH, total - right - 1))
                 self._root_splitter.setSizes([left, max(1, total - left - right), right])
+        self._sync_selected_activity_view()
 
     def closeEvent(self, event):
         self._extension_review_generation += 1
         self._restore_context_after_workspace()
         self._save_workspace_session()
+        self._save_agent_canvas()
         context_collapsed = self._is_context_collapsed()
         activity_collapsed = self._left.is_activity_panel_collapsed()
         self._settings.update({
@@ -538,6 +665,7 @@ class MainWindow(QMainWindow):
         self._viewer.shutdown()
         self._context.shutdown()
         self._workspace_dashboard.shutdown()
+        self._agent_canvas.close()
         self._chat.shutdown()
         for thread in list(self._extension_review_threads):
             thread.wait(3000)
@@ -554,6 +682,7 @@ class MainWindow(QMainWindow):
         self._viewer.apply_appearance()
         self._context.apply_appearance()
         self._workspace_dashboard.apply_appearance()
+        self._agent_canvas.apply_appearance()
         tab_style = toggle_tab_button_style()
         self._context_tab.setStyleSheet(tab_style)
         self._language_context_tab.setStyleSheet(tab_style)
@@ -579,6 +708,11 @@ class MainWindow(QMainWindow):
         self._sync_chat_width_mode()
         self._apply_default_workbench_split()
         self._schedule_session_save()
+
+    def _open_file_from_canvas(self, path: str):
+        self._left.show_canvas_activity()
+        self._open_file(path, activate_files=False)
+        self._workbench_left.setCurrentWidget(self._agent_canvas)
 
     def _apply_default_workbench_split(self):
         total = max(1, self._workbench.width())
@@ -653,8 +787,13 @@ class MainWindow(QMainWindow):
 
     def _close_file(self):
         self._viewer.hide()
-        self._sync_workbench_markdown_preview_pane(force_chat=True)
         self._workbench_preview_pinned_chat = False
+        if self._left.active_activity() == "canvas":
+            self._restore_preview_to_host_tab()
+            self._workbench_left.setCurrentWidget(self._agent_canvas)
+            self._hide_context_for_workspace()
+        else:
+            self._sync_workbench_markdown_preview_pane(force_chat=True)
         self._sync_chat_width_mode()
         self._schedule_session_save()
 
@@ -668,6 +807,70 @@ class MainWindow(QMainWindow):
 
     def _schedule_session_save(self):
         self._session_save_timer.start()
+
+    def _schedule_canvas_save(self):
+        if self._agent_canvas_restore_pending_workspace is not None:
+            self._agent_canvas_restore_pending_workspace = None
+        self._canvas_save_timer.start()
+
+    def _restore_agent_canvas(self, workspace: str):
+        state, warning = load_agent_canvas(workspace)
+        if warning:
+            self._agent_canvas.reset_graph()
+            QMessageBox.warning(
+                self,
+                "Canvas reset",
+                f"{warning}\n\nThe saved graph was reset for this workspace.",
+            )
+            self._schedule_canvas_save()
+            return
+        if state is None:
+            self._agent_canvas.reset_graph()
+            return
+        warning = self._agent_canvas.restore_graph_state(state)
+        if warning:
+            QMessageBox.warning(
+                self,
+                "Canvas reset",
+                f"{warning}\n\nThe saved graph no longer matches this version, so it was reset.",
+            )
+            self._schedule_canvas_save()
+
+    def _ensure_agent_canvas_restored(self):
+        workspace = self._agent_canvas_restore_pending_workspace
+        if workspace is None:
+            return
+        self._agent_canvas_restore_pending_workspace = None
+        self._restore_agent_canvas(workspace)
+
+    def _save_agent_canvas(self):
+        self._canvas_save_timer.stop()
+        if self._agent_canvas_restore_pending_workspace is not None:
+            return
+        flush_edits = getattr(self._agent_canvas, "_flush_inspector_auto_apply", None)
+        if callable(flush_edits):
+            flush_edits()
+        if self._agent_canvas_busy_for_save():
+            self._canvas_save_timer.start(2000)
+            return
+        try:
+            save_agent_canvas(self._canvas_workspace, self._agent_canvas.graph_state())
+        except CanvasSaveRefused as exc:
+            setter = getattr(self._agent_canvas, "_set_mode", None)
+            if callable(setter):
+                setter(str(exc))
+        except OSError:
+            pass
+
+    def _agent_canvas_busy_for_save(self) -> bool:
+        canvas = getattr(self, "_agent_canvas", None)
+        if canvas is None:
+            return False
+        for name in ("_is_graph_agent_running", "_is_run_agent_running"):
+            checker = getattr(canvas, name, None)
+            if callable(checker) and checker():
+                return True
+        return False
 
     def _collect_workspace_session(self) -> dict:
         workbench_sizes = self._workbench.sizes()
@@ -796,6 +999,7 @@ class MainWindow(QMainWindow):
             self._collapse_context()
         else:
             self._expand_context()
+        self._sync_selected_activity_view()
 
     def _switch_workspace(self, path: str) -> bool:
         target = os.path.abspath(os.path.expanduser(str(path or "").strip()))
@@ -815,6 +1019,7 @@ class MainWindow(QMainWindow):
             self._chat.stop_streaming()
         get_process_manager().stop_workspace(os.getcwd())
         self._save_workspace_session()
+        self._save_agent_canvas()
 
         store = ConversationStore(target)
         self._viewer.close_all_tabs()
@@ -825,6 +1030,9 @@ class MainWindow(QMainWindow):
         self._chat.set_workspace(store, cwd=target)
         self._left.set_workspace(target, store=store)
         self._viewer.set_repo_root(target)
+        self._agent_canvas.set_repo_root(target)
+        self._canvas_workspace = target
+        self._agent_canvas_restore_pending_workspace = target
         self._workspace_dashboard.set_current_workspace(target)
         self._initial_git_changes = None
         self._initial_git_snapshot = None

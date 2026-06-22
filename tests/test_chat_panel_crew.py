@@ -21,7 +21,7 @@ def test_chat_panel_crew_helpers():
     ) is None
     enabled = _enabled_crew({"crew": {"scout": {"enabled": False}}})
     assert "scout" not in {member.id for member in enabled}
-    assert {member.id for member in enabled} == {"archivist"}
+    assert {member.id for member in enabled} == {"archivist", "architect"}
 
 
 def test_crew_for_history_message():

@@ -20,6 +20,11 @@ _CREW_TONES = {
         "modern": ("#292514", "#8b762b", "#fde047"),
         "light": ("#fff9db", "#fde68a", "#a16207"),
     },
+    "architect": {
+        "dark": ("#1f2433", "#5f6f9a", "#a5b4fc"),
+        "modern": ("#1d2634", "#536878", "#93c5fd"),
+        "light": ("#eef2ff", "#c7d2fe", "#4f46e5"),
+    },
 }
 
 _PALETTES = {
@@ -890,15 +895,18 @@ def rail_button_style(
     *,
     font_size: int,
     active: bool = False,
+    attention: bool = False,
     theme: str | None = None,
 ) -> str:
     """Activity rail navigation (Files, Git, …)."""
     p = palette(theme)
     bg = p["SELECTION"] if active else "transparent"
     fg = p["SELECTION_TEXT"] if active else p["TEXT_DIM"]
+    marker = "#f59e0b" if attention else "transparent"
     return (
         f"QPushButton {{ background-color:{bg}; color:{fg}; border:0px;"
-        "border-radius:7px; padding:7px 2px;"
+        f"border-left:3px solid {marker};"
+        "border-radius:7px; padding:7px 2px 7px 0px;"
         f"font-size:{font_size}px; font-weight:600; }}"
         f"QPushButton:hover {{ background-color:{p['BG3']}; color:{p['TEXT']}; }}"
     )
@@ -1719,6 +1727,196 @@ def tone_badge_button_style(
         "border-radius:8px; padding-left:8px; padding-right:8px;"
         f"font-size:{meta_font_pt()}px; }}"
         f"QPushButton:hover {{ color:{p['TEXT']}; border-color:{p['TEXT_DIM']}; }}"
+    )
+
+
+def canvas_pill_style(
+    tone: str = "",
+    *,
+    selector: str = "QFrame#canvasPill",
+    text_selector: str = "QLabel#canvasPillText",
+    theme: str | None = None,
+) -> str:
+    p = palette(theme)
+    colors = {
+        "ready": (p["SUCCESS_BG"], p["SUCCESS"], p["SUCCESS_BORDER"]),
+        "blocked": ("#35191d", "#f87171", "#5f252d"),
+        "verify": ("#32260f", "#fbbf24", "#5a4319"),
+        "accent": ("#172341", ACCENT, "#2d477c"),
+    }
+    bg, fg, border = colors.get(tone, (p["BG3"], p["TEXT_DIM"], p["BORDER"]))
+    return (
+        f"{selector} {{ background:{bg}; border:1px solid {border};"
+        " border-radius:6px; }"
+        f"{text_selector} {{ color:{fg}; font-size:{meta_font_pt()}px;"
+        " font-weight:600; background:transparent; }"
+    )
+
+
+def canvas_source_token_style(
+    kind: str = "",
+    *,
+    selector: str = "QFrame#canvasSourceToken",
+    theme: str | None = None,
+) -> str:
+    p = palette(theme)
+    accent_by_kind = {
+        "operation": "#67e8f9",
+        "context": "#fbbf24",
+        "scope": "#9cc9ff",
+        "decision": "#f472b6",
+        "evidence": "#c4b5fd",
+    }
+    accent = accent_by_kind.get(kind, ACCENT)
+    return (
+        f"{selector} {{ background:{p['BG2']};"
+        f" border:1px solid {p['BORDER_SUBTLE']}; border-left:3px solid {accent};"
+        " border-radius:7px; }"
+        f"{selector}:hover {{ background:{p['BG3']}; border-color:{p['BORDER']}; }}"
+        f"QLabel#canvasTokenTitle {{ color:{p['TEXT']}; font-size:{chat_font_pt()}px;"
+        " font-weight:650; background:transparent; }"
+        f"QLabel#canvasTokenDetail {{ color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;"
+        " background:transparent; }"
+    )
+
+
+def agent_canvas_style(theme: str | None = None) -> str:
+    p = palette(theme)
+    return (
+        f"QWidget#agentCanvas {{ background:{p['BG']}; color:{p['TEXT']}; }}"
+        f"QFrame#canvasHeader {{ background:{p['BG']};"
+        f" border-bottom:1px solid {p['BORDER_SUBTLE']}; }}"
+        f"QLabel#canvasTitle {{ color:{p['TEXT']}; font-size:{chat_font_pt() + 2}px;"
+        " font-weight:700; background:transparent; }"
+        f"QLabel#canvasGoal {{ color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;"
+        " background:transparent; }"
+        "QLabel#canvasCycleWarning { color:#fbbf24; font-size:12px;"
+        " font-weight:650; background:transparent; }"
+        f"QScrollArea#canvasScroll, QWidget#canvasBody {{ background:{p['BG']};"
+        " border:none; }"
+        f"QFrame#canvasSourcePanel, QFrame#canvasInspector {{ background:{p['BG2']};"
+        f" border:0; border-right:1px solid {p['BORDER_SUBTLE']}; }}"
+        f"QFrame#canvasInspector {{ border-left:1px solid {p['BORDER_SUBTLE']};"
+        " border-right:0; }"
+        f"QFrame#canvasGraphChat {{ background:{p['BG2']};"
+        f" border-top:1px solid {p['BORDER_SUBTLE']}; }}"
+        f"QLabel#canvasGraphChatTitle {{ color:{p['TEXT']}; font-size:{chat_font_pt()}px;"
+        " font-weight:650; background:transparent; }"
+        f"QLabel#canvasGraphChatMeta {{ color:{p['TEXT_DIM']};"
+        f" font-size:{meta_font_pt()}px; background:transparent; }}"
+        f"QTextEdit#canvasGraphChatTranscript {{ background:{p['BG']}; color:{p['TEXT']};"
+        f" border:1px solid {p['BORDER_SUBTLE']}; border-radius:6px;"
+        " padding:8px 10px; selection-background-color:#3a6fd4; }"
+        f"QPushButton#canvasGraphChatBottom {{ background:{p['BG2']}; color:{p['TEXT']};"
+        f" border:1px solid {p['BORDER']}; border-radius:15px;"
+        " font-weight:700; padding:0; }"
+        f"QPushButton#canvasGraphChatBottom:hover {{ border:1px solid {ACCENT};"
+        f" background:{p['BG3']}; }}"
+        f"QLineEdit#canvasGraphChatInput {{ background:{p['BG']}; color:{p['TEXT']};"
+        f" border:1px solid {p['BORDER']}; border-radius:6px;"
+        " padding:8px 10px; selection-background-color:#3a6fd4; }"
+        f"QLineEdit#canvasGraphChatInput:focus {{ border:1px solid {ACCENT}; }}"
+        f"QLabel#canvasPanelTitle {{ color:{p['TEXT']}; font-size:{chat_font_pt()}px;"
+        " font-weight:650; background:transparent; }"
+        f"QLabel#canvasPanelMeta {{ color:{p['TEXT_DIM']};"
+        f" font-size:{meta_font_pt()}px; background:transparent; }}"
+        f"QFrame#canvasInspectorMetaRow, QFrame#canvasInspectorSelectedRow {{"
+        " background:transparent; border:0; }"
+        f"QLabel#canvasInspectorMetaLabel {{ color:{p['TEXT_DIM']};"
+        f" font-size:{max(9, meta_font_pt() - 1)}px; font-weight:700;"
+        " background:transparent; min-width:64px; }"
+        f"QLabel#canvasInspectorMetaValue {{ color:{p['TEXT']};"
+        f" font-size:{meta_font_pt()}px; background:transparent; }}"
+        f"QLabel#canvasInspectorSelectedValue {{ color:{p['TEXT']};"
+        f" font-size:{chat_font_pt()}px; font-weight:650; background:transparent; }}"
+        f"QLabel#canvasInspectorFieldLabel {{ color:{p['TEXT']};"
+        f" font-size:{meta_font_pt()}px; font-weight:650; background:transparent; }}"
+        f"QLineEdit#canvasInspectorField, QTextEdit#canvasInspectorText,"
+        f" QComboBox#canvasInspectorCombo {{ background:{p['BG']}; color:{p['TEXT']};"
+        f" border:1px solid {p['BORDER']}; border-radius:6px;"
+        " padding:7px 8px; selection-background-color:#3a6fd4; }"
+        f"QTextEdit#canvasInspectorText {{ min-height:112px; }}"
+        f"QComboBox#canvasInspectorCombo::drop-down {{ border:0; width:22px; }}"
+    )
+
+
+def agent_canvas_edit_dialog_style(theme: str | None = None) -> str:
+    p = palette(theme)
+    return (
+        f"QDialog#canvasEditDialog {{ background:{p['BG']}; color:{p['TEXT']}; }} "
+        f"QLabel#canvasEditTitle {{ color:{p['TEXT']}; font-size:{chat_font_pt() + 5}px;"
+        " font-weight:750; background:transparent; } "
+        f"QLabel#canvasEditSummary {{ color:{p['TEXT_DIM']}; font-size:{meta_font_pt() + 1}px;"
+        " background:transparent; } "
+        f"QLabel#canvasEditFieldLabel {{ color:{p['TEXT']}; font-size:{meta_font_pt() + 1}px;"
+        " font-weight:650; background:transparent; } "
+        f"QLabel#canvasEditHint {{ color:{p['TEXT_DIM']}; font-size:{meta_font_pt()}px;"
+        " background:transparent; } "
+        + form_field_style(
+            selector=(
+                "QDialog#canvasEditDialog QLineEdit#canvasEditField, "
+                "QDialog#canvasEditDialog QTextEdit#canvasEditText"
+            ),
+            font_pt=chat_font_pt(),
+            padding="9px 11px",
+            border_radius=7,
+            theme=theme,
+        )
+        + combo_box_field_style(
+            selector="QDialog#canvasEditDialog QComboBox#canvasEditCombo",
+            font_pt=chat_font_pt(),
+            padding_v="9px",
+            padding_h="11px",
+            border_radius=7,
+            min_height=38,
+            theme=theme,
+        )
+        + (
+            f"QListWidget#canvasScopeList {{ background:{p['BG2']}; color:{p['TEXT']};"
+            f" border:1px solid {p['BORDER']}; border-radius:7px; padding:4px;"
+            f" font-size:{chat_font_pt()}px; outline:0; }} "
+            f"QListWidget#canvasScopeList::item {{ padding:7px 9px; border-radius:5px; }} "
+            f"QListWidget#canvasScopeList::item:hover {{ background:{p['BG3']}; }} "
+            f"QListWidget#canvasScopeList::item:selected {{ background:{p['SELECTION']};"
+            f" color:{p['SELECTION_TEXT']}; }} "
+        )
+        + dialog_button_box_style(
+            selector="QDialog#canvasEditDialog QDialogButtonBox",
+            min_button_width=96,
+            theme=theme,
+        )
+    )
+
+
+def graph_question_dialog_style(theme: str | None = None) -> str:
+    p = palette(theme)
+    return (
+        f"QDialog#graphQuestionDialog {{ background:{p['BG']}; color:{p['TEXT']}; }} "
+        f"QLabel#graphQuestionPrompt {{ color:{p['TEXT']}; font-size:13px;"
+        " line-height:1.35; margin-bottom:4px; background:transparent; } "
+        f"QRadioButton#graphQuestionChoice, QCheckBox#graphQuestionChoice {{"
+        f" background:{p['BG2']}; color:{p['TEXT']};"
+        f" border:1px solid {p['BORDER_SUBTLE']}; border-radius:6px;"
+        " padding:8px 10px; spacing:9px; } "
+        f"QRadioButton#graphQuestionChoice:hover, QCheckBox#graphQuestionChoice:hover {{"
+        f" background:{p['BG3']}; border-color:{p['BORDER']}; }} "
+        f"QRadioButton#graphQuestionChoice:checked, QCheckBox#graphQuestionChoice:checked {{"
+        " background:#102033; border-color:#315fbd; border-left-color: #67e8f9; color:#f8fbff; } "
+        "QRadioButton#graphQuestionChoice::indicator,"
+        " QCheckBox#graphQuestionChoice::indicator { width:14px; height:14px; }"
+        f"QRadioButton#graphQuestionChoice::indicator:unchecked,"
+        f" QCheckBox#graphQuestionChoice::indicator:unchecked {{"
+        f" border:1px solid {p['BORDER']}; background:{p['BG']}; border-radius:7px; }} "
+        f"QRadioButton#graphQuestionChoice::indicator:checked,"
+        f" QCheckBox#graphQuestionChoice::indicator:checked {{"
+        f" border:1px solid {ACCENT}; background:{ACCENT}; border-radius:7px; }} "
+        f"QTextEdit#graphQuestionOther {{ background:{p['BG']}; color:{p['TEXT']};"
+        f" border:1px solid {p['BORDER']}; border-radius:7px; padding:8px;"
+        " selection-background-color:#315fbd; } "
+        f"QTextEdit#graphQuestionOther:disabled {{ background:transparent;"
+        f" color:{p['TEXT_DIM']}; border-color:transparent; }} "
+        "QDialog#graphQuestionDialog QDialogButtonBox QPushButton {"
+        " min-width:62px; min-height:28px; border-radius:7px; padding:4px 10px; }"
     )
 
 

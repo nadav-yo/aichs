@@ -86,6 +86,67 @@ def test_prepare_for_providers():
     assert "created_at" not in openai[0]
 
 
+def test_prepare_openai_converts_orphan_tool_result_to_user_context():
+    messages = [
+        {"role": "user", "content": "continue"},
+        {"role": "tool", "tool_call_id": "call_1", "content": "tool output"},
+    ]
+
+    openai = prepare_for_openai(messages)
+
+    assert openai[1]["role"] == "user"
+    assert "Tool result from prior context" in openai[1]["content"]
+    assert "tool output" in openai[1]["content"]
+
+
+def test_prepare_openai_preserves_matched_tool_call_sequence():
+    messages = [
+        {"role": "user", "content": "list files"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "list_files", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "files"},
+    ]
+
+    openai = prepare_for_openai(messages)
+
+    assert openai[1]["role"] == "assistant"
+    assert openai[1]["tool_calls"][0]["id"] == "call_1"
+    assert openai[2] == {"role": "tool", "tool_call_id": "call_1", "content": "files"}
+
+
+def test_prepare_openai_degrades_incomplete_tool_call_sequence():
+    messages = [
+        {"role": "user", "content": "list files"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "list_files", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "user", "content": "continue"},
+    ]
+
+    openai = prepare_for_openai(messages)
+
+    assert "tool_calls" not in openai[1]
+    assert openai[1]["content"] == "[Tool call omitted from prior context]"
+    assert openai[2] == {"role": "user", "content": "continue"}
+
+
 def test_prepare_anthropic_preserves_tool_results_with_anchor_text():
     messages = [
         {

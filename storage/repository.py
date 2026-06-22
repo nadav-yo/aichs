@@ -3,8 +3,10 @@ import os
 import re
 import hashlib
 import tempfile
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import config
 from config import AICHS_HOME, CONV_DIR, WORKSPACES_PATH
@@ -18,6 +20,7 @@ _CONVERSATION_INDEX_NAME = "conversation_index.v1"
 _IMPORTED_AICHS_HOME = AICHS_HOME
 _IMPORTED_CONV_DIR = CONV_DIR
 _IMPORTED_WORKSPACES_PATH = WORKSPACES_PATH
+_ATOMIC_REPLACE_RETRY_DELAYS = (0.025, 0.05, 0.1, 0.2, 0.4)
 
 
 class ConversationStore:
@@ -190,7 +193,7 @@ class ConversationStore:
 
     @staticmethod
     def new_id() -> str:
-        return datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{uuid4().hex[:8]}"
 
     @staticmethod
     def make_title(first_message: str) -> str:
@@ -493,10 +496,21 @@ def _write_json_atomic(path: Path, data: dict) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(payload)
-        os.replace(tmp_path, path)
+        _replace_with_retries(tmp_path, path)
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def _replace_with_retries(source: Path, target: Path) -> None:
+    for delay in (*_ATOMIC_REPLACE_RETRY_DELAYS, None):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if delay is None:
+                raise
+            time.sleep(delay)
 
 
 def _index_row(path: Path, summary: dict, stat_result: os.stat_result) -> dict:

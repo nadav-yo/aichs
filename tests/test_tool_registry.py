@@ -1,4 +1,5 @@
 import json
+import shutil
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -14,6 +15,8 @@ from services.tool_registry import (
     RuntimeCommandApi,
     ToolContext,
     ToolRegistry,
+    extension_canvas_context_snippets,
+    extension_canvas_tools,
     extension_context_snippets,
     disable_unreviewed_extensions,
     clear_extension_cache,
@@ -47,6 +50,69 @@ def test_load_extension_tool_and_context(workspace_with_tool):
     snippets, errors = extension_context_snippets(cwd)
     assert errors == []
     assert ("Ping note", "from extension") in snippets
+
+
+def test_canvas_extension_tool_and_context_are_explicit(workspace):
+    write_extension(
+        workspace,
+        "canvas_demo.py",
+        """
+        def register(registry):
+            registry.canvas_context("Canvas note", canvas_note)
+            registry.canvas_tool(
+                name="canvas_note",
+                description="Return a canvas-only note.",
+                input_schema={"type": "object", "properties": {}},
+                execute=canvas_note_tool,
+                parallel_safe=True,
+            )
+
+        def canvas_note(ctx):
+            graph = ctx.canvas.get("graph", {})
+            return f"surface={ctx.canvas.get('surface')} nodes={len(graph.get('nodes', []))}"
+
+        def canvas_note_tool(ctx, inputs):
+            return f"canvas tool from {ctx.extension_id}"
+        """,
+    )
+
+    snippets, errors = extension_canvas_context_snippets(
+        str(workspace),
+        canvas={"surface": "canvas", "graph": {"nodes": [{}, {}]}},
+    )
+    tools, tool_errors = extension_canvas_tools(str(workspace))
+
+    assert errors == []
+    assert tool_errors == []
+    assert snippets == [("Canvas note", "surface=canvas nodes=2")]
+    assert [tool.name for tool in tools] == ["canvas_note"]
+    assert tools[0].surfaces == ("canvas",)
+
+
+def test_canvas_examples_load(workspace):
+    source_root = Path(__file__).resolve().parents[1] / ".aichs" / "extensions"
+    target_root = workspace / ".aichs" / "extensions"
+    target_root.mkdir(parents=True, exist_ok=True)
+    for name in ("canvas_briefing", "canvas_notes"):
+        shutil.copytree(source_root / name, target_root / name)
+
+    snippets, errors = extension_canvas_context_snippets(
+        str(workspace),
+        canvas={
+            "kind": "operation",
+            "graph": {"nodes": [{}]},
+            "active_node_id": 3,
+            "node": {"id": 3, "kind": "operation", "title": "Build flow"},
+        },
+    )
+    tools, tool_errors = extension_canvas_tools(str(workspace))
+
+    assert errors == []
+    assert tool_errors == []
+    assert snippets[0][0] == "Canvas briefing"
+    assert "Canvas mode: operation" in snippets[0][1]
+    assert "Current run node: #3 operation 'Build flow'" in snippets[0][1]
+    assert [tool.name for tool in tools] == ["canvas_project_note", "remember_canvas_note"]
 
 
 def test_tool_context_cancel_check():

@@ -210,26 +210,73 @@ def prepare_for_anthropic(messages: list[dict]) -> list[dict]:
 
 def prepare_for_openai(messages: list[dict]) -> list[dict]:
     out = []
-    for msg in _model_context_messages(messages):
+    context_messages = _model_context_messages(messages)
+    index = 0
+    while index < len(context_messages):
+        msg = context_messages[index]
         role = msg["role"]
         content = _content_for_model(msg)
         if role == "user" and isinstance(content, list) and _is_multimodal(content):
             out.append({"role": "user", "content": _to_openai_blocks(content)})
         elif role == "tool":
-            out.append({
-                "role": "tool",
-                "tool_call_id": msg.get("tool_call_id", ""),
-                "content": content,
-            })
+            out.append(_orphan_openai_tool_result(content))
         elif role == "assistant" and msg.get("tool_calls"):
+            raw_tool_calls = msg.get("tool_calls", [])
+            tool_calls = raw_tool_calls if isinstance(raw_tool_calls, list) else []
+            tool_messages, next_index = _matched_openai_tool_results(context_messages, index, tool_calls)
+            if tool_messages:
+                out.append({
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls,
+                })
+                out.extend(tool_messages)
+                index = next_index
+                continue
             out.append({
                 "role": "assistant",
-                "content": content,
-                "tool_calls": msg.get("tool_calls", []),
+                "content": content_preview(content).strip() or "[Tool call omitted from prior context]",
             })
         else:
             out.append({"role": role, "content": content})
+        index += 1
     return out
+
+
+def _orphan_openai_tool_result(content) -> dict:
+    return {
+        "role": "user",
+        "content": f"[Tool result from prior context]\n{content_preview(content)}",
+    }
+
+
+def _matched_openai_tool_results(messages: list[dict], assistant_index: int, tool_calls: list) -> tuple[list[dict], int]:
+    expected = [
+        str(call.get("id") or "")
+        for call in tool_calls
+        if isinstance(call, dict) and call.get("id")
+    ]
+    if not expected:
+        return [], assistant_index + 1
+    expected_set = set(expected)
+    seen: set[str] = set()
+    tool_messages: list[dict] = []
+    index = assistant_index + 1
+    while index < len(messages) and messages[index].get("role") == "tool":
+        msg = messages[index]
+        tool_call_id = str(msg.get("tool_call_id") or "")
+        if tool_call_id not in expected_set or tool_call_id in seen:
+            return [], assistant_index + 1
+        tool_messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": _content_for_model(msg),
+        })
+        seen.add(tool_call_id)
+        index += 1
+    if seen != expected_set:
+        return [], assistant_index + 1
+    return tool_messages, index
 
 
 def _content_for_model(msg: dict):

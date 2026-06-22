@@ -61,6 +61,22 @@ CREW: tuple[CrewMember, ...] = (
             "asks whether something was discussed before. Do not edit files."
         ),
     ),
+    CrewMember(
+        id="architect",
+        name="Architect",
+        title="System Design",
+        description="Turns goals, constraints, and repo shape into a coherent implementation plan.",
+        tools=("list_files", "read_file", "search_files"),
+        called_when=(
+            "The user explicitly mentions @Architect.",
+            "A feature needs decomposition, ownership, architecture, or design tradeoffs.",
+        ),
+        prompt=(
+            "You are Architect, the crew system designer. Stay concrete and repo-aware. "
+            "Map goals into components, constraints, sequencing, and risks. Prefer small "
+            "testable steps, call out weak assumptions, and do not edit files."
+        ),
+    ),
 )
 
 _BY_ID = {member.id: member for member in CREW}
@@ -135,8 +151,9 @@ def summoned_members(text: str) -> list[CrewMember]:
 
 
 def crew_roster_prompt() -> str:
+    names = " and ".join(f"@{member.name}" for member in CREW)
     lines = [
-        "Optional Crew: @Scout and @Archivist.",
+        f"Optional Crew: {names}.",
         "Use ask_crew only for a focused second opinion; the lead owns the final answer.",
         "Crew members do not talk to each other. Usually call 0-2 members.",
         "",

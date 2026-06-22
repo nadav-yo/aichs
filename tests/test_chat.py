@@ -2,9 +2,16 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 
-from services.chat import ChatThread, _active_task_preview, _content_with_file_blocks, _serialize_anthropic
+from services.chat import (
+    ChatThread,
+    _active_task_preview,
+    _content_with_file_blocks,
+    _estimate_model_request_tokens,
+    _serialize_anthropic,
+)
 from services.crew import ASK_CREW_TOOL_NAME, get_crew_member
 from services.tool_policy import ConversationToolPolicy, ToolApprovalBus
+from tests.conftest import write_extension
 
 
 def test_serialize_anthropic_blocks():
@@ -54,6 +61,75 @@ def test_chat_thread_filters_tools(workspace, qapp):
     )
     names = {t["name"] for t in thread._tools_anthropic()}
     assert names == {"read_file"}
+
+
+def test_chat_thread_exposes_allowed_extra_tools(workspace, qapp):
+    thread = ChatThread(
+        "claude-sonnet-4-6",
+        [],
+        "system",
+        str(workspace),
+        allowed_tools=["read_graph"],
+        extra_tools=[
+            {
+                "name": "read_graph",
+                "description": "Read graph",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ],
+        extra_tool_executor=lambda name, inputs, cancel: {"name": name, "inputs": inputs},
+    )
+
+    assert {tool["name"] for tool in thread._tools_anthropic()} == {"read_graph"}
+    assert {
+        tool["function"]["name"] for tool in thread._tools_openai()
+    } == {"read_graph"}
+    calls = []
+    thread.tool_called.connect(lambda name, inputs: calls.append((name, inputs)))
+    _tool_id, name, output = thread._execute_one("tool-1", "read_graph", {"x": 1})
+    assert name == "read_graph"
+    assert '"name": "read_graph"' in output
+    assert calls == [("read_graph", {"x": 1})]
+
+
+def test_chat_thread_filters_extension_tools_by_surface(workspace, qapp):
+    write_extension(
+        workspace,
+        "surface_tools.py",
+        """
+        def register(registry):
+            registry.tool(
+                name="chat_ping",
+                description="Chat-only ping.",
+                input_schema={"type": "object", "properties": {}},
+                execute=lambda ctx, inputs: "chat",
+            )
+            registry.canvas_tool(
+                name="canvas_ping",
+                description="Canvas-only ping.",
+                input_schema={"type": "object", "properties": {}},
+                execute=lambda ctx, inputs: "canvas",
+            )
+        """,
+    )
+    chat_thread = ChatThread(
+        "claude-sonnet-4-6",
+        [],
+        "system",
+        str(workspace),
+        allowed_tools=["chat_ping", "canvas_ping"],
+    )
+    canvas_thread = ChatThread(
+        "claude-sonnet-4-6",
+        [],
+        "system",
+        str(workspace),
+        allowed_tools=["chat_ping", "canvas_ping"],
+        tool_surface="canvas",
+    )
+
+    assert {tool["name"] for tool in chat_thread._tools_anthropic()} == {"chat_ping"}
+    assert {tool["name"] for tool in canvas_thread._tools_anthropic()} == {"canvas_ping"}
 
 
 def test_chat_thread_exposes_ask_crew_tool_by_default(workspace, qapp):
@@ -112,6 +188,28 @@ def test_chat_thread_resolves_lazy_system_once(workspace, qapp):
     assert thread._resolve_system() == "lazy system"
     assert thread._resolve_system() == "lazy system"
     assert calls == ["build"]
+
+
+def test_chat_thread_preflight_compacts_single_oversized_message(workspace, qapp, monkeypatch):
+    monkeypatch.setattr("services.chat.context_window_tokens", lambda _model: 4096)
+    thread = ChatThread(
+        "qwen-local",
+        [{"role": "user", "content": "A" * 60_000 + "\nKEEP_TAIL"}],
+        "sys",
+        str(workspace),
+        enable_crew_tool=False,
+    )
+    events = []
+    thread.runtime_event.connect(events.append)
+
+    thread._ensure_context_budget("openai-compatible", [])
+
+    content = thread.history[0]["content"]
+    assert "Context compacted" in content
+    assert "KEEP_TAIL" in content
+    assert len(content) < 60_000
+    assert _estimate_model_request_tokens("openai-compatible", thread.system, thread.history, []) <= 4096
+    assert events[-1]["source"] == "auto-preflight-oversized-message"
 
 
 def test_chat_thread_resolves_deferred_file_refs_in_worker_history(workspace, qapp):

@@ -154,10 +154,24 @@ def should_compact(
 def _snap_cut_index(messages: list[dict], cut: int) -> int:
     while cut < len(messages) and messages[cut]["role"] != "assistant":
         cut += 1
-    result = min(cut + 1, len(messages))
+    result = _safe_cut_after_turn(messages, cut)
     if result <= 0 or result >= len(messages):
         return 0
     return result
+
+
+def _safe_cut_after_turn(messages: list[dict], assistant_index: int) -> int:
+    if assistant_index < 0 or assistant_index >= len(messages):
+        return 0
+    cut = assistant_index + 1
+    if _has_openai_tool_calls(messages[assistant_index]):
+        while cut < len(messages) and messages[cut].get("role") == "tool":
+            cut += 1
+    return cut
+
+
+def _has_openai_tool_calls(message: dict) -> bool:
+    return message.get("role") == "assistant" and bool(message.get("tool_calls"))
 
 
 def _cut_at_recent_budget(messages: list[dict], keep_recent: int) -> int:
@@ -216,7 +230,7 @@ def _forced_cut_point(messages: list[dict]) -> int:
         accumulated += content_length(msg.get("content", "")) // 4
         if msg.get("role") != "assistant":
             continue
-        cut = i + 1
+        cut = _safe_cut_after_turn(messages, i)
         if cut >= len(messages) and messages[-1].get("role") != "assistant":
             continue
         fallback = cut

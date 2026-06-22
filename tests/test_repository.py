@@ -316,6 +316,11 @@ class TestConversationStore:
         assert title.endswith("…")
         assert len(title) == 51
 
+    def test_new_id_is_unique_for_parallel_creation(self):
+        ids = {ConversationStore.new_id() for _ in range(20)}
+        assert len(ids) == 20
+        assert all(id_.startswith(datetime.now().strftime("%Y%m%d_")) for id_ in ids)
+
     def test_matches_search_title_and_body(self, store):
         path = store.save("x", _sample_conv("x", messages=[
             {"role": "user", "content": "find the needle"},

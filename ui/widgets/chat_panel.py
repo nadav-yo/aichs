@@ -92,8 +92,9 @@ from ui.widgets.extensions_dialog import ExtensionsDialog
 
 _INITIAL_RENDER_BYTES = 1 * 1024 * 1024
 _INITIAL_RENDER_MESSAGES = 150
-_INITIAL_RENDER_SYNC_MESSAGES = 40
-_HISTORY_RENDER_BATCH_MESSAGES = 30
+_INITIAL_RENDER_SYNC_MESSAGES = 8
+_HISTORY_RENDER_BATCH_MESSAGES = 6
+_HISTORY_RENDER_BATCH_INTERVAL_MS = 16
 _OLDER_RENDER_BYTES = 512 * 1024
 _OLDER_RENDER_MESSAGES = 75
 _MAX_RENDERED_HISTORY_MESSAGES = 180
@@ -782,12 +783,14 @@ class ChatPanel(QWidget):
         self._pending_history_render_next = -1
         self._history_render_timer = QTimer(self)
         self._history_render_timer.setSingleShot(True)
-        self._history_render_timer.setInterval(0)
+        self._history_render_timer.setInterval(_HISTORY_RENDER_BATCH_INTERVAL_MS)
         self._history_render_timer.timeout.connect(self._render_pending_history_batch)
         self._stream_buffer: list[str] = []
         self._stream_flush_timer = QTimer(self)
         self._stream_flush_timer.setInterval(100)
         self._stream_flush_timer.timeout.connect(self._flush_stream_buffer)
+        self._external_stream_conv_id = ""
+        self._external_stream_bubble: MessageBubble | None = None
         self._scroll_layout_timer = QTimer(self)
         self._scroll_layout_timer.setSingleShot(True)
         self._scroll_layout_timer.setInterval(100)
@@ -1097,6 +1100,8 @@ class ChatPanel(QWidget):
         self.conversation_changed.emit("")
         self._sync_header_title()
         self.active_bubble = None
+        self._external_stream_conv_id = ""
+        self._external_stream_bubble = None
         self._stream_buffer.clear()
         self._stream_flush_timer.stop()
         self._bubbles      = {}
@@ -1146,16 +1151,82 @@ class ChatPanel(QWidget):
     def current_conversation_id(self) -> str:
         return str(self.conv_id or "")
 
-    def load_conversation(self, path: str):
+    def append_external_conversation_chunk(self, conv_id: str, text: str) -> bool:
+        if str(conv_id or "") != self.current_conversation_id() or not text:
+            return False
+        if self._visible_run() is not None:
+            return False
+        if self._external_stream_conv_id != conv_id:
+            self._external_stream_conv_id = conv_id
+            self._external_stream_bubble = None
+        if self._external_stream_bubble is None:
+            self._remove_empty_active_typing_bubble()
+            self._external_stream_bubble = self._add_bubble("", is_user=False, typing=True)
+            self.active_bubble = self._external_stream_bubble
+        self._external_stream_bubble.append(str(text or ""))
+        self._bottom()
+        return True
+
+    def show_external_conversation_tool_called(self, conv_id: str, name: str, inputs: dict) -> bool:
+        if str(conv_id or "") != self.current_conversation_id():
+            return False
+        self._flush_stream_buffer()
+        if self._external_stream_bubble is not None:
+            self._external_stream_bubble = None
+            self.active_bubble = None
+        self._add_tool_notice(
+            _tool_call_notice(str(name or "tool"), dict(inputs or {}), self.cwd),
+            debug_text=_tool_debug_text(str(name or "tool"), dict(inputs or {}), "", self.cwd),
+        )
+        return True
+
+    def show_external_conversation_tool_result(self, conv_id: str, name: str, output: str) -> bool:
+        if str(conv_id or "") != self.current_conversation_id():
+            return False
+        output = str(output or "")
+        if output.startswith("[tool error]"):
+            message = output[len("[tool error]") :].strip() or "Tool failed."
+            self._add_tool_notice(
+                f"Tool error: {message}",
+                debug_text=_tool_debug_text(str(name or "tool"), {}, output, self.cwd),
+            )
+        self._show_external_post_tool_thinking(conv_id)
+        return True
+
+    def _show_external_post_tool_thinking(self, conv_id: str):
+        if str(conv_id or "") != self.current_conversation_id():
+            return
+        if self._external_stream_bubble is not None and self._external_stream_bubble.is_empty_typing():
+            self.active_bubble = self._external_stream_bubble
+            return
+        if self._external_stream_bubble is not None:
+            return
+        self._external_stream_conv_id = str(conv_id or "")
+        self._external_stream_bubble = self._add_bubble("", is_user=False, typing=True)
+        self.active_bubble = self._external_stream_bubble
+
+    def finish_external_conversation_stream(self, conv_id: str):
+        if str(conv_id or "") != self._external_stream_conv_id:
+            return
+        self._external_stream_conv_id = ""
+        self._external_stream_bubble = None
+        self.active_bubble = None
+
+    def is_external_conversation_streaming(self, conv_id: str) -> bool:
+        return bool(self._external_stream_conv_id) and self._external_stream_conv_id == str(conv_id or "")
+
+    def load_conversation(self, path: str, *, force: bool = False):
         path = str(path)
-        if self._current_conversation_path == path and self.conv_data is not None:
+        same_path = self._current_conversation_path == path and self.conv_data is not None
+        if same_path and not force:
             return
         if self._pending_conversation_load_path == path:
             return
 
         self._flush_stream_buffer()
         self._detach_visible_run_ui()
-        self._save()
+        if not same_path:
+            self._save()
         self._reset_view()
         self._conversation_load_generation += 1
         generation = self._conversation_load_generation
@@ -1363,9 +1434,7 @@ class ChatPanel(QWidget):
                 "skill": None,
             }
             if self._visible_run() or self._visible_compaction():
-                self._ensure_conversation(text, self.model_combo.currentText())
-                self._runtime_for(self.conv_id).queued.append(draft)
-                self._update_queue_ui()
+                self._queue_visible_draft(draft)
             else:
                 self._send_draft(draft)
         elif action_type == "run_extension_command":
@@ -1397,6 +1466,9 @@ class ChatPanel(QWidget):
         )
 
         if text.startswith("!") and not images:
+            if self._visible_run() or self._visible_compaction():
+                self._add_notice("Terminal commands cannot run while a response is active. Send a chat message to queue it, or stop the response first.")
+                return
             self._run_user_terminal_from_input(text)
             return
 
@@ -1480,12 +1552,16 @@ class ChatPanel(QWidget):
             self._file_picker.hide()
 
         if self._visible_run() or self._visible_compaction():
-            self._ensure_conversation(draft["title_text"], self.model_combo.currentText())
-            self._runtime_for(self.conv_id).queued.append(draft)
-            self._update_queue_ui()
+            self._queue_visible_draft(draft)
             return
 
         self._send_draft(draft)
+
+    def _queue_visible_draft(self, draft: dict):
+        self._ensure_conversation(draft.get("title_text") or "Queued message", self.model_combo.currentText())
+        self._runtime_for(self.conv_id).queued.append(draft)
+        self._update_queue_ui()
+        self._add_notice(f"Queued message: {_queue_preview(draft)}")
 
     def _send_draft(self, draft: dict):
         crew = draft.get("crew")
@@ -3582,6 +3658,13 @@ class ChatPanel(QWidget):
         prev = self._last_scroll_value
         self._last_scroll_value = value
 
+        if not self._is_at_bottom() and (prev is None or value < prev):
+            self._cancel_pending_bottom_scrolls()
+            self._auto_scroll = False
+            self.jump_btn.show()
+            self.jump_btn.raise_()
+            return
+
         if not self._visible_run():
             return
         if self._is_at_bottom():
@@ -3620,6 +3703,8 @@ class ChatPanel(QWidget):
         self._pin_to_bottom()
 
     def _force_scroll_to_bottom(self):
+        if not self._auto_scroll:
+            return
         self._scroll_to_bottom(force=True)
 
     def _pin_to_bottom(self):
@@ -3644,6 +3729,8 @@ class ChatPanel(QWidget):
         self._scroll_after_load_finish_timer.start()
 
     def _scroll_after_load_step(self):
+        if not self._auto_scroll:
+            return
         bar = self.scroll.verticalScrollBar()
         self._programmatic_scroll = True
         bar.setValue(bar.maximum())
@@ -3651,7 +3738,17 @@ class ChatPanel(QWidget):
         self._programmatic_scroll = False
 
     def _finish_scroll_after_load(self):
-        self._scroll_after_load_step()
+        if self._auto_scroll:
+            self._scroll_after_load_step()
+        self._programmatic_scroll = False
+        self._history_prepend_enabled = True
+
+    def _cancel_pending_bottom_scrolls(self):
+        self._scroll_zero_timer.stop()
+        self._scroll_layout_timer.stop()
+        self._scroll_after_load_finish_timer.stop()
+        for timer in self._scroll_after_load_timers:
+            timer.stop()
         self._programmatic_scroll = False
         self._history_prepend_enabled = True
 

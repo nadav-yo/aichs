@@ -179,6 +179,8 @@ def test_send_queues_during_compaction(workspace):
     panel._ensure_conversation = lambda _title, _model: None
     panel._runtime_for = lambda _conv_id: runtime
     panel._update_queue_ui = lambda: None
+    panel._add_notice = lambda _message: None
+    panel._queue_visible_draft = lambda draft: ChatPanel._queue_visible_draft(panel, draft)
     panel._send_draft = lambda _draft: (_ for _ in ()).throw(AssertionError("should queue"))
 
     ChatPanel.send(panel)

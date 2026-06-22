@@ -59,7 +59,10 @@ class TestReadFile:
 
 class TestEditFileErrors:
     def test_content_must_be_string(self, cwd):
-        assert "content must be a string" in _edit_file({"path": "n.txt", "content": 1}, cwd)
+        out = _edit_file({"path": "n.txt", "content": {"text": "bad"}}, cwd)
+        assert "content must be a string, got dict" in out
+        assert '"content":"# Title\\nBody\\n"' in out
+        assert "Do not wrap content" in out
 
     def test_append_must_be_string(self, cwd):
         assert "append must be a string" in _edit_file({"path": "src/main.py", "append": 99}, cwd)

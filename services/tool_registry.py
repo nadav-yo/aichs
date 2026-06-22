@@ -75,6 +75,7 @@ class ToolDefinition:
     approval: str | None = None
     source: str = "builtin"
     extension_id: str = "builtin"
+    surfaces: tuple[str, ...] = ("chat", "canvas")
 
 
 @dataclass(frozen=True)
@@ -299,6 +300,8 @@ class ExtensionFileSummary:
     description: str = ""
     display_name: str = ""
     languages: list[LanguageContribution] = field(default_factory=list)
+    canvas_tools: list[ToolDefinition] = field(default_factory=list)
+    canvas_contexts: list[str] = field(default_factory=list)
     requirements: ExtensionRequirements = field(default_factory=ExtensionRequirements)
     missing_requirements: list[str] = field(default_factory=list)
     permissions: ExtensionPermissions = field(default_factory=ExtensionPermissions)
@@ -323,6 +326,7 @@ class _RegistrySnapshot:
     tools: tuple[ToolDefinition, ...]
     commands: tuple[ExtensionCommand, ...]
     context_providers: tuple[tuple[str, ContextProvider, str], ...]
+    canvas_context_providers: tuple[tuple[str, ContextProvider, str], ...]
     hooks: tuple[tuple[str, tuple[tuple[HookHandler, str], ...]], ...]
     badges: tuple[StatusBadge, ...]
     panels: tuple[ExtensionPanel, ...]
@@ -376,6 +380,7 @@ class ExtensionContext:
     history: list[dict] = field(default_factory=list)
     processes: object | None = None
     extension_id: str = "extension"
+    canvas: dict = field(default_factory=dict)
 
     @property
     def storage(self) -> ExtensionStorage:
@@ -439,6 +444,7 @@ class ToolRegistry:
         self._tools: dict[str, ToolDefinition] = {}
         self._commands: dict[str, ExtensionCommand] = {}
         self._context_providers: list[tuple[str, ContextProvider, str]] = []
+        self._canvas_context_providers: list[tuple[str, ContextProvider, str]] = []
         self._hooks: dict[str, list[tuple[HookHandler, str]]] = {}
         self._badges: dict[str, StatusBadge] = {}
         self._panels: dict[str, ExtensionPanel] = {}
@@ -462,6 +468,7 @@ class ToolRegistry:
         parallel_safe: bool = False,
         approval: str | None = None,
         source: str = "extension",
+        surfaces: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         if not self._allow_contribution(source, "tools", f"tool {name}"):
             return
@@ -469,6 +476,7 @@ class ToolRegistry:
             raise ValueError(f"invalid tool name: {name!r}")
         if name in self._tools:
             raise ValueError(f"tool already registered: {name}")
+        tool_surfaces = _tool_surfaces(source, surfaces)
         self._tools[name] = ToolDefinition(
             name=name,
             description=description,
@@ -478,6 +486,29 @@ class ToolRegistry:
             approval=approval,
             source=source,
             extension_id="builtin" if source == "builtin" else self._current_extension_id,
+            surfaces=tool_surfaces,
+        )
+
+    def canvas_tool(
+        self,
+        *,
+        name: str,
+        description: str,
+        input_schema: dict,
+        execute: ToolExecute,
+        parallel_safe: bool = False,
+        approval: str | None = None,
+        source: str = "extension",
+    ) -> None:
+        self.tool(
+            name=name,
+            description=description,
+            input_schema=input_schema,
+            execute=execute,
+            parallel_safe=parallel_safe,
+            approval=approval,
+            source=source,
+            surfaces=("canvas",),
         )
 
     def command(
@@ -520,6 +551,13 @@ class ToolRegistry:
         if not name:
             raise ValueError("context name is required")
         self._context_providers.append((name, provider, self._current_extension_id))
+
+    def canvas_context(self, name: str, provider: ContextProvider) -> None:
+        if not self._allow_contribution("extension", "context", f"canvas context {name}"):
+            return
+        if not name:
+            raise ValueError("canvas context name is required")
+        self._canvas_context_providers.append((name, provider, self._current_extension_id))
 
     def hook(self, event: str, handler: HookHandler) -> None:
         if not self._allow_contribution("extension", "hooks", f"hook {event}"):
@@ -614,8 +652,11 @@ class ToolRegistry:
     def get(self, name: str) -> ToolDefinition | None:
         return self._tools.get(name)
 
-    def all(self) -> list[ToolDefinition]:
-        return list(self._tools.values())
+    def all(self, *, surface: str | None = None) -> list[ToolDefinition]:
+        tools = list(self._tools.values())
+        if surface is None:
+            return tools
+        return [tool for tool in tools if surface in tool.surfaces]
 
     def names(self) -> list[str]:
         return list(self._tools.keys())
@@ -635,6 +676,7 @@ class ToolRegistry:
                 history=ctx.history,
                 processes=ctx.processes,
                 extension_id=extension_id,
+                canvas=ctx.canvas,
             )
             try:
                 with time_operation(
@@ -644,6 +686,30 @@ class ToolRegistry:
                     text = provider(scoped_ctx)
             except Exception:
                 self.errors.append(f"context {name}:\n{traceback.format_exc().rstrip()}")
+                continue
+            if text:
+                snippets.append((name, str(text).strip()))
+        return snippets
+
+    def canvas_context_snippets(self, ctx: ExtensionContext) -> list[tuple[str, str]]:
+        snippets: list[tuple[str, str]] = []
+        for name, provider, extension_id in self._canvas_context_providers:
+            scoped_ctx = ExtensionContext(
+                cwd=ctx.cwd,
+                model=ctx.model,
+                history=ctx.history,
+                processes=ctx.processes,
+                extension_id=extension_id,
+                canvas=ctx.canvas,
+            )
+            try:
+                with time_operation(
+                    "extension.canvas_context",
+                    detail=f"extension={extension_id} name={name}",
+                ):
+                    text = provider(scoped_ctx)
+            except Exception:
+                self.errors.append(f"canvas context {name}:\n{traceback.format_exc().rstrip()}")
                 continue
             if text:
                 snippets.append((name, str(text).strip()))
@@ -767,6 +833,31 @@ def extension_context_snippets(
     load_extensions(registry, cwd)
     ctx = ExtensionContext(cwd=cwd, model=model, history=history or [], processes=_process_api(cwd))
     return registry.context_snippets(ctx), list(registry.errors)
+
+
+def extension_canvas_context_snippets(
+    cwd: str,
+    *,
+    model: str = "",
+    history: list[dict] | None = None,
+    canvas: dict | None = None,
+) -> tuple[list[tuple[str, str]], list[str]]:
+    registry = ToolRegistry()
+    load_extensions(registry, cwd)
+    ctx = ExtensionContext(
+        cwd=cwd,
+        model=model,
+        history=history or [],
+        processes=_process_api(cwd),
+        canvas=dict(canvas or {}),
+    )
+    return registry.canvas_context_snippets(ctx), list(registry.errors)
+
+
+def extension_canvas_tools(cwd: str | None = None) -> tuple[list[ToolDefinition], list[str]]:
+    registry = ToolRegistry()
+    load_extensions(registry, cwd)
+    return registry.all(surface="canvas"), list(registry.errors)
 
 
 def run_extension_hooks(cwd: str, event: str, ctx: HookContext) -> list[str]:
@@ -1056,6 +1147,7 @@ def _registry_snapshot(registry: ToolRegistry) -> _RegistrySnapshot:
         tools=tuple(tool for tool in registry.all() if tool.source != "builtin"),
         commands=tuple(registry.commands()),
         context_providers=tuple(registry._context_providers),
+        canvas_context_providers=tuple(registry._canvas_context_providers),
         hooks=tuple(
             (event, tuple(handlers))
             for event, handlers in sorted(registry._hooks.items())
@@ -1080,6 +1172,7 @@ def _apply_registry_snapshot(registry: ToolRegistry, snapshot: _RegistrySnapshot
             continue
         registry._commands[command.name] = command
     registry._context_providers.extend(snapshot.context_providers)
+    registry._canvas_context_providers.extend(snapshot.canvas_context_providers)
     for event, handlers in snapshot.hooks:
         registry._hooks.setdefault(event, []).extend(handlers)
     for badge in snapshot.badges:
@@ -1288,8 +1381,10 @@ def _extension_file_summary(
             path=str(path),
             status="Disabled",
             tools=static["tools"],
+            canvas_tools=static["canvas_tools"],
             commands=static["commands"],
             contexts=static["contexts"],
+            canvas_contexts=static["canvas_contexts"],
             hooks=static["hooks"],
             badges=static["badges"],
             panels=static["panels"],
@@ -1315,8 +1410,10 @@ def _extension_file_summary(
         path=str(path),
         status="Failed" if errors else "Loaded",
         tools=[tool for tool in registry.all() if tool.source != "builtin"],
+        canvas_tools=[tool for tool in registry.all(surface="canvas") if tool.source != "builtin"],
         commands=registry.commands(),
         contexts=[name for name, _provider, _extension_id in registry._context_providers],
+        canvas_contexts=[name for name, _provider, _extension_id in registry._canvas_context_providers],
         hooks=sorted(registry._hooks.keys()),
         badges=list(registry._badges.values()),
         panels=registry.panels(),
@@ -1397,8 +1494,10 @@ def _static_extension_description(path: Path, *, manifest: dict | None = None) -
 def _static_extension_contributions(path: Path) -> dict:
     empty = {
         "tools": [],
+        "canvas_tools": [],
         "commands": [],
         "contexts": [],
+        "canvas_contexts": [],
         "hooks": [],
         "badges": [],
         "panels": [],
@@ -1424,6 +1523,19 @@ def _static_extension_contributions(path: Path) -> dict:
                         description=_call_string_arg(node, "description"),
                         input_schema={},
                         execute=lambda _ctx, _inputs: "",
+                        surfaces=("chat",),
+                    )
+                )
+        elif name == "canvas_tool":
+            tool_name = _call_string_arg(node, "name")
+            if tool_name:
+                empty["canvas_tools"].append(
+                    ToolDefinition(
+                        name=tool_name,
+                        description=_call_string_arg(node, "description"),
+                        input_schema={},
+                        execute=lambda _ctx, _inputs: "",
+                        surfaces=("canvas",),
                     )
                 )
         elif name == "command":
@@ -1443,6 +1555,10 @@ def _static_extension_contributions(path: Path) -> dict:
             context_name = _call_pos_string_arg(node, 0) or _call_string_arg(node, "name")
             if context_name:
                 empty["contexts"].append(context_name)
+        elif name == "canvas_context":
+            context_name = _call_pos_string_arg(node, 0) or _call_string_arg(node, "name")
+            if context_name:
+                empty["canvas_contexts"].append(context_name)
         elif name == "hook":
             hook_name = _call_pos_string_arg(node, 0) or _call_string_arg(node, "event")
             if hook_name:
@@ -1479,6 +1595,7 @@ def _static_extension_contributions(path: Path) -> dict:
                 )
     empty["hooks"] = sorted(dict.fromkeys(empty["hooks"]))
     empty["contexts"] = list(dict.fromkeys(empty["contexts"]))
+    empty["canvas_contexts"] = list(dict.fromkeys(empty["canvas_contexts"]))
     return empty
 
 
@@ -1578,6 +1695,17 @@ def _manifest_string_list(value) -> list[str]:
         seen.add(text)
         items.append(text)
     return items
+
+
+def _tool_surfaces(source: str, surfaces: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
+    if surfaces is None:
+        return ("chat", "canvas") if source == "builtin" else ("chat",)
+    cleaned = []
+    for surface in surfaces:
+        text = str(surface or "").strip()
+        if text and text not in cleaned:
+            cleaned.append(text)
+    return tuple(cleaned or (("chat", "canvas") if source == "builtin" else ("chat",)))
 
 
 def _missing_extension_requirements(requirements: ExtensionRequirements) -> list[str]:

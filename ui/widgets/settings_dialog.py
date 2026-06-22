@@ -41,25 +41,39 @@ from storage.settings import (
     COMPACT_RESUME_PROMPT_KEY,
     COMPACTION_SUMMARY_GUIDANCE_KEY,
     COMMIT_MESSAGE_PROMPT_ADDITION_KEY,
+    CANVAS_ACTION_AUTO_APPROVE_KEY,
+    CANVAS_PARALLEL_LIMIT_KEY,
+    CANVAS_RUN_MODE_KEY,
     DEFAULT_ARCHIVIST_PROMPT,
     DEFAULT_AUTO_TITLE_PROMPT_INSTRUCTIONS,
+    DEFAULT_CANVAS_ACTION_AUTO_APPROVE,
+    DEFAULT_CANVAS_RUN_MODE,
     DEFAULT_COMPACT_RESUME_PROMPT,
     DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE,
     DEFAULT_FILE_EDITOR_TAB_SPACES,
     DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
+    DEFAULT_GRAPH_AGENT_PROMPT,
+    DEFAULT_GRAPH_GENERATION_STRATEGY,
     DEFAULT_GIT_FIX_PROMPT_TEMPLATE,
     DEFAULT_TRASH_RETENTION_DAYS,
     DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY,
     FILE_EDITOR_AUTO_SAVE_KEY,
     FILE_EDITOR_TAB_SPACES_KEY,
     FILE_REVIEW_PROMPT_TEMPLATE_KEY,
+    GRAPH_AGENT_PROMPT_KEY,
+    GRAPH_GENERATION_STRATEGY_KEY,
     GIT_FIX_PROMPT_TEMPLATE_KEY,
+    MAX_CANVAS_PARALLEL_LIMIT,
     MAX_FILE_EDITOR_TAB_SPACES,
+    MIN_CANVAS_PARALLEL_LIMIT,
     MIN_FILE_EDITOR_TAB_SPACES,
     TRASH_RETENTION_DAYS_KEY,
     SettingsStore,
     archivist_prompt,
     auto_title_prompt_instructions,
+    canvas_action_auto_approve,
+    canvas_parallel_limit,
+    canvas_run_mode,
     compact_resume_prompt,
     compaction_summary_guidance,
     diagnostic_fix_prompt_template,
@@ -69,6 +83,8 @@ from storage.settings import (
     DEFAULT_RESUME_SESSION,
     file_review_prompt_template,
     git_fix_prompt_template,
+    graph_agent_prompt,
+    graph_generation_strategy,
     trash_retention_days,
 )
 from ui.avatars import avatar_pixmap, clear_cache, persist_portrait
@@ -88,6 +104,7 @@ from ui.theme import (
 _NAV = [
     ("general", "General"),
     ("editor", "Editor"),
+    ("canvas", "Canvas"),
     ("prompts", "Prompts"),
     ("models", "Models"),
     ("crew", "Crew"),
@@ -1399,6 +1416,8 @@ class SettingsDialog(QDialog):
             return self._page_general(self._saved)
         if page_id == "editor":
             return self._page_editor(self._saved)
+        if page_id == "canvas":
+            return self._page_canvas(self._saved)
         if page_id == "prompts":
             return self._page_prompts(self._saved)
         if page_id == "models":
@@ -1591,6 +1610,57 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         return page
 
+    def _page_canvas(self, saved: dict) -> QWidget:
+        page, layout = self._page_shell(
+            "Canvas",
+            "Intent graph generation and run behavior.",
+        )
+
+        self.canvas_generation_strategy_combo = QComboBox()
+        self.canvas_generation_strategy_combo.addItem("Prefer parallelism", "parallelism")
+        self.canvas_generation_strategy_combo.addItem("Prefer atomicity", "atomicity")
+        self.canvas_generation_strategy_combo.setStyleSheet(self._field_style)
+        self._field(layout, "Step generation strategy", self.canvas_generation_strategy_combo)
+
+        strategy_hint = QLabel(
+            "Controls how Generate Steps shapes the graph. This does not force parallel execution."
+        )
+        strategy_hint.setWordWrap(True)
+        strategy_hint.setStyleSheet(self._hint_style)
+        layout.addWidget(strategy_hint)
+
+        layout.addWidget(self._section_separator())
+
+        self.canvas_run_mode_combo = QComboBox()
+        self.canvas_run_mode_combo.addItem("Sequential", "sequential")
+        self.canvas_run_mode_combo.addItem("Parallel", "parallel")
+        self.canvas_run_mode_combo.setStyleSheet(self._field_style)
+        self.canvas_run_mode_combo.currentIndexChanged.connect(self._sync_canvas_parallel_limit_enabled)
+        self._field(layout, "Run mode", self.canvas_run_mode_combo)
+
+        self.canvas_parallel_limit_spin = QSpinBox()
+        self.canvas_parallel_limit_spin.setRange(MIN_CANVAS_PARALLEL_LIMIT, MAX_CANVAS_PARALLEL_LIMIT)
+        self.canvas_parallel_limit_spin.setStyleSheet(self._field_style)
+        self._field(layout, "Max parallel actions", self.canvas_parallel_limit_spin)
+
+        self.canvas_action_auto_approve_combo = QComboBox()
+        self.canvas_action_auto_approve_combo.addItem("Never", "never")
+        self.canvas_action_auto_approve_combo.addItem("Coding actions only", "coder")
+        self.canvas_action_auto_approve_combo.addItem("All actions", "all")
+        self.canvas_action_auto_approve_combo.setStyleSheet(self._field_style)
+        self._field(layout, "Auto-approve action results", self.canvas_action_auto_approve_combo)
+
+        run_hint = QLabel(
+            "Sequential runs one ready action at a time. Parallel starts independent ready actions up to the limit. Auto-approval applies only to action nodes; DoD review always waits for human approval."
+        )
+        run_hint.setWordWrap(True)
+        run_hint.setStyleSheet(self._hint_style)
+        layout.addWidget(run_hint)
+
+        layout.addStretch()
+        self._sync_canvas_parallel_limit_enabled()
+        return page
+
     def _page_prompts(self, saved: dict) -> QWidget:
         page, layout = self._page_shell(
             "Prompts",
@@ -1676,6 +1746,23 @@ class SettingsDialog(QDialog):
         ))
         automation_layout.addStretch()
         tabs.addTab(automation, "Titles")
+
+        graph = QWidget()
+        graph_layout = QVBoxLayout(graph)
+        graph_layout.setContentsMargins(14, 14, 14, 14)
+        graph_layout.setSpacing(10)
+
+        self.graph_agent_prompt = QTextEdit()
+        self.graph_agent_prompt.setPlaceholderText(DEFAULT_GRAPH_AGENT_PROMPT)
+        self.graph_agent_prompt.setMinimumHeight(150)
+        self.graph_agent_prompt.setStyleSheet(self._field_style)
+        self._prompt_field(graph_layout, "Intent Graph agent prompt", self.graph_agent_prompt)
+        graph_layout.addWidget(_hint_label(
+            "Controls the inline graph agent. Graph tools and cycle validation stay fixed.",
+            self._hint_style,
+        ))
+        graph_layout.addStretch()
+        tabs.addTab(graph, "Graph")
 
         memory = QWidget()
         memory_layout = QVBoxLayout(memory)
@@ -2211,6 +2298,8 @@ class SettingsDialog(QDialog):
             self._load_general_values(saved)
         elif page_id == "editor":
             self._load_editor_values(saved)
+        elif page_id == "canvas":
+            self._load_canvas_values(saved)
         elif page_id == "prompts":
             self._load_prompts_values(saved)
         elif page_id == "models":
@@ -2241,6 +2330,29 @@ class SettingsDialog(QDialog):
         )
         self.file_editor_tab_spaces_spin.setValue(file_editor_tab_spaces(saved))
 
+    def _load_canvas_values(self, saved: dict):
+        strategy_index = self.canvas_generation_strategy_combo.findData(graph_generation_strategy(saved))
+        if strategy_index < 0:
+            strategy_index = self.canvas_generation_strategy_combo.findData(DEFAULT_GRAPH_GENERATION_STRATEGY)
+        self.canvas_generation_strategy_combo.setCurrentIndex(max(0, strategy_index))
+
+        run_mode_index = self.canvas_run_mode_combo.findData(canvas_run_mode(saved))
+        if run_mode_index < 0:
+            run_mode_index = self.canvas_run_mode_combo.findData(DEFAULT_CANVAS_RUN_MODE)
+        self.canvas_run_mode_combo.setCurrentIndex(max(0, run_mode_index))
+        self.canvas_parallel_limit_spin.setValue(canvas_parallel_limit(saved))
+        approve_index = self.canvas_action_auto_approve_combo.findData(canvas_action_auto_approve(saved))
+        if approve_index < 0:
+            approve_index = self.canvas_action_auto_approve_combo.findData(DEFAULT_CANVAS_ACTION_AUTO_APPROVE)
+        self.canvas_action_auto_approve_combo.setCurrentIndex(max(0, approve_index))
+        self._sync_canvas_parallel_limit_enabled()
+
+    def _sync_canvas_parallel_limit_enabled(self):
+        if not hasattr(self, "canvas_run_mode_combo") or not hasattr(self, "canvas_parallel_limit_spin"):
+            return
+        is_parallel = str(self.canvas_run_mode_combo.currentData() or DEFAULT_CANVAS_RUN_MODE) == "parallel"
+        self.canvas_parallel_limit_spin.setEnabled(is_parallel)
+
     def _load_prompts_values(self, saved: dict):
         self.file_review_prompt_template.setText(
             self._load_prompt_override(
@@ -2270,6 +2382,9 @@ class SettingsDialog(QDialog):
                 AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY,
                 DEFAULT_AUTO_TITLE_PROMPT_INSTRUCTIONS,
             )
+        )
+        self.graph_agent_prompt.setPlainText(
+            self._load_prompt_override(saved, GRAPH_AGENT_PROMPT_KEY, DEFAULT_GRAPH_AGENT_PROMPT)
         )
         self.compaction_summary_guidance.setPlainText(
             self._load_prompt_override(saved, COMPACTION_SUMMARY_GUIDANCE_KEY)
@@ -2449,6 +2564,7 @@ class SettingsDialog(QDialog):
             GIT_FIX_PROMPT_TEMPLATE_KEY: git_fix_prompt_template(saved),
             COMPACT_RESUME_PROMPT_KEY: compact_resume_prompt(saved),
             AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY: auto_title_prompt_instructions(saved),
+            GRAPH_AGENT_PROMPT_KEY: graph_agent_prompt(saved),
             COMPACTION_SUMMARY_GUIDANCE_KEY: compaction_summary_guidance(saved),
             ARCHIVIST_PROMPT_KEY: archivist_prompt(saved),
             COMMIT_MESSAGE_PROMPT_ADDITION_KEY: str(saved.get(COMMIT_MESSAGE_PROMPT_ADDITION_KEY, "")).strip(),
@@ -2478,6 +2594,7 @@ class SettingsDialog(QDialog):
             GIT_FIX_PROMPT_TEMPLATE_KEY: self.git_fix_prompt_template.text().strip() or git_fix_prompt_template({}),
             COMPACT_RESUME_PROMPT_KEY: self.compact_resume_prompt.text().strip() or compact_resume_prompt({}),
             AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY: self.auto_title_prompt_instructions.toPlainText().strip() or auto_title_prompt_instructions({}),
+            GRAPH_AGENT_PROMPT_KEY: self.graph_agent_prompt.toPlainText().strip() or graph_agent_prompt({}),
             COMPACTION_SUMMARY_GUIDANCE_KEY: self.compaction_summary_guidance.toPlainText().strip(),
             ARCHIVIST_PROMPT_KEY: self.archivist_prompt.toPlainText().strip() or archivist_prompt({}),
             COMMIT_MESSAGE_PROMPT_ADDITION_KEY: self.commit_message_guidance.toPlainText().strip(),
@@ -2615,11 +2732,20 @@ class SettingsDialog(QDialog):
             RESUME_SESSION_KEY: str(self.resume_session_combo.currentData() or DEFAULT_RESUME_SESSION),
             FILE_EDITOR_AUTO_SAVE_KEY: self.file_editor_auto_save_check.isChecked(),
             FILE_EDITOR_TAB_SPACES_KEY: self.file_editor_tab_spaces_spin.value(),
+            GRAPH_GENERATION_STRATEGY_KEY: str(
+                self.canvas_generation_strategy_combo.currentData() or DEFAULT_GRAPH_GENERATION_STRATEGY
+            ),
+            CANVAS_RUN_MODE_KEY: str(self.canvas_run_mode_combo.currentData() or DEFAULT_CANVAS_RUN_MODE),
+            CANVAS_PARALLEL_LIMIT_KEY: self.canvas_parallel_limit_spin.value(),
+            CANVAS_ACTION_AUTO_APPROVE_KEY: str(
+                self.canvas_action_auto_approve_combo.currentData() or DEFAULT_CANVAS_ACTION_AUTO_APPROVE
+            ),
             FILE_REVIEW_PROMPT_TEMPLATE_KEY: self.file_review_prompt_template.text().strip(),
             DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY: self.diagnostic_fix_prompt_template.text().strip(),
             GIT_FIX_PROMPT_TEMPLATE_KEY: self.git_fix_prompt_template.text().strip(),
             COMPACT_RESUME_PROMPT_KEY: self.compact_resume_prompt.text().strip(),
             AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY: self.auto_title_prompt_instructions.toPlainText().strip(),
+            GRAPH_AGENT_PROMPT_KEY: self.graph_agent_prompt.toPlainText().strip(),
             COMPACTION_SUMMARY_GUIDANCE_KEY: self.compaction_summary_guidance.toPlainText().strip(),
             ARCHIVIST_PROMPT_KEY: self.archivist_prompt.toPlainText().strip(),
             TRASH_RETENTION_DAYS_KEY: self.trash_retention_spin.value(),

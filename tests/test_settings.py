@@ -5,19 +5,29 @@ import pytest
 from storage.settings import (
     DEFAULT_ARCHIVIST_PROMPT,
     DEFAULT_AUTO_TITLE_PROMPT_INSTRUCTIONS,
+    DEFAULT_CANVAS_ACTION_AUTO_APPROVE,
+    DEFAULT_CANVAS_PARALLEL_LIMIT,
+    DEFAULT_CANVAS_RUN_MODE,
     DEFAULT_COMPACT_RESUME_PROMPT,
     DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE,
     DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
+    DEFAULT_GRAPH_AGENT_PROMPT,
+    DEFAULT_GRAPH_GENERATION_STRATEGY,
     DEFAULT_GIT_FIX_PROMPT_TEMPLATE,
     SettingsStore,
     archivist_prompt,
     auto_title_prompt_instructions,
+    canvas_action_auto_approve,
+    canvas_parallel_limit,
+    canvas_run_mode,
     compact_resume_prompt,
     compaction_summary_guidance,
     diagnostic_fix_prompt_template,
     file_editor_tab_spaces,
     file_review_prompt_template,
     git_fix_prompt_template,
+    graph_agent_prompt,
+    graph_generation_strategy,
     resume_session,
     DEFAULT_RESUME_SESSION,
 )
@@ -99,6 +109,19 @@ def test_file_prompt_templates_default_and_strip():
     assert compact_resume_prompt({}) == DEFAULT_COMPACT_RESUME_PROMPT
     assert compaction_summary_guidance({}) == ""
     assert archivist_prompt({}) == DEFAULT_ARCHIVIST_PROMPT
+    assert graph_agent_prompt({}) == DEFAULT_GRAPH_AGENT_PROMPT
+    assert "Do not perform that research, implementation, review, or verification yourself" in DEFAULT_GRAPH_AGENT_PROMPT
+    assert "Use web_fetch only for graph-planning research" in DEFAULT_GRAPH_AGENT_PROMPT
+    assert "mega-feature work" in DEFAULT_GRAPH_AGENT_PROMPT
+    assert "If the goal can be summarized as one straightforward chat prompt" in DEFAULT_GRAPH_AGENT_PROMPT
+    assert "usually 3-5 new nodes total" in DEFAULT_GRAPH_AGENT_PROMPT
+    assert "Do not overcomplicate the graph" in DEFAULT_GRAPH_AGENT_PROMPT
+    assert "Branch only when it clarifies real parallel work" in DEFAULT_GRAPH_AGENT_PROMPT
+    assert "Break down by responsibility, not by generic phases" in DEFAULT_GRAPH_AGENT_PROMPT
+    assert "Ask concise questions about design details" in DEFAULT_GRAPH_AGENT_PROMPT
+    assert "multiple question turns" in DEFAULT_GRAPH_AGENT_PROMPT
+    assert "Do not ask the user to choose implementation details" in DEFAULT_GRAPH_AGENT_PROMPT
+    assert "Reuse and connect existing nodes" in DEFAULT_GRAPH_AGENT_PROMPT
     assert (
         file_review_prompt_template({"file_review_prompt_template": "  Review {path}  "})
         == "Review {path}"
@@ -127,6 +150,24 @@ def test_file_prompt_templates_default_and_strip():
         == "Keep tests"
     )
     assert archivist_prompt({"archivist_prompt": "  Search memory  "}) == "Search memory"
+    assert graph_agent_prompt({"graph_agent_prompt": "  Build graphs  "}) == "Build graphs"
+
+
+def test_canvas_settings_defaults_and_validate():
+    assert graph_generation_strategy({}) == DEFAULT_GRAPH_GENERATION_STRATEGY
+    assert graph_generation_strategy({"graph_generation_strategy": "atomicity"}) == "atomicity"
+    assert graph_generation_strategy({"graph_generation_strategy": "bogus"}) == DEFAULT_GRAPH_GENERATION_STRATEGY
+    assert canvas_run_mode({}) == DEFAULT_CANVAS_RUN_MODE
+    assert canvas_run_mode({"canvas_run_mode": "parallel"}) == "parallel"
+    assert canvas_run_mode({"canvas_run_mode": "bogus"}) == DEFAULT_CANVAS_RUN_MODE
+    assert canvas_parallel_limit({}) == DEFAULT_CANVAS_PARALLEL_LIMIT
+    assert canvas_parallel_limit({"canvas_parallel_limit": 0}) == 1
+    assert canvas_parallel_limit({"canvas_parallel_limit": 99}) == 6
+    assert canvas_parallel_limit({"canvas_parallel_limit": "bad"}) == DEFAULT_CANVAS_PARALLEL_LIMIT
+    assert canvas_action_auto_approve({}) == DEFAULT_CANVAS_ACTION_AUTO_APPROVE
+    assert canvas_action_auto_approve({"canvas_action_auto_approve": "coder"}) == "coder"
+    assert canvas_action_auto_approve({"canvas_action_auto_approve": "all"}) == "all"
+    assert canvas_action_auto_approve({"canvas_action_auto_approve": "bogus"}) == DEFAULT_CANVAS_ACTION_AUTO_APPROVE
 
 
 def test_resume_session_defaults_and_validates():

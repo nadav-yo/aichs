@@ -99,6 +99,36 @@ def test_forced_cut_point_keeps_incomplete_tail():
     assert _find_cut_point(messages, "claude-sonnet-4-6", force=True) == 2
 
 
+def test_forced_cut_point_does_not_leave_orphan_openai_tool_result():
+    messages = [
+        {"role": "user", "content": "inspect"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "file content"},
+        {"role": "user", "content": "next"},
+        {"role": "assistant", "content": "done"},
+    ]
+
+    cut = _find_cut_point(messages, "claude-sonnet-4-6", force=True)
+    forced = _forced_cut_point(messages)
+
+    assert cut != 2
+    assert forced != 2
+    if cut < len(messages):
+        assert messages[cut]["role"] != "tool"
+    if forced < len(messages):
+        assert messages[forced]["role"] != "tool"
+
+
 def test_find_cut_point_large_history():
     messages = _msgs(30, size=8000)
     cut = _find_cut_point(messages, "claude-sonnet-4-6")

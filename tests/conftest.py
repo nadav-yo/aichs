@@ -47,6 +47,8 @@ def close_qt_windows():
 
     for widget in app.topLevelWidgets():
         widget.close()
+        if widget.objectName() == "agentCanvas":
+            continue
         widget.deleteLater()
     app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     app.processEvents()

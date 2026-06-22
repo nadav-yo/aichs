@@ -6,15 +6,21 @@ import services.model_registry as reg
 from storage.settings import (
     ARCHIVIST_PROMPT_KEY,
     AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY,
+    CANVAS_ACTION_AUTO_APPROVE_KEY,
+    CANVAS_PARALLEL_LIMIT_KEY,
+    CANVAS_RUN_MODE_KEY,
     COMPACT_RESUME_PROMPT_KEY,
     COMPACTION_SUMMARY_GUIDANCE_KEY,
     COMMIT_MESSAGE_PROMPT_ADDITION_KEY,
+    GRAPH_AGENT_PROMPT_KEY,
+    GRAPH_GENERATION_STRATEGY_KEY,
     DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY,
     FILE_EDITOR_AUTO_SAVE_KEY,
     FILE_EDITOR_TAB_SPACES_KEY,
     FILE_REVIEW_PROMPT_TEMPLATE_KEY,
     GIT_FIX_PROMPT_TEMPLATE_KEY,
     DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
+    DEFAULT_GRAPH_AGENT_PROMPT,
     TRASH_RETENTION_DAYS_KEY,
     SettingsStore,
     file_review_prompt_template,
@@ -367,27 +373,41 @@ def test_basic_settings_are_saved_and_reloaded(qapp):
     store = SettingsStore()
     dialog = SettingsDialog(store)
     _ensure_page(dialog, "editor")
+    _ensure_page(dialog, "canvas")
     _ensure_page(dialog, "prompts")
 
     assert dialog.file_editor_auto_save_check.isChecked() is False
     assert dialog.file_editor_tab_spaces_spin.value() == 4
     assert dialog.trash_retention_spin.value() == 14
-    assert dialog._nav.item(2).text() == "Prompts"
+    assert dialog._nav.item(2).text() == "Canvas"
+    assert dialog._nav.item(3).text() == "Prompts"
+    assert dialog.canvas_generation_strategy_combo.currentData() == "parallelism"
+    assert dialog.canvas_run_mode_combo.currentData() == "sequential"
+    assert dialog.canvas_parallel_limit_spin.value() == 2
+    assert not dialog.canvas_parallel_limit_spin.isEnabled()
+    assert dialog.canvas_action_auto_approve_combo.currentData() == "never"
     assert dialog.file_review_prompt_template.text() == ""
     assert DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE in dialog.file_review_prompt_template.placeholderText()
     assert dialog.diagnostic_fix_prompt_template.text() == ""
     assert dialog.git_fix_prompt_template.text() == ""
+    assert dialog.graph_agent_prompt.toPlainText() == ""
+    assert "Intent Graph agent" in dialog.graph_agent_prompt.placeholderText()
     assert dialog.commit_message_guidance.parent() is not None
     assert dialog.commit_message_guidance.toPlainText() == ""
 
     dialog.file_editor_auto_save_check.setChecked(True)
     dialog.file_editor_tab_spaces_spin.setValue(2)
     dialog.trash_retention_spin.setValue(30)
+    dialog.canvas_generation_strategy_combo.setCurrentIndex(dialog.canvas_generation_strategy_combo.findData("atomicity"))
+    dialog.canvas_run_mode_combo.setCurrentIndex(dialog.canvas_run_mode_combo.findData("parallel"))
+    dialog.canvas_parallel_limit_spin.setValue(4)
+    dialog.canvas_action_auto_approve_combo.setCurrentIndex(dialog.canvas_action_auto_approve_combo.findData("coder"))
     dialog.file_review_prompt_template.setText("Inspect {mention}.")
     dialog.diagnostic_fix_prompt_template.setText("Resolve {mention}.")
     dialog.git_fix_prompt_template.setText("Resolve git {action}: {command}.")
     dialog.compact_resume_prompt.setText("Continue with the compacted notes.")
     dialog.auto_title_prompt_instructions.setPlainText("Title this briefly.")
+    dialog.graph_agent_prompt.setPlainText("Build graph plans carefully.")
     dialog.compaction_summary_guidance.setPlainText("Keep commands exact.")
     dialog.archivist_prompt.setPlainText("Search memory carefully.")
     dialog.commit_message_guidance.setPlainText("Keep commits short.")
@@ -397,26 +417,38 @@ def test_basic_settings_are_saved_and_reloaded(qapp):
     assert saved[FILE_EDITOR_AUTO_SAVE_KEY] is True
     assert saved[FILE_EDITOR_TAB_SPACES_KEY] == 2
     assert saved[TRASH_RETENTION_DAYS_KEY] == 30
+    assert saved[GRAPH_GENERATION_STRATEGY_KEY] == "atomicity"
+    assert saved[CANVAS_RUN_MODE_KEY] == "parallel"
+    assert saved[CANVAS_PARALLEL_LIMIT_KEY] == 4
+    assert saved[CANVAS_ACTION_AUTO_APPROVE_KEY] == "coder"
     assert saved[FILE_REVIEW_PROMPT_TEMPLATE_KEY] == "Inspect {mention}."
     assert saved[DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY] == "Resolve {mention}."
     assert saved[GIT_FIX_PROMPT_TEMPLATE_KEY] == "Resolve git {action}: {command}."
     assert saved[COMPACT_RESUME_PROMPT_KEY] == "Continue with the compacted notes."
     assert saved[AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY] == "Title this briefly."
+    assert saved[GRAPH_AGENT_PROMPT_KEY] == "Build graph plans carefully."
     assert saved[COMPACTION_SUMMARY_GUIDANCE_KEY] == "Keep commands exact."
     assert saved[ARCHIVIST_PROMPT_KEY] == "Search memory carefully."
     assert store.load()[COMMIT_MESSAGE_PROMPT_ADDITION_KEY] == "Keep commits short."
 
     reloaded = SettingsDialog(store)
     _ensure_page(reloaded, "editor")
+    _ensure_page(reloaded, "canvas")
     _ensure_page(reloaded, "prompts")
     assert reloaded.file_editor_auto_save_check.isChecked() is True
     assert reloaded.file_editor_tab_spaces_spin.value() == 2
     assert reloaded.trash_retention_spin.value() == 30
+    assert reloaded.canvas_generation_strategy_combo.currentData() == "atomicity"
+    assert reloaded.canvas_run_mode_combo.currentData() == "parallel"
+    assert reloaded.canvas_parallel_limit_spin.value() == 4
+    assert reloaded.canvas_parallel_limit_spin.isEnabled()
+    assert reloaded.canvas_action_auto_approve_combo.currentData() == "coder"
     assert reloaded.file_review_prompt_template.text() == "Inspect {mention}."
     assert reloaded.diagnostic_fix_prompt_template.text() == "Resolve {mention}."
     assert reloaded.git_fix_prompt_template.text() == "Resolve git {action}: {command}."
     assert reloaded.compact_resume_prompt.text() == "Continue with the compacted notes."
     assert reloaded.auto_title_prompt_instructions.toPlainText() == "Title this briefly."
+    assert reloaded.graph_agent_prompt.toPlainText() == "Build graph plans carefully."
     assert reloaded.compaction_summary_guidance.toPlainText() == "Keep commands exact."
     assert reloaded.archivist_prompt.toPlainText() == "Search memory carefully."
     assert reloaded.commit_message_guidance.toPlainText() == "Keep commits short."

@@ -25,7 +25,7 @@ from services.crew_context import crew_context_window
 from services.compaction import compact_with_result, compaction_threshold
 from services.model_registry import context_window_tokens, get_model_config, resolve_api_key
 from services.model_requests import apply_generation_params
-from services.content import build_user_content, content_preview, prepare_for_anthropic, prepare_for_openai
+from services.content import build_user_content, content_length, content_preview, prepare_for_anthropic, prepare_for_openai
 from services.file_refs import files_for_refs
 from services.tool_policy import ConversationToolPolicy, ToolApprovalBus, resolve_path
 from services.shell_tool import is_shell_tool
@@ -46,6 +46,8 @@ _ACTIVE_TASK_PREVIEW_CHARS = 500
 _CREW_ONLY_TOOLS = {"search_project_chats", "read_project_chat"}
 _CHUNK_EMIT_INTERVAL_SEC = 0.10
 _CHUNK_EMIT_MAX_CHARS = 512
+_MIN_COMPACTED_MESSAGE_CHARS = 4_000
+_MAX_OVERSIZED_MESSAGE_COMPACTION_PASSES = 8
 _CHATML_CONTROL_TOKEN_RE = re.compile(
     r"<\|im_end\|>|<\|im_start\|>(?:system|user|assistant|tool)?",
 )
@@ -61,6 +63,7 @@ class ChatThread(QThread):
     crew_done    = pyqtSignal(dict, str)
     crew_error   = pyqtSignal(dict, str)
     runtime_event = pyqtSignal(dict)
+    history_updated = pyqtSignal()
     done        = pyqtSignal(str)
     error       = pyqtSignal(str)
 
@@ -73,7 +76,10 @@ class ChatThread(QThread):
                  crew_settings: dict | None = None,
                  configured_providers: set[str] | None = None,
                  deferred_file_refs: list[str] | tuple[str, ...] | None = None,
-                 deferred_file_target: int | None = None):
+                 deferred_file_target: int | None = None,
+                 extra_tools: list[dict] | tuple[dict, ...] | None = None,
+                 extra_tool_executor=None,
+                 tool_surface: str = "chat"):
         super().__init__()
         self.model          = model
         self._model_cfg     = get_model_config(model)
@@ -92,6 +98,9 @@ class ChatThread(QThread):
         self._configured_providers = set(configured_providers or set())
         self._deferred_file_refs = list(deferred_file_refs or [])
         self._deferred_file_target = deferred_file_target
+        self._extra_tools = list(extra_tools or [])
+        self._extra_tool_executor = extra_tool_executor
+        self._tool_surface = str(tool_surface or "chat")
         self._chunk_buffer: list[str] = []
         self._last_chunk_emit = 0.0
         self.last_usage: dict = {}
@@ -123,19 +132,33 @@ class ChatThread(QThread):
         msg["content"] = _content_with_file_blocks(msg.get("content", ""), files)
 
     def _tools_anthropic(self) -> list:
-        tools = tools_anthropic(self.cwd)
+        tools = tools_anthropic(self.cwd, surface=self._tool_surface)
         allowed = None if self._allowed_tools is None else set(self._allowed_tools)
+        extra = [tool for tool in self._extra_tools if isinstance(tool, dict) and tool.get("name")]
         if allowed is None:
             selected = [t for t in tools if t["name"] not in _CREW_ONLY_TOOLS]
         else:
             selected = [t for t in tools if t["name"] in allowed]
+            selected += [t for t in extra if t["name"] in allowed]
         if self._enable_crew_tool and (allowed is None or ASK_CREW_TOOL_NAME in allowed):
             selected = selected + [ask_crew_tool_anthropic()]
         return selected
 
     def _tools_openai(self) -> list:
-        tools = tools_openai(self.cwd)
+        tools = tools_openai(self.cwd, surface=self._tool_surface)
         allowed = None if self._allowed_tools is None else set(self._allowed_tools)
+        extra = [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {}),
+                },
+            }
+            for t in self._extra_tools
+            if isinstance(t, dict) and t.get("name")
+        ]
         if allowed is None:
             selected = [
                 t for t in tools
@@ -143,6 +166,7 @@ class ChatThread(QThread):
             ]
         else:
             selected = [t for t in tools if t["function"]["name"] in allowed]
+            selected += [t for t in extra if t["function"]["name"] in allowed]
         if self._enable_crew_tool and (allowed is None or ASK_CREW_TOOL_NAME in allowed):
             selected = selected + [ask_crew_tool_openai()]
         return selected
@@ -266,6 +290,7 @@ class ChatThread(QThread):
                 "role":    "assistant",
                 "content": _serialize_anthropic(message.content),
             })
+            self.history_updated.emit()
 
             tool_results = []
             tools = [
@@ -286,6 +311,7 @@ class ChatThread(QThread):
                     "content": self._tool_results_with_active_task(tool_results),
                     "synthetic": "tool_results",
                 })
+                self.history_updated.emit()
                 if not self._run_runtime_hook("before_next_model_request"):
                     break
             else:
@@ -370,6 +396,7 @@ class ChatThread(QThread):
                     ],
                 }
                 self.history.append(assistant_msg)
+                self.history_updated.emit()
                 ordered = sorted(pending.items())
                 tools = [(s["id"], s["name"], json.loads(s["args"])) for _, s in ordered]
                 for tool_id, name, output in self._execute_tools(tools):
@@ -378,9 +405,11 @@ class ChatThread(QThread):
                         "tool_call_id": tool_id,
                         "content":      output,
                     })
+                    self.history_updated.emit()
                 anchor = self._active_task_anchor()
                 if anchor:
                     self.history.append({"role": "user", "content": anchor, "synthetic": "active_task"})
+                    self.history_updated.emit()
                 if not self._run_runtime_hook("before_next_model_request"):
                     break
             else:
@@ -424,6 +453,29 @@ class ChatThread(QThread):
             estimate = _estimate_model_request_tokens(provider, self.system, self.history, tools)
 
         if estimate > window:
+            reduced = _compact_oversized_history_messages(
+                provider,
+                self.system,
+                self.history,
+                tools,
+                window,
+            )
+            if reduced != self.history:
+                self.history = reduced
+                estimate = _estimate_model_request_tokens(provider, self.system, self.history, tools)
+                self.runtime_event.emit({
+                    "type": "compaction",
+                    "status": "compacted",
+                    "source": "auto-preflight-oversized-message",
+                    "proof": {
+                        "version": "aicc-compaction/v1",
+                        "source": "auto-preflight-oversized-message",
+                        "status": "compacted",
+                        "model": self.model,
+                    },
+                })
+
+        if estimate > window:
             raise ValueError(
                 f"Context is too large for {self.model}: estimated prompt is "
                 f"{estimate:,} tokens, model window is {window:,}. "
@@ -440,6 +492,7 @@ class ChatThread(QThread):
                 text = str(params.get("text") or "").strip()
                 if text:
                     self.history.append({"role": "user", "content": text, "synthetic": "extension"})
+                    self.history_updated.emit()
             elif action in {"compact_now", "compact_and_resume"}:
                 if not self._apply_compaction_directive(action, params):
                     return False
@@ -485,6 +538,7 @@ class ChatThread(QThread):
                 "content": resume_prompt,
                 "synthetic": "extension_resume",
             })
+            self.history_updated.emit()
         return True
 
     def _execute_tools(self, tools: list[tuple[str, str, dict]]) -> list[tuple[str, str, str]]:
@@ -541,6 +595,13 @@ class ChatThread(QThread):
             return tool_id, name, blocked
         if name == ASK_CREW_TOOL_NAME:
             return tool_id, name, self._execute_ask_crew(inputs)
+        if self._extra_tool_executor is not None and any(
+            isinstance(tool, dict) and tool.get("name") == name for tool in self._extra_tools
+        ):
+            self.tool_called.emit(name, inputs)
+            output = self._execute_extra_tool(name, inputs)
+            self.tool_result.emit(name, output)
+            return tool_id, name, output
         scoped = self._check_tool_scope(name, inputs)
         if scoped:
             self.tool_result.emit(name, scoped)
@@ -591,6 +652,11 @@ class ChatThread(QThread):
                 return idx, tool_id, name, blocked
             if name == ASK_CREW_TOOL_NAME:
                 return idx, tool_id, name, self._execute_ask_crew(inputs)
+            if self._extra_tool_executor is not None and any(
+                isinstance(tool, dict) and tool.get("name") == name for tool in self._extra_tools
+            ):
+                self.tool_called.emit(name, inputs)
+                return idx, tool_id, name, self._execute_extra_tool(name, inputs)
             scoped = self._check_tool_scope(name, inputs)
             if scoped:
                 return idx, tool_id, name, scoped
@@ -626,6 +692,18 @@ class ChatThread(QThread):
         for _, name, output in results:
             self.tool_result.emit(name, output)
         return results
+
+    def _execute_extra_tool(self, name: str, inputs: dict) -> str:
+        try:
+            result = self._extra_tool_executor(name, inputs, self._cancel)
+        except Exception as exc:
+            return f"[tool error] {name} failed: {exc}"
+        if isinstance(result, str):
+            return result
+        try:
+            return json.dumps(result, indent=2)
+        except TypeError:
+            return str(result)
 
     def _check_tool_gate(self, name: str, inputs: dict) -> str | None:
         if not self._approval_bus:
@@ -808,6 +886,72 @@ def _estimate_model_request_tokens(provider: str, system: str, history: list[dic
     }
     raw = json.dumps(payload, ensure_ascii=False, default=str)
     return max(1, len(raw.encode("utf-8")) // 4)
+
+
+def _compact_oversized_history_messages(
+    provider: str,
+    system: str,
+    history: list[dict],
+    tools: list,
+    window: int,
+) -> list[dict]:
+    compacted = [dict(message) for message in history]
+    target_tokens = min(window, compaction_threshold(window))
+    for _ in range(_MAX_OVERSIZED_MESSAGE_COMPACTION_PASSES):
+        estimate = _estimate_model_request_tokens(provider, system, compacted, tools)
+        if estimate <= window:
+            return compacted
+        index = _largest_reducible_message_index(compacted)
+        if index is None:
+            return compacted
+        current = compacted[index]
+        current_len = content_length(current.get("content", ""))
+        if current_len <= _MIN_COMPACTED_MESSAGE_CHARS:
+            return compacted
+        over_tokens = max(estimate - target_tokens, estimate - window, 512)
+        target_chars = max(_MIN_COMPACTED_MESSAGE_CHARS, current_len - over_tokens * 4)
+        if target_chars >= current_len:
+            target_chars = max(_MIN_COMPACTED_MESSAGE_CHARS, current_len // 2)
+        reduced = _compact_message_content(current.get("content", ""), target_chars)
+        if content_length(reduced) >= current_len:
+            return compacted
+        updated = dict(current)
+        updated["content"] = reduced
+        updated["synthetic_compacted"] = "oversized_message"
+        compacted[index] = updated
+    return compacted
+
+
+def _largest_reducible_message_index(history: list[dict]) -> int | None:
+    best_index: int | None = None
+    best_len = 0
+    for index, message in enumerate(history):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") not in {"user", "assistant", "tool"}:
+            continue
+        length = content_length(message.get("content", ""))
+        if length > best_len and length > _MIN_COMPACTED_MESSAGE_CHARS:
+            best_index = index
+            best_len = length
+    return best_index
+
+
+def _compact_message_content(content, target_chars: int) -> str:
+    text = content_preview(content)
+    if len(text) <= target_chars:
+        return text
+    marker = (
+        "\n\n[Context compacted: middle content omitted before model request "
+        "because this single message exceeded the selected model window. "
+        "Use the retained head/tail and ask for missing detail if needed.]\n\n"
+    )
+    budget = max(0, target_chars - len(marker))
+    if budget <= 0:
+        return marker.strip()
+    head_len = max(1, int(budget * 0.62))
+    tail_len = max(1, budget - head_len)
+    return text[:head_len].rstrip() + marker + text[-tail_len:].lstrip()
 
 
 def _sanitize_chatml_content(text: str) -> str:

@@ -758,6 +758,30 @@ def test_files_tree_action_thread_discards_with_error_data(qapp, workspace, monk
     assert done == [("discard", "", "nope")]
 
 
+def test_files_tree_action_thread_discards_multiple_files(qapp, workspace, monkeypatch):
+    done = []
+    main = workspace / "src" / "main.py"
+    note = workspace / "note.txt"
+    note.write_text("new\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        "ui.widgets.left_panel.discard_files",
+        lambda repo_path, paths, **_kwargs: calls.append((repo_path, paths)) or GitCommandResult(0, "", ""),
+    )
+    thread = _FileTreeActionThread(
+        str(workspace),
+        "discard",
+        [str(main), str(note)],
+        rel_path=["src/main.py", "note.txt"],
+    )
+    thread.done.connect(lambda *args: done.append(args))
+
+    thread.run()
+
+    assert calls == [(str(workspace), ["src/main.py", "note.txt"])]
+    assert done == [("discard", str(main), "")]
+
+
 def test_files_tree_delete_rejects_workspace_root(qapp, workspace):
     tree = FileTree(str(workspace))
 
@@ -794,8 +818,31 @@ def test_files_tree_delete_dialog_removes_confirmed_path(qapp, workspace, monkey
 
     tree._delete_path_dialog(str(path))
 
-    assert actions == [("delete", str(path), {})]
+    assert actions == [("delete", [str(path)], {})]
     assert path.exists()
+
+
+def test_files_tree_delete_dialog_removes_multiple_confirmed_files(qapp, workspace, monkeypatch):
+    extra = workspace / "note.txt"
+    extra.write_text("note\n", encoding="utf-8")
+    tree = FileTree(str(workspace))
+    path = workspace / "src" / "main.py"
+    actions = []
+    monkeypatch.setattr(
+        "ui.widgets.left_panel.QMessageBox.question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+    monkeypatch.setattr(
+        tree,
+        "_start_action",
+        lambda action, queued_path, **kwargs: actions.append((action, queued_path, kwargs)),
+    )
+
+    tree._delete_path_dialog([str(path), str(extra)])
+
+    assert actions == [("delete", [str(path), str(extra)], {})]
+    assert path.exists()
+    assert extra.exists()
 
 
 def test_files_tree_discard_option_only_for_modified_files(qapp, workspace):
@@ -837,7 +884,7 @@ def test_files_tree_discard_dialog_restores_modified_file(qapp, workspace, monke
     tree._discard_file_dialog(str(path))
 
     assert actions == [
-        ("discard", str(path), {"rel_path": "src/main.py", "staged": False})
+        ("discard", [str(path)], {"rel_path": ["src/main.py"], "staged": False})
     ]
     assert questions
     assert questions[0][0] is tree
@@ -864,7 +911,39 @@ def test_files_tree_discard_dialog_restores_staged_modified_file(qapp, workspace
     tree._discard_file_dialog(str(path))
 
     assert actions == [
-        ("discard", str(path), {"rel_path": "src/main.py", "staged": True})
+        ("discard", [str(path)], {"rel_path": ["src/main.py"], "staged": True})
+    ]
+
+
+def test_files_tree_discard_dialog_restores_multiple_modified_files(qapp, workspace, monkeypatch):
+    first = workspace / "src" / "main.py"
+    second = workspace / "src" / "other.py"
+    first.write_text("print('first')\n", encoding="utf-8")
+    second.write_text("print('second')\n", encoding="utf-8")
+    tree = FileTree(str(workspace))
+    tree._git_by_path = {
+        _path_key(str(first)): (" M", "M"),
+        _path_key(str(second)): (" M", "M"),
+    }
+    actions = []
+    monkeypatch.setattr(
+        tree,
+        "_start_action",
+        lambda action, queued_path, **kwargs: actions.append((action, queued_path, kwargs)),
+    )
+    monkeypatch.setattr(
+        "ui.widgets.left_panel.QMessageBox.question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Discard,
+    )
+
+    tree._discard_file_dialog([str(first), str(second)])
+
+    assert actions == [
+        (
+            "discard",
+            [str(first), str(second)],
+            {"rel_path": ["src/main.py", "src/other.py"], "staged": False},
+        )
     ]
 
 

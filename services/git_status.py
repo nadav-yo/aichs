@@ -167,11 +167,17 @@ def list_file_changes(repo_path: str) -> list[GitFileChange]:
     return list(read_git_status_snapshot(repo_path).changes)
 
 
-def read_git_status_snapshot(repo_path: str, *, check_repo: bool = True) -> GitStatusSnapshot:
+def read_git_status_snapshot(
+    repo_path: str,
+    *,
+    check_repo: bool = True,
+    untracked_mode: str = "all",
+) -> GitStatusSnapshot:
     """Return status, branch, and local upstream counts from one status call."""
     if check_repo and not is_git_repo(repo_path):
         return GitStatusSnapshot()
-    status = run_git(["git", "status", "--short", "--branch", "-uall"], repo_path)
+    untracked_flag = "-unormal" if untracked_mode == "normal" else "-uall"
+    status = run_git(["git", "status", "--short", "--branch", untracked_flag], repo_path)
     return parse_status_snapshot(repo_path, status)
 
 

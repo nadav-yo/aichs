@@ -238,6 +238,34 @@ def test_main_window_close_last_file_hides_viewer_not_chat(
         qapp.setStyleSheet(app_style)
 
 
+def test_main_window_close_canvas_opened_file_keeps_canvas(
+    qapp, workspace, quiet_file_language
+):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    window = MainWindow(startup_workspace=str(workspace))
+    opened = workspace / "src" / "main.py"
+    try:
+        window._open_file_from_canvas(str(opened))
+
+        assert not window._viewer.isHidden()
+        assert window._left.active_activity() == "canvas"
+        assert window._workbench_left.currentWidget() is window._agent_canvas
+
+        assert window._viewer.close_current_tab() is True
+
+        assert window._viewer.isHidden()
+        assert window._left.active_activity() == "canvas"
+        assert window._workbench_left.currentWidget() is window._agent_canvas
+    finally:
+        _settle_file_viewer_workers(qapp)
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
 def test_main_window_left_rail_search_and_extensions_actions(qapp, workspace, monkeypatch):
     cwd = os.getcwd()
     app_style = qapp.styleSheet()

@@ -78,18 +78,18 @@ def registry_for(cwd: str | None = None) -> ToolRegistry:
     return registry
 
 
-def tools_anthropic(cwd: str | None = None) -> list:
+def tools_anthropic(cwd: str | None = None, *, surface: str = "chat") -> list:
     return [
         {
             "name": tool.name,
             "description": tool.description,
             "input_schema": tool.input_schema,
         }
-        for tool in registry_for(cwd).all()
+        for tool in registry_for(cwd).all(surface=surface)
     ]
 
 
-def tools_openai(cwd: str | None = None) -> list:
+def tools_openai(cwd: str | None = None, *, surface: str = "chat") -> list:
     return [
         {
             "type": "function",
@@ -99,7 +99,7 @@ def tools_openai(cwd: str | None = None) -> list:
                 "parameters":  t["input_schema"],
             },
         }
-        for t in tools_anthropic(cwd)
+        for t in tools_anthropic(cwd, surface=surface)
     ]
 
 
@@ -192,9 +192,11 @@ def _register_builtin_tools(registry: ToolRegistry) -> None:
                 "content": {
                     "type": "string",
                     "description": (
-                        "Content for creating a new file. Use only when the file does "
-                        "not exist, and do not combine with append or edits. Use "
-                        "actual newline characters, not escaped '\\n' text."
+                        "Plain string content for creating a new file. Use only when "
+                        "the file does not exist, and do not combine with append or "
+                        "edits. Do not pass an object, array, or {'text': ...}; put "
+                        "the full file text directly in this string. Use actual "
+                        "newline characters, not escaped '\\n' text."
                     ),
                 },
                 "append": {
@@ -481,7 +483,13 @@ def _edit_file(inputs: dict, cwd: str) -> str:
     if has_content:
         content = inputs["content"]
         if not isinstance(content, str):
-            return "[tool error] edit_file content must be a string"
+            actual = type(content).__name__
+            return (
+                f"[tool error] edit_file content must be a string, got {actual}. "
+                "Retry with content set directly to the full file text, for example "
+                '{"path":"notes.md","content":"# Title\\nBody\\n"}. Do not wrap '
+                "content in an object, list, or markdown block field."
+            )
         newline_err = _literal_newline_error("content", content)
         if newline_err:
             return newline_err

@@ -42,6 +42,38 @@ DEFAULT_ARCHIVIST_PROMPT = (
     "Use read_project_chat for dropped references and search_project_chats to search memory. "
     "Be concise; cite chat titles or ids when useful."
 )
+GRAPH_AGENT_PROMPT_KEY = "graph_agent_prompt"
+GRAPH_GENERATION_STRATEGY_KEY = "graph_generation_strategy"
+DEFAULT_GRAPH_GENERATION_STRATEGY = "parallelism"
+_VALID_GRAPH_GENERATION_STRATEGIES = frozenset({"parallelism", "atomicity"})
+CANVAS_RUN_MODE_KEY = "canvas_run_mode"
+DEFAULT_CANVAS_RUN_MODE = "sequential"
+_VALID_CANVAS_RUN_MODES = frozenset({"sequential", "parallel"})
+CANVAS_PARALLEL_LIMIT_KEY = "canvas_parallel_limit"
+DEFAULT_CANVAS_PARALLEL_LIMIT = 2
+MIN_CANVAS_PARALLEL_LIMIT = 1
+MAX_CANVAS_PARALLEL_LIMIT = 6
+CANVAS_ACTION_AUTO_APPROVE_KEY = "canvas_action_auto_approve"
+DEFAULT_CANVAS_ACTION_AUTO_APPROVE = "never"
+_VALID_CANVAS_ACTION_AUTO_APPROVE = frozenset({"never", "coder", "all"})
+DEFAULT_GRAPH_AGENT_PROMPT = """\
+You are the Intent Graph agent.
+Your job is to help the user shape mega-feature work as an acyclic graph, not as a transcript, checklist, or one-chat prompt.
+Use the current graph as the source of truth. Query it before suggesting changes.
+When planning or generating steps, design how agents should research, implement, review, and verify the goal. Do not perform that research, implementation, review, or verification yourself.
+Use the graph when the feature benefits from decomposition: multiple responsibilities, unknowns, decision points, context boundaries, file scopes, review paths, or acceptance evidence.
+Use web_fetch only for graph-planning research: external product/domain context, public docs, examples, or constraints that help shape the graph. Do not use fetched content as implementation proof or claim implementation work is done.
+If the goal can be summarized as one straightforward chat prompt, do not inflate it into Analyze -> Implement -> Verify. Keep it minimal or ask the user what larger breakdown they want.
+Prefer small graph edits: add a goal, add work, attach files as scope, assign crew, add evidence, add a decision, connect valid components, autoformat.
+Keep generated plans compact: usually 3-5 new nodes total, and fewer is better when the graph already has useful structure. Do not overcomplicate the graph to show off every possible component.
+Use a straight flow when the work is naturally sequential. Branch only when it clarifies real parallel work, alternatives, dependencies, review paths, or separate acceptance evidence.
+Break down by responsibility, not by generic phases. Prefer nodes like product decision, architecture decision, UX flow, API surface, state/persistence, integration, validation, review, or rollout when those responsibilities are actually distinct.
+Reuse and connect existing nodes before adding new ones. Do not create duplicate actions, duplicate file/context nodes, or one box per sentence.
+Only create a node when it has a distinct responsibility, input, or output in the workflow.
+Ask concise questions about design details: user-facing behavior, product intent, UX priorities, acceptance criteria, constraints, risk tolerance, or business tradeoffs. Ask one focused question per turn, but use multiple question turns when each answer can change the graph shape.
+Do not ask the user to choose implementation details such as engines, frameworks, libraries, file paths, or technical approaches during Generate Steps. Represent those as architecture/research/decision work for the crew unless the user explicitly made the technical choice the goal.
+Never create a directed cycle. If the user asks for a cyclic relationship, explain the cycle and suggest a non-cyclic alternative.
+Keep the graph high-level: do not add boxes just to mirror every sentence."""
 TRASH_RETENTION_DAYS_KEY = "trash_retention_days"
 DEFAULT_TRASH_RETENTION_DAYS = 14
 GIT_PANEL_MODE_KEY = "git_panel_mode"
@@ -122,6 +154,37 @@ def compaction_summary_guidance(data: dict | None) -> str:
 
 def archivist_prompt(data: dict | None) -> str:
     return _text_setting(data, ARCHIVIST_PROMPT_KEY, DEFAULT_ARCHIVIST_PROMPT)
+
+
+def graph_agent_prompt(data: dict | None) -> str:
+    return _text_setting(data, GRAPH_AGENT_PROMPT_KEY, DEFAULT_GRAPH_AGENT_PROMPT)
+
+
+def graph_generation_strategy(data: dict | None) -> str:
+    data = data if isinstance(data, dict) else {}
+    value = str(data.get(GRAPH_GENERATION_STRATEGY_KEY, DEFAULT_GRAPH_GENERATION_STRATEGY) or "").strip().lower()
+    return value if value in _VALID_GRAPH_GENERATION_STRATEGIES else DEFAULT_GRAPH_GENERATION_STRATEGY
+
+
+def canvas_run_mode(data: dict | None) -> str:
+    data = data if isinstance(data, dict) else {}
+    value = str(data.get(CANVAS_RUN_MODE_KEY, DEFAULT_CANVAS_RUN_MODE) or "").strip().lower()
+    return value if value in _VALID_CANVAS_RUN_MODES else DEFAULT_CANVAS_RUN_MODE
+
+
+def canvas_parallel_limit(data: dict | None) -> int:
+    data = data if isinstance(data, dict) else {}
+    try:
+        value = int(data.get(CANVAS_PARALLEL_LIMIT_KEY, DEFAULT_CANVAS_PARALLEL_LIMIT))
+    except (TypeError, ValueError):
+        value = DEFAULT_CANVAS_PARALLEL_LIMIT
+    return max(MIN_CANVAS_PARALLEL_LIMIT, min(MAX_CANVAS_PARALLEL_LIMIT, value))
+
+
+def canvas_action_auto_approve(data: dict | None) -> str:
+    data = data if isinstance(data, dict) else {}
+    value = str(data.get(CANVAS_ACTION_AUTO_APPROVE_KEY, DEFAULT_CANVAS_ACTION_AUTO_APPROVE) or "").strip().lower()
+    return value if value in _VALID_CANVAS_ACTION_AUTO_APPROVE else DEFAULT_CANVAS_ACTION_AUTO_APPROVE
 
 
 def git_panel_mode(data: dict | None) -> str:

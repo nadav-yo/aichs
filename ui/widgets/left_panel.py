@@ -301,6 +301,40 @@ def _paint_file_icon(
         )
 
 
+def _activity_attention_icon(key: str, *, active: bool = False) -> QIcon:
+    theme = current_theme()
+    cache_key = (theme, "activity_attention", key, active)
+    cached = _ICON_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    p = palette()
+    pixmap = QPixmap(18, 18)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+    line = QColor(p["TEXT"] if active else p["TEXT_DIM"])
+    fill = QColor(p["BG3"])
+    painter.setPen(QPen(line, 1.4))
+    painter.setBrush(QBrush(fill))
+    if key == "canvas":
+        painter.drawRoundedRect(QRectF(3, 4, 12, 10), 2.5, 2.5)
+        painter.drawLine(6, 7, 12, 7)
+        painter.drawLine(6, 10, 10, 10)
+    else:
+        painter.drawRoundedRect(QRectF(4, 4, 10, 10), 2.5, 2.5)
+
+    painter.setPen(QPen(QColor("#1f2937"), 1))
+    painter.setBrush(QBrush(QColor("#f59e0b")))
+    painter.drawEllipse(QRectF(11.2, 1.8, 5.2, 5.2))
+    painter.end()
+
+    icon = QIcon(pixmap)
+    _ICON_CACHE[cache_key] = icon
+    return icon
+
+
 class _PathLabel(QLabel):
     """Workspace folder name; elides when the sidebar is narrow."""
 
@@ -488,19 +522,25 @@ class _FileTreeActionThread(QThread):
         self,
         root_path: str,
         action: str,
-        path: str,
+        path: str | list[str],
         parent=None,
         *,
         name: str = "",
-        rel_path: str = "",
+        rel_path: str | list[str] = "",
         staged: bool = False,
     ):
         super().__init__(parent)
         self._root_path = root_path
         self._action = action
-        self._path = path
+        self._paths = [path] if isinstance(path, str) else list(path)
+        if not self._paths:
+            raise ValueError("No paths provided for action")
+        if len(self._paths) > 1 and action not in {"delete", "discard"}:
+            raise ValueError(f"Action {action!r} expects one path.")
+        self._path = self._paths[0]
         self._name = name
-        self._rel_path = rel_path
+        rel_paths = [rel_path] if isinstance(rel_path, str) else list(rel_path)
+        self._rel_paths = rel_paths
         self._staged = staged
 
     def run(self):
@@ -512,10 +552,13 @@ class _FileTreeActionThread(QThread):
             elif self._action == "rename":
                 result_path = _rename_workspace_path(self._root_path, self._path, self._name)
             elif self._action == "delete":
-                _delete_workspace_path(self._root_path, self._path)
-                result_path = Path(self._path)
+                for path in self._paths:
+                    _delete_workspace_path(self._root_path, path)
+                result_path = Path(self._paths[0])
             elif self._action == "discard":
-                result = discard_files(self._root_path, [self._rel_path], staged=self._staged)
+                if len(self._paths) != len(self._rel_paths):
+                    raise ValueError("Discard action path mismatch.")
+                result = discard_files(self._root_path, self._rel_paths, staged=self._staged)
                 if not result.ok:
                     detail = "\n".join(
                         part for part in (result.stdout, result.stderr) if part
@@ -558,6 +601,8 @@ class FileTree(QTreeWidget):
         self.setAnimated(False)
         self.setUniformRowHeights(True)
         self.setAllColumnsShowFocus(False)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setIconSize(QSize(18, 18))
         self.setStyle(QStyleFactory.create("Fusion"))
         self.setDragEnabled(True)
@@ -661,6 +706,38 @@ class FileTree(QTreeWidget):
             return str(Path(path).parent)
         return self.root_path
 
+    def _selected_paths(self) -> list[str]:
+        paths: list[str] = []
+        seen: set[str] = set()
+        for item in self.selectedItems():
+            path = item.data(0, Qt.ItemDataRole.UserRole)
+            if not path:
+                continue
+            if path in seen:
+                continue
+            seen.add(path)
+            paths.append(path)
+        return paths
+
+    @staticmethod
+    def _as_path_list(paths: str | list[str]) -> list[str]:
+        return [paths] if isinstance(paths, str) else list(paths)
+
+    def _all_discardable_selected(self, paths: list[str]) -> bool | None:
+        if not paths:
+            return None
+        staged: set[bool] = set()
+        for path in paths:
+            if not os.path.isfile(path):
+                return None
+            code = self._git_by_path.get(_path_key(path), ("", ""))[0]
+            if code not in {" M", "M "}:
+                return None
+            staged.add(code == "M ")
+        if len(staged) != 1:
+            return None
+        return next(iter(staged))
+
     def _open_selected(self):
         path = self._current_path()
         if os.path.isfile(path):
@@ -680,9 +757,13 @@ class FileTree(QTreeWidget):
             self._rename_path_dialog(path)
 
     def _delete_selected(self):
-        path = self._current_path()
-        if path:
-            self._delete_path_dialog(path)
+        paths = self._selected_paths()
+        if not paths:
+            path = self._current_path()
+            if path:
+                paths = [path]
+        if paths:
+            self._delete_path_dialog(paths)
 
     def _copy_selected_relative_path(self):
         path = self._current_path()
@@ -723,7 +804,12 @@ class FileTree(QTreeWidget):
         menu = QMenu(self)
         item = self.itemAt(pos)
         path = item.data(0, Qt.ItemDataRole.UserRole) if item else ""
-        if path and os.path.isdir(path):
+        selected = self._selected_paths()
+        if not path:
+            selected = []
+        if path and path not in selected:
+            selected = [path]
+        if selected and len(selected) == 1 and path and os.path.isdir(path):
             new_file = QAction("New File...", self)
             new_file.setShortcut(QKeySequence("Ctrl+Alt+N"))
             new_file.triggered.connect(lambda: self._new_file_dialog(path))
@@ -737,12 +823,15 @@ class FileTree(QTreeWidget):
             rename_folder.triggered.connect(lambda: self._rename_path_dialog(path))
             menu.addAction(rename_folder)
             menu.addSeparator()
-            delete_folder = QAction("Delete...", self)
+            delete_folder = QAction(
+                "Delete...",
+                self,
+            )
             delete_folder.setShortcut(QKeySequence("Delete"))
-            delete_folder.triggered.connect(lambda: self._delete_path_dialog(path))
+            delete_folder.triggered.connect(lambda: self._delete_path_dialog(selected))
             menu.addAction(delete_folder)
             menu.addSeparator()
-        elif path and os.path.isfile(path):
+        elif path and selected and len(selected) == 1 and os.path.isfile(path):
             attach = QAction("Attach to message", self)
             attach.triggered.connect(lambda: self.file_attached.emit(path))
             menu.addAction(attach)
@@ -756,11 +845,28 @@ class FileTree(QTreeWidget):
             menu.addAction(rename)
             delete_file = QAction("Delete...", self)
             delete_file.setShortcut(QKeySequence("Delete"))
-            delete_file.triggered.connect(lambda: self._delete_path_dialog(path))
+            delete_file.triggered.connect(lambda: self._delete_path_dialog(selected))
             menu.addAction(delete_file)
             if self._is_discardable_modified_file(path):
                 discard = QAction("Discard changes...", self)
-                discard.triggered.connect(lambda: self._discard_file_dialog(path))
+                discard.triggered.connect(lambda: self._discard_file_dialog(selected))
+                menu.addAction(discard)
+            menu.addSeparator()
+        elif selected:
+            delete_selected = QAction(
+                f"Delete {len(selected)} items..." if len(selected) > 1 else "Delete...",
+                self,
+            )
+            delete_selected.setShortcut(QKeySequence("Delete"))
+            delete_selected.triggered.connect(lambda: self._delete_path_dialog(selected))
+            menu.addAction(delete_selected)
+            staged = self._all_discardable_selected(selected)
+            if staged is not None:
+                discard = QAction(
+                    f"Discard changes for {len(selected)} files...",
+                    self,
+                )
+                discard.triggered.connect(lambda: self._discard_file_dialog(selected, staged=staged))
                 menu.addAction(discard)
             menu.addSeparator()
         refresh = QAction("Refresh", self)
@@ -792,44 +898,75 @@ class FileTree(QTreeWidget):
     def _rename_file_dialog(self, path: str):
         self._rename_path_dialog(path)
 
-    def _discard_file_dialog(self, path: str):
-        rel_path = self._repo_relative_path(path)
-        if not rel_path:
+    def _discard_file_dialog(self, path: str | list[str], staged: bool | None = None):
+        selected = self._as_path_list(path)
+        if not selected:
             return
+        if staged is None:
+            staged = self._all_discardable_selected(selected)
+            if staged is None:
+                return
+        rel_paths: list[str] = []
+        for item_path in selected:
+            rel_path = self._repo_relative_path(item_path)
+            if not rel_path:
+                return
+            rel_paths.append(rel_path)
+        if not rel_paths:
+            return
+        files_label = "file" if len(rel_paths) == 1 else "files"
+        count = len(rel_paths)
+        rel_summary = ", ".join(rel_paths[:4])
+        if count > 4:
+            rel_summary += ", ..."
+        detail = (
+            f"Discard changes to {count} selected {files_label}?\n"
+            f"({rel_summary})\n\n"
+            "This permanently removes the selected file changes."
+        )
+        if staged:
+            detail += "\n\nAny unstaged edits on these files will also be discarded."
         answer = QMessageBox.question(
             self,
             "Discard changes?",
-            f"Discard changes to '{rel_path}'?\n\nThis permanently removes the file changes.",
+            detail,
             QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
         if answer != QMessageBox.StandardButton.Discard:
             return
-        code = self._git_by_path.get(_path_key(path), ("", ""))[0]
-        staged = code[:1] == "M" and (code + " ")[1] == " "
-        self._start_action("discard", path, rel_path=rel_path, staged=staged)
+        self._start_action("discard", selected, rel_path=rel_paths, staged=staged)
 
-    def _delete_path_dialog(self, path: str):
-        target = Path(path)
-        kind = "folder" if target.is_dir() else "file"
+    def _delete_path_dialog(self, paths: str | list[str]):
+        targets = self._as_path_list(paths)
+        if not targets:
+            return
+        target = Path(targets[0]) if len(targets) == 1 else None
+        if target is None:
+            title = f"Delete {len(targets)} items"
+            message = f"Delete {len(targets)} selected items?"
+        else:
+            kind = "folder" if target.is_dir() else "file"
+            title = f"Delete {kind}"
+            message = f"Delete {kind} '{target.name}'?"
         answer = QMessageBox.question(
             self,
-            f"Delete {kind}",
-            f"Delete {kind} '{target.name}'?",
+            title,
+            message,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self._start_action("delete", path)
+        self._start_action("delete", targets)
 
     def _start_action(
         self,
         action: str,
-        path: str,
+        path: str | list[str],
         *,
         name: str = "",
-        rel_path: str = "",
+        rel_path: str | list[str] = "",
         staged: bool = False,
     ) -> None:
         if self._shutting_down:
@@ -1517,6 +1654,7 @@ class LeftPanel(QWidget):
     text_search_requested = pyqtSignal()
     extensions_requested  = pyqtSignal()
     workspace_requested   = pyqtSignal()
+    canvas_requested      = pyqtSignal()
     activity_selected     = pyqtSignal(str)
     activity_panel_collapsed_changed = pyqtSignal(bool)
     settings_changed = pyqtSignal()
@@ -1535,6 +1673,7 @@ class LeftPanel(QWidget):
         self._settings = settings or SettingsStore()
         self._activity_buttons: dict[str, QPushButton] = {}
         self._activity_widgets: dict[str, QWidget] = {}
+        self._activity_attention: dict[str, bool] = {}
         self._active_activity = "chats"
         self._collapsed_width = ACTIVITY_RAIL_WIDTH
         self._expanded_min_width = MIN_ACTIVITY_WIDTH
@@ -1606,6 +1745,7 @@ class LeftPanel(QWidget):
         git_layout.addWidget(self._git, 1)
 
         self._add_activity_action("workspace", "Work", rail_layout, tooltip="Workspace")
+        self._add_activity_action("canvas", "Canvas", rail_layout, tooltip="Agent Canvas")
         self._add_activity("chats", "Chats", self._conv, rail_layout)
         self._add_activity("files", "Files", files_wrap, rail_layout)
         self._add_activity("git", "Git", git_wrap, rail_layout)
@@ -1671,6 +1811,9 @@ class LeftPanel(QWidget):
         if key == "workspace":
             self.show_workspace_activity()
             return
+        if key == "canvas":
+            self.show_canvas_activity()
+            return
         if key == self._active_activity and not self.is_activity_panel_collapsed():
             self.collapse_activity_panel()
             return
@@ -1681,6 +1824,12 @@ class LeftPanel(QWidget):
         self.collapse_activity_panel()
         self._sync_activity_buttons()
         self.workspace_requested.emit()
+
+    def show_canvas_activity(self):
+        self._active_activity = "canvas"
+        self.collapse_activity_panel()
+        self._sync_activity_buttons()
+        self.canvas_requested.emit()
 
     def set_active_activity(self, key: str, *, expand: bool = True):
         widget = self._activity_widgets.get(key)
@@ -1697,6 +1846,13 @@ class LeftPanel(QWidget):
 
     def active_activity(self) -> str:
         return self._active_activity
+
+    def set_activity_attention(self, key: str, active: bool):
+        active = bool(active)
+        if self._activity_attention.get(key, False) == active:
+            return
+        self._activity_attention[key] = active
+        self._sync_activity_buttons()
 
     def is_activity_panel_collapsed(self) -> bool:
         return self._stack.maximumWidth() == 0
@@ -1725,8 +1881,14 @@ class LeftPanel(QWidget):
         palette()
         fs = max(11, chat_font_pt() - 2)
         for key, button in self._activity_buttons.items():
+            has_attention = self._activity_attention.get(key, False)
+            button.setIcon(QIcon())
             button.setStyleSheet(
-                rail_button_style(font_size=fs, active=key == self._active_activity)
+                rail_button_style(
+                    font_size=fs,
+                    active=key == self._active_activity,
+                    attention=has_attention,
+                )
             )
 
     def _apply_styles(self):

@@ -30,21 +30,30 @@ class GitSnapshot:
     behind: int = 0
 
 
-def build_git_snapshot(repo_path: str) -> GitSnapshot:
+def build_git_snapshot(repo_path: str, *, untracked_mode: str = "all") -> GitSnapshot:
     repo_key = _repo_cache_key(repo_path)
+    untracked_mode = "normal" if untracked_mode == "normal" else "all"
+    cache_key = f"{repo_key}\0untracked={untracked_mode}"
     now = time.monotonic()
     with _GIT_SNAPSHOT_CACHE_LOCK:
-        cached = _GIT_SNAPSHOT_CACHE.get(repo_key)
+        cached = _GIT_SNAPSHOT_CACHE.get(cache_key)
         if cached is not None:
             created_at, snapshot = cached
             if now - created_at <= _GIT_SNAPSHOT_CACHE_TTL_S:
                 return snapshot
 
-    with time_operation("git.snapshot", detail=repo_key):
+    with time_operation("git.snapshot", detail=f"{repo_key} untracked={untracked_mode}"):
         if not is_git_repo(repo_key):
             snapshot = GitSnapshot(repo_path=repo_key, is_repo=False)
         else:
-            status = read_git_status_snapshot(repo_key, check_repo=False)
+            if untracked_mode == "all":
+                status = read_git_status_snapshot(repo_key, check_repo=False)
+            else:
+                status = read_git_status_snapshot(
+                    repo_key,
+                    check_repo=False,
+                    untracked_mode=untracked_mode,
+                )
             snapshot = GitSnapshot(
                 repo_path=repo_key,
                 is_repo=True,
@@ -55,7 +64,7 @@ def build_git_snapshot(repo_path: str) -> GitSnapshot:
                 behind=status.behind,
             )
     with _GIT_SNAPSHOT_CACHE_LOCK:
-        _GIT_SNAPSHOT_CACHE[repo_key] = (now, snapshot)
+        _GIT_SNAPSHOT_CACHE[cache_key] = (now, snapshot)
     return snapshot
 
 
@@ -66,7 +75,9 @@ def clear_git_snapshot_cache(repo_path: str | Path | None = None) -> None:
             _GIT_LOG_CACHE.clear()
             return
         repo_key = _repo_cache_key(repo_path)
-        _GIT_SNAPSHOT_CACHE.pop(repo_key, None)
+        for cache_key in list(_GIT_SNAPSHOT_CACHE):
+            if cache_key == repo_key or cache_key.startswith(f"{repo_key}\0"):
+                _GIT_SNAPSHOT_CACHE.pop(cache_key, None)
         _GIT_LOG_CACHE.pop(repo_key, None)
 
 
