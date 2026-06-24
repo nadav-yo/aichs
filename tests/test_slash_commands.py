@@ -1,5 +1,8 @@
 import pytest
 
+import services.slash_commands as slash_commands
+from services.mcp_config import McpServerConfig
+from services.mcp_tools import McpCapability, McpServerCapabilities
 from services.slash_commands import (
     BUILTIN_COMMANDS,
     load_all_commands,
@@ -85,6 +88,66 @@ def test_load_all_commands_includes_extension(workspace_with_extension):
     ext = next(c for c in commands if c.name == "demo_cmd")
     assert ext.source == "extension"
     assert ext.prompt == "Run the demo workflow"
+
+
+def test_load_all_commands_includes_enabled_mcp_tools_only(workspace, monkeypatch):
+    server = McpServerConfig(name="docs", scope="global", raw={}, command="docs-server")
+    monkeypatch.setattr(slash_commands, "mcp_config_exists", lambda _cwd: True)
+    monkeypatch.setattr(
+        slash_commands,
+        "load_mcp_config",
+        lambda _cwd: type("Snapshot", (), {"servers": (server,)})(),
+    )
+    monkeypatch.setattr(
+        slash_commands,
+        "cached_mcp_server_capabilities",
+        lambda _server: McpServerCapabilities(
+            tools=(
+                McpCapability("lookup", "Lookup docs."),
+                McpCapability("list_resources", "Remote list tool."),
+                McpCapability("disabled_tool", "Disabled.", enabled=False),
+            ),
+            resources=(McpCapability("Docs", "Project docs.", uri="doc://one"),),
+            resource_templates=(McpCapability("Doc template", "Parameterized docs.", uri="doc://{name}"),),
+            prompts=(
+                McpCapability("draft", "Draft a note.", arguments=("topic",)),
+                McpCapability("hidden", "Hidden prompt.", enabled=False),
+            ),
+        ),
+    )
+
+    commands = {command.name: command for command in load_all_commands(str(workspace))}
+
+    tool = commands["mcp__docs__lookup"]
+    assert tool.source == "mcp"
+    assert tool.description == "[MCP: docs] Tool: Lookup docs."
+    assert tool.tools == ["mcp__docs__lookup"]
+    assert tool.capabilities == ["mcp:tools"]
+
+    colliding_tool = commands["mcp__docs__list_resources"]
+    assert colliding_tool.description == "[MCP: docs] Tool: Remote list tool."
+    assert colliding_tool.tools == ["mcp__docs__list_resources"]
+
+    assert "mcp__docs__disabled_tool" not in commands
+    assert "mcp__docs__resource__doc_one" not in commands
+    assert "mcp__docs__resource_template__doc_name" not in commands
+    assert "mcp__docs__prompt__draft" not in commands
+    assert "mcp__docs__prompt__hidden" not in commands
+
+
+def test_load_all_commands_skips_mcp_without_cached_capabilities(workspace, monkeypatch):
+    server = McpServerConfig(name="docs", scope="global", raw={}, command="docs-server")
+    monkeypatch.setattr(slash_commands, "mcp_config_exists", lambda _cwd: True)
+    monkeypatch.setattr(
+        slash_commands,
+        "load_mcp_config",
+        lambda _cwd: type("Snapshot", (), {"servers": (server,)})(),
+    )
+    monkeypatch.setattr(slash_commands, "cached_mcp_server_capabilities", lambda _server: None)
+
+    commands = load_all_commands(str(workspace))
+
+    assert {command.source for command in commands} == {"builtin"}
 
 
 def test_parse_extension_command(workspace_with_extension):

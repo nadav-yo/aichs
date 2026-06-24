@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from PyQt6.QtCore import QPoint, QPointF, Qt, QUrl
 from PyQt6.QtGui import QColor, QCloseEvent, QGuiApplication, QTextCursor, QTextDocument
+from PyQt6.QtNetwork import QNetworkReply
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QMessageBox, QPlainTextEdit, QWidget
 from pygments.token import Token
@@ -22,6 +23,7 @@ from ui.widgets.file_viewer import (
     _DiffWorker,
     _FileTextEdit,
     _LOADING_FILE_TEXT,
+    _MarkdownPreview,
     _MarkdownPreviewWorker,
     _PygmentsHighlighter,
     _RETIRED_WORKER_POOLS,
@@ -29,6 +31,7 @@ from ui.widgets.file_viewer import (
     _diagnostic_details,
     _read_text_preview,
     _read_text_preview_details,
+    _repo_file_for_markdown_link,
     _retire_worker_pool,
 )
 from ui.widgets.markdown_browser import (
@@ -134,6 +137,36 @@ def test_remote_markdown_preview_uses_cached_remote_images(qapp):
     browser.close()
 
 
+def test_remote_markdown_preview_ignores_closed_reply(qapp):
+    class ClosedReply:
+        def __init__(self):
+            self.deleted = False
+
+        def error(self):
+            return QNetworkReply.NetworkError.NoError
+
+        def isOpen(self):
+            return False
+
+        def readAll(self):  # pragma: no cover - exercised by failing if called
+            raise AssertionError("closed replies must not be read")
+
+        def deleteLater(self):
+            self.deleted = True
+
+    browser = RemoteImageTextBrowser()
+    reply = ClosedReply()
+    key = "https://img.shields.io/badge/python-3.11%2B-blue"
+    browser._pending_images.add(key)
+
+    browser._remote_image_ready(reply, key, QUrl(key))
+
+    assert reply.deleted is True
+    assert key not in browser._pending_images
+    assert key not in browser._remote_images
+    browser.close()
+
+
 def test_markdown_preview_worker_records_operation(monkeypatch):
     operations = []
 
@@ -152,6 +185,78 @@ def test_markdown_preview_worker_records_operation(monkeypatch):
     assert operations == [("markdown.preview", "path=README.md chars=9")]
     assert done[0][0:2] == (3, "README.md")
     assert "<h1" in done[0][2].lower()
+
+
+def test_markdown_preview_resolves_repo_relative_links(workspace):
+    readme = workspace / "README.md"
+    readme.write_text("[Guide](docs/guide.md)", encoding="utf-8")
+    guide = workspace / "docs" / "guide.md"
+    guide.parent.mkdir()
+    guide.write_text("# Guide", encoding="utf-8")
+
+    assert (
+        _repo_file_for_markdown_link("docs/guide.md", str(readme), str(workspace))
+        == str(guide.resolve())
+    )
+
+
+def test_markdown_preview_resolves_relative_file_urls(workspace):
+    readme = workspace / "README.md"
+    readme.write_text("[Guide](file:docs/guide.md)", encoding="utf-8")
+    guide = workspace / "docs" / "guide.md"
+    guide.parent.mkdir()
+    guide.write_text("# Guide", encoding="utf-8")
+
+    assert (
+        _repo_file_for_markdown_link("file:docs/guide.md", str(readme), str(workspace))
+        == str(guide.resolve())
+    )
+
+
+def test_markdown_preview_resolves_encoded_windows_file_paths(workspace):
+    guide = workspace / "docs" / "guide.md"
+    guide.parent.mkdir()
+    guide.write_text("# Guide", encoding="utf-8")
+    href = str(guide).replace("\\", "%5C")
+
+    assert (
+        _repo_file_for_markdown_link(href, str(workspace / "README.md"), str(workspace))
+        == str(guide.resolve())
+    )
+
+
+def test_markdown_preview_blocks_links_outside_repo(workspace, tmp_path):
+    readme = workspace / "README.md"
+    readme.write_text("[Outside](../outside.md)", encoding="utf-8")
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Outside", encoding="utf-8")
+
+    assert _repo_file_for_markdown_link("../outside.md", str(readme), str(workspace)) == ""
+
+
+def test_markdown_preview_prompts_before_opening_external_link(
+    qapp,
+    monkeypatch,
+):
+    answers = []
+    opened = []
+    preview = _MarkdownPreview()
+    monkeypatch.setattr(
+        file_viewer_module.QMessageBox,
+        "question",
+        lambda *args, **kwargs: answers.append(args) or QMessageBox.StandardButton.No,
+    )
+    monkeypatch.setattr(
+        file_viewer_module.QDesktopServices,
+        "openUrl",
+        lambda url: opened.append(url.toString()) or True,
+    )
+
+    assert preview._handle_link("https://example.com/docs") is True
+
+    assert answers
+    assert opened == []
+    preview.close()
 
 
 def test_pygments_highlighter_falls_back_for_unknown_token_style(qapp):
@@ -1459,6 +1564,35 @@ def test_file_viewer_markdown_uses_live_split_preview(qapp, workspace, monkeypat
     assert tab._editor.isVisibleTo(tab)
     assert tab._preview_toggle.isChecked() is True
     assert "Saved" in tab._preview.toPlainText()
+    panel.close()
+
+
+def test_file_viewer_markdown_preview_repo_link_opens_target(
+    qapp,
+    workspace,
+    monkeypatch,
+):
+    monkeypatch.setattr(_TextFileTab, "_refresh_diagnostics", lambda self, delay_ms=None: None)
+    readme = workspace / "README.md"
+    target = workspace / "docs" / "guide.md"
+    target.parent.mkdir()
+    target.write_text("# Guide", encoding="utf-8")
+    readme.write_text("[Guide](docs/guide.md)", encoding="utf-8")
+    panel = FileViewerPanel(str(workspace))
+
+    panel.open_file(str(readme), repo_root=str(workspace))
+    tab = panel._tabs.widget(0)
+    tab._preview_toggle.setChecked(True)
+    qapp.processEvents()
+    tab._apply_markdown_preview()
+    _wait_until(qapp, lambda: "Guide" in tab._preview.toPlainText())
+
+    assert tab._preview._handle_link("docs/guide.md") is True
+
+    assert panel.active_path() == str(target.resolve())
+    target_tab = panel.active_text_tab()
+    assert target_tab._preview_toggle.isChecked() is True
+    assert target_tab.is_markdown_preview_pane_active() is True
     panel.close()
 
 

@@ -3,6 +3,7 @@ import os
 import pytest
 
 import services.model_registry as reg
+from PyQt6.QtCore import QPointF, Qt
 from storage.settings import (
     ARCHIVIST_PROMPT_KEY,
     AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY,
@@ -26,7 +27,7 @@ from storage.settings import (
     file_review_prompt_template,
 )
 from ui.widgets.settings_dialog import SettingsDialog, _ProviderDialog
-from PyQt6.QtWidgets import QAbstractItemView
+from PyQt6.QtWidgets import QAbstractItemView, QMessageBox
 
 
 @pytest.fixture(autouse=True)
@@ -367,6 +368,135 @@ def test_model_order_list_disables_without_provider(qapp):
 
     assert not dialog.model_order_list.isEnabled()
     assert dialog.model_order_list.count() == 0
+
+
+def test_model_order_drop_on_item_reorders_without_deleting(qapp):
+    class DropEvent:
+        def __init__(self, pos):
+            self._pos = QPointF(pos)
+            self.accepted = False
+
+        def position(self):
+            return self._pos
+
+        def acceptProposedAction(self):
+            self.accepted = True
+
+    dialog = SettingsDialog(SettingsStore())
+    _ensure_models_page(dialog)
+    dialog._providers = [
+        {
+            "id": "local",
+            "kind": "custom",
+            "api": "openai-compatible",
+            "base_url": "",
+            "models": [
+                {"id": "model-a"},
+                {"id": "model-b"},
+                {"id": "model-c"},
+            ],
+        }
+    ]
+    dialog._refresh_model_order_list(0)
+    dialog.model_order_list.show()
+    qapp.processEvents()
+
+    target_rect = dialog.model_order_list.visualItemRect(dialog.model_order_list.item(1))
+    event = DropEvent(target_rect.center())
+    dialog.model_order_list._drag_row = 0
+
+    dialog.model_order_list.dropEvent(event)
+
+    assert event.accepted is True
+    assert dialog.model_order_list.count() == 3
+    assert _model_ids(dialog._providers[0]["models"]) == [
+        "model-b", "model-a", "model-c",
+    ]
+
+
+def test_model_order_mouse_press_tracks_source_row(qapp):
+    from PyQt6.QtTest import QTest
+
+    dialog = SettingsDialog(SettingsStore())
+    _ensure_models_page(dialog)
+    dialog._providers = [
+        {
+            "id": "local",
+            "kind": "custom",
+            "api": "openai-compatible",
+            "base_url": "",
+            "models": [
+                {"id": "model-a"},
+                {"id": "model-b"},
+            ],
+        }
+    ]
+    dialog._refresh_model_order_list(0)
+    dialog.model_order_list.show()
+    qapp.processEvents()
+
+    item_rect = dialog.model_order_list.visualItemRect(dialog.model_order_list.item(1))
+
+    QTest.mousePress(
+        dialog.model_order_list.viewport(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        item_rect.center(),
+    )
+
+    assert dialog.model_order_list._drag_row == 1
+
+
+def test_remove_provider_requires_confirmation(qapp, monkeypatch):
+    dialog = SettingsDialog(SettingsStore())
+    _ensure_models_page(dialog)
+    dialog._providers = [
+        {
+            "id": "local",
+            "kind": "custom",
+            "api": "openai-compatible",
+            "base_url": "",
+            "models": [{"id": "model-a"}],
+        }
+    ]
+    dialog._refresh_provider_table()
+
+    prompts = []
+    monkeypatch.setattr(
+        "ui.widgets.settings_dialog.QMessageBox.question",
+        lambda *args, **kwargs: prompts.append(args) or QMessageBox.StandardButton.No,
+    )
+
+    dialog._remove_provider(0)
+
+    assert [provider["id"] for provider in dialog._providers] == ["local"]
+    assert prompts
+    assert prompts[0][1] == "Remove provider"
+
+
+def test_remove_provider_deletes_after_confirmation(qapp, monkeypatch):
+    dialog = SettingsDialog(SettingsStore())
+    _ensure_models_page(dialog)
+    dialog._providers = [
+        {
+            "id": "local",
+            "kind": "custom",
+            "api": "openai-compatible",
+            "base_url": "",
+            "models": [{"id": "model-a"}],
+        }
+    ]
+    dialog._refresh_provider_table()
+
+    monkeypatch.setattr(
+        "ui.widgets.settings_dialog.QMessageBox.question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    dialog._remove_provider(0)
+
+    assert dialog._providers == []
+    assert dialog.providers_table.rowCount() == 0
 
 
 def test_basic_settings_are_saved_and_reloaded(qapp):

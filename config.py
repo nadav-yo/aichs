@@ -16,6 +16,8 @@ CONV_DIR        = AICHS_HOME / "conversations"
 SETTINGS_PATH   = AICHS_HOME / "settings.json"
 AVATARS_DIR     = AICHS_HOME / "avatars"
 WORKSPACES_PATH = AICHS_HOME / "workspaces.json"
+PROJECT_AGENTS_DIR = ".agents"
+PROJECT_AICHS_DIR = ".aichs"
 IGNORED  = {".git", "__pycache__", "node_modules", ".venv", "venv", ".idea"}
 
 # Keep the desktop app responsive on large repos and noisy commands.

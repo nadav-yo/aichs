@@ -2,7 +2,7 @@ import pytest
 import time
 from contextlib import contextmanager
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtGui import QKeySequence
 from services.chat_drag import (
     AICHS_CHAT_DROP_MIME,
@@ -19,7 +19,7 @@ from services.chat_drag import (
     parse_file_drop,
 )
 from services.file_search import clear_workspace_file_cache, list_workspace_files
-from PyQt6.QtWidgets import QLabel, QListWidget, QLineEdit, QTextBrowser
+from PyQt6.QtWidgets import QLabel, QListWidget, QLineEdit, QMenu, QTextBrowser
 from PyQt6.QtWidgets import QMessageBox
 
 from services.file_tree_snapshot import FileTreeEntry, FileTreeSnapshot
@@ -28,7 +28,7 @@ from services.git_status import GitCommandResult
 from storage.settings import SettingsStore
 from ui.theme import palette
 from ui.widgets.git_panel import GitPanel, _CommitDiffDialog
-from ui.widgets.left_panel import FileTree, _FileTreeActionThread, _FileTreeRefreshThread, _FilesHeader, _IS_DIR_ROLE, _LOAD_GENERATION_ROLE, _path_key
+from ui.widgets.left_panel import FileTree, _FileTreeActionThread, _FileTreeRefreshThread, _FilesHeader, _FILE_TREE_MOVE_MIME, _IS_DIR_ROLE, _LOAD_GENERATION_ROLE, _path_key
 from ui.widgets.conversation_panel import ConversationPanel
 
 
@@ -58,6 +58,30 @@ def _wait_for_loaded_children(qapp, item):
     )
 
 
+class _FakeDropEvent:
+    def __init__(self, mime, pos=None):
+        self._mime = mime
+        self._pos = pos
+        self.accepted = False
+        self.ignored = False
+        self.drop_action = None
+
+    def mimeData(self):
+        return self._mime
+
+    def pos(self):
+        return self._pos
+
+    def setDropAction(self, action):
+        self.drop_action = action
+
+    def accept(self):
+        self.accepted = True
+
+    def ignore(self):
+        self.ignored = True
+
+
 def test_files_tree_drags_file_mentions(qapp, workspace):
     tree = FileTree(str(workspace))
     src = tree.topLevelItem(0)
@@ -68,8 +92,57 @@ def test_files_tree_drags_file_mentions(qapp, workspace):
     mime = tree.mimeData([item])
 
     assert mime.hasFormat(AICHS_FILE_DROP_MIME)
+    assert mime.hasFormat(_FILE_TREE_MOVE_MIME)
     assert parse_file_drop(mime.data(AICHS_FILE_DROP_MIME)) == ["src/main.py"]
+    assert tree._move_paths_from_mime(mime) == [str(workspace / "src" / "main.py")]
     assert mime.text() == "@src/main.py"
+
+
+def test_files_tree_context_menu_empty_space_offers_new_folder(qapp, workspace, monkeypatch):
+    tree = FileTree(str(workspace))
+    action_texts = []
+    monkeypatch.setattr(tree, "itemAt", lambda _pos: None)
+
+    def capture_menu(menu, _pos):
+        action_texts.extend(action.text() for action in menu.actions() if not action.isSeparator())
+
+    monkeypatch.setattr(QMenu, "exec", capture_menu)
+
+    tree._context_menu(QPoint(1, 1))
+
+    assert action_texts == ["New Folder...", "Refresh"]
+
+
+def test_files_tree_context_menu_file_offers_new_folder_in_parent(qapp, workspace, monkeypatch):
+    tree = FileTree(str(workspace))
+    assert tree.reveal_file(str(workspace / "src" / "main.py"))
+    item = tree._find_item_for_path(str(workspace / "src" / "main.py"))
+    assert item is not None
+    action_texts = []
+    created_in = []
+    monkeypatch.setattr(
+        "ui.widgets.left_panel.QInputDialog.getText",
+        lambda *args, **kwargs: ("pkg", True),
+    )
+    monkeypatch.setattr(
+        tree,
+        "_start_action",
+        lambda action, path, **kwargs: created_in.append((action, path, kwargs)),
+    )
+
+    def choose_new_folder(menu, _pos):
+        action_texts.extend(action.text() for action in menu.actions() if not action.isSeparator())
+        for action in menu.actions():
+            if action.text() == "New Folder...":
+                action.trigger()
+                return
+
+    monkeypatch.setattr(QMenu, "exec", choose_new_folder)
+
+    tree._context_menu(tree.visualItemRect(item).center())
+
+    assert "New Folder..." in action_texts
+    assert created_in == [("create_folder", str(workspace / "src"), {"name": "pkg"})]
 
 
 def test_files_tree_reveals_nested_file(qapp, workspace):
@@ -546,7 +619,7 @@ def test_files_tree_filters_by_relative_path(qapp, workspace):
 
 
 def test_files_tree_shows_project_dot_folders(qapp, workspace):
-    skills = workspace / ".aichs" / "skills"
+    skills = workspace / ".agents" / "skills"
     skills.mkdir(parents=True)
     (skills / "demo.md").write_text("Use this skill.\n", encoding="utf-8")
     (workspace / ".git").mkdir()
@@ -555,15 +628,15 @@ def test_files_tree_shows_project_dot_folders(qapp, workspace):
 
     names = [tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())]
 
-    assert ".aichs" in names
+    assert ".agents" in names
     assert ".git" not in names
-    assert ".env" not in names
+    assert ".env" in names
 
     tree.set_filter_text("demo")
     _wait_until(qapp, lambda: tree.topLevelItemCount() == 1)
 
     assert tree.topLevelItemCount() == 1
-    assert tree.topLevelItem(0).text(0) == ".aichs/skills/demo.md"
+    assert tree.topLevelItem(0).text(0) == ".agents/skills/demo.md"
 
 
 def test_files_tree_marks_dirty_files_and_parent_folders(qapp, workspace):
@@ -657,6 +730,167 @@ def test_files_tree_creates_folder_in_folder(qapp, workspace):
 
     assert created == workspace / "src" / "package"
     assert created.is_dir()
+
+
+def test_files_tree_moves_file_to_folder(qapp, workspace):
+    destination = workspace / "docs"
+    destination.mkdir()
+    tree = FileTree(str(workspace))
+    source = workspace / "src" / "main.py"
+
+    moved_to = tree.move_paths([str(source)], str(destination))
+
+    assert moved_to == destination
+    assert (destination / "main.py").read_text(encoding="utf-8") == "print('hi')\n"
+    assert not source.exists()
+
+
+def test_files_tree_drop_move_requires_confirmation(qapp, workspace, monkeypatch):
+    destination = workspace / "docs"
+    destination.mkdir()
+    tree = FileTree(str(workspace))
+    assert tree.reveal_file(str(workspace / "src" / "main.py"))
+    source_item = tree._find_item_for_path(str(workspace / "src" / "main.py"))
+    destination_item = tree._find_item_for_path(str(destination))
+    assert source_item is not None
+    assert destination_item is not None
+    mime = tree.mimeData([source_item])
+    pos = tree.visualItemRect(destination_item).center()
+    actions = []
+    monkeypatch.setattr(
+        "ui.widgets.left_panel.QMessageBox.question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+    monkeypatch.setattr(
+        tree,
+        "_start_action",
+        lambda action, queued_path, **kwargs: actions.append((action, queued_path, kwargs)),
+    )
+
+    enter = _FakeDropEvent(mime, pos)
+    drop = _FakeDropEvent(mime, pos)
+    tree.dragEnterEvent(enter)
+    tree.dropEvent(drop)
+
+    assert enter.accepted is True
+    assert enter.drop_action == Qt.DropAction.MoveAction
+    assert drop.accepted is True
+    assert drop.drop_action == Qt.DropAction.MoveAction
+    assert actions == [
+        (
+            "move",
+            [str(workspace / "src" / "main.py")],
+            {"destination": str(destination)},
+        )
+    ]
+    assert (workspace / "src" / "main.py").exists()
+
+
+def test_files_tree_drop_move_highlights_destination_folder(qapp, workspace):
+    destination = workspace / "docs"
+    destination.mkdir()
+    tree = FileTree(str(workspace))
+    assert tree.reveal_file(str(workspace / "src" / "main.py"))
+    source_item = tree._find_item_for_path(str(workspace / "src" / "main.py"))
+    destination_item = tree._find_item_for_path(str(destination))
+    assert source_item is not None
+    assert destination_item is not None
+    mime = tree.mimeData([source_item])
+    pos = tree.visualItemRect(destination_item).center()
+
+    move = _FakeDropEvent(mime, pos)
+    tree.dragMoveEvent(move)
+
+    assert move.accepted is True
+    assert tree._move_drop_highlight_item is destination_item
+
+    tree._clear_move_drop_highlight()
+
+    assert tree._move_drop_highlight_item is None
+
+
+def test_files_tree_drop_move_highlights_file_parent(qapp, workspace):
+    destination_dir = workspace / "docs"
+    destination_dir.mkdir()
+    destination_file = destination_dir / "note.txt"
+    destination_file.write_text("note\n", encoding="utf-8")
+    tree = FileTree(str(workspace))
+    assert tree.reveal_file(str(workspace / "src" / "main.py"))
+    assert tree.reveal_file(str(destination_file))
+    source_item = tree._find_item_for_path(str(workspace / "src" / "main.py"))
+    destination_item = tree._find_item_for_path(str(destination_file))
+    destination_parent = tree._find_item_for_path(str(destination_dir))
+    assert source_item is not None
+    assert destination_item is not None
+    assert destination_parent is not None
+    mime = tree.mimeData([source_item])
+    pos = tree.visualItemRect(destination_item).center()
+
+    move = _FakeDropEvent(mime, pos)
+    tree.dragMoveEvent(move)
+
+    assert move.accepted is True
+    assert tree._move_drop_highlight_item is destination_parent
+
+
+def test_files_tree_drop_move_to_own_folder_is_ignored(qapp, workspace, monkeypatch):
+    tree = FileTree(str(workspace))
+    assert tree.reveal_file(str(workspace / "src" / "main.py"))
+    source_item = tree._find_item_for_path(str(workspace / "src" / "main.py"))
+    assert source_item is not None
+    mime = tree.mimeData([source_item])
+    pos = tree.visualItemRect(source_item).center()
+    actions = []
+    monkeypatch.setattr(
+        "ui.widgets.left_panel.QMessageBox.question",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not confirm")),
+    )
+    monkeypatch.setattr(
+        tree,
+        "_start_action",
+        lambda action, queued_path, **kwargs: actions.append((action, queued_path, kwargs)),
+    )
+
+    move = _FakeDropEvent(mime, pos)
+    drop = _FakeDropEvent(mime, pos)
+    tree.dragMoveEvent(move)
+    tree.dropEvent(drop)
+
+    assert move.accepted is True
+    assert move.drop_action == Qt.DropAction.MoveAction
+    assert drop.ignored is True
+    assert tree._move_drop_highlight_item is None
+    assert actions == []
+
+
+def test_files_tree_drop_move_can_cancel_confirmation(qapp, workspace, monkeypatch):
+    destination = workspace / "docs"
+    destination.mkdir()
+    tree = FileTree(str(workspace))
+    assert tree.reveal_file(str(workspace / "src" / "main.py"))
+    source_item = tree._find_item_for_path(str(workspace / "src" / "main.py"))
+    destination_item = tree._find_item_for_path(str(destination))
+    assert source_item is not None
+    assert destination_item is not None
+    mime = tree.mimeData([source_item])
+    pos = tree.visualItemRect(destination_item).center()
+    actions = []
+    monkeypatch.setattr(
+        "ui.widgets.left_panel.QMessageBox.question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.No,
+    )
+    monkeypatch.setattr(
+        tree,
+        "_start_action",
+        lambda action, queued_path, **kwargs: actions.append((action, queued_path, kwargs)),
+    )
+
+    drop = _FakeDropEvent(mime, pos)
+    tree.dropEvent(drop)
+
+    assert drop.ignored is True
+    assert actions == []
+    assert (workspace / "src" / "main.py").exists()
 
 
 def test_files_tree_renames_file(qapp, workspace):

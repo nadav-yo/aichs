@@ -4,7 +4,7 @@ Rules for agents editing **this repo** (the aichs PyQt6 app).
 
 ## Stack
 
-Python 3.11+, PyQt6. Core logic: `services/` (especially `tools.py`, `tool_policy.py`, `tool_registry.py`, `chat.py`), `storage/`, `ui/`. User data and examples: `~/.aichs/`; per-project `.aichs/skills/`, `.aichs/extensions/`.
+Python 3.11+, PyQt6. Core logic: `services/` (especially `tools.py`, `tool_policy.py`, `tool_registry.py`, `chat.py`), `storage/`, `ui/`. User data and examples: `~/.aichs/`; per-project `.agents/skills/`, `.aichs/extensions/`.
 
 ## Tests
 

@@ -492,7 +492,7 @@ def test_workspace_dashboard_shows_home_context(qapp, workspace):
         "# Rules\n\nAlways **run** the tests.\n\n" + long_rule,
         encoding="utf-8",
     )
-    skills_dir = workspace / ".aichs" / "skills"
+    skills_dir = workspace / ".agents" / "skills"
     skills_dir.mkdir(parents=True)
     (skills_dir / "review.md").write_text(
         "---\nname: review\ndescription: Review code\n---\nReview carefully.\n",

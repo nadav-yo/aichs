@@ -21,17 +21,17 @@ class Skill:
 
 
 def load_all(cwd: str | None = None) -> list[Skill]:
-    """Return skills from user-global and project-local .aichs/skills/.
+    """Return skills from user-global and project-local .agents/skills/.
 
     Load order: user-global (AICHS_HOME/skills/) then project-local
-    (.aichs/skills/ in cwd). Later entries override earlier ones with the same
+    (.agents/skills/ in cwd). Later entries override earlier ones with the same
     name.
     """
     with time_operation("skills.load", detail=f"cwd={cwd or ''}"):
         skills: dict[str, Skill] = {}
         dirs = [_USER_DIR]
         if cwd:
-            dirs.append(Path(cwd) / ".aichs" / "skills")
+            dirs.append(Path(cwd) / config.PROJECT_AGENTS_DIR / "skills")
         for directory in dirs:
             for path in _skill_paths(directory):
                 skill = _parse(path)

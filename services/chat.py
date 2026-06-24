@@ -33,6 +33,8 @@ from services.tools import (
     execute,
     is_parallel_safe,
     tool_approval,
+    tool_extension_id,
+    tool_source,
     tools_anthropic,
     tools_openai,
 )
@@ -711,7 +713,13 @@ class ChatThread(QThread):
         approval = tool_approval(name, self.cwd)
         if approval == "once":
             return self._approval_bus.check_extension_tool(
-                name, inputs, self.cwd, self._tool_policy, self._cancel.is_set,
+                name,
+                inputs,
+                self.cwd,
+                self._tool_policy,
+                self._cancel.is_set,
+                source=tool_source(name, self.cwd),
+                owner=tool_extension_id(name, self.cwd),
             )
         return self._approval_bus.check(
             name, inputs, self.cwd, self._tool_policy, self._cancel.is_set,

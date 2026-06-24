@@ -171,19 +171,29 @@ def _show_shell_command(parent, bus, pending: PendingApproval) -> None:
 
 def _show_extension_tool(parent, bus, pending: PendingApproval) -> None:
     name = pending.tool_name or "extension tool"
+    source = str(getattr(pending, "tool_source", "") or "extension")
+    owner = str(getattr(pending, "tool_owner", "") or "")
+    source_label = "MCP" if source == "mcp" else "extension"
     dlg = QDialog(parent)
-    dlg.setWindowTitle("Allow extension tool?")
+    dlg.setWindowTitle(f"Allow {source_label} tool?")
     _apply_dialog_style(dlg)
     layout = QVBoxLayout(dlg)
 
     note = QLabel(
-        f"Allow the <b>{_escape(name)}</b> extension tool for this conversation?"
+        f"Allow the <b>{_escape(name)}</b> {source_label} tool for this conversation?"
     )
     note.setWordWrap(True)
     layout.addWidget(note)
 
+    if owner:
+        owner_label = QLabel(f"Source: {_code(owner)}")
+        owner_label.setWordWrap(True)
+        owner_label.setStyleSheet(_muted_label_style())
+        layout.addWidget(owner_label)
+
     caution = QLabel(
-        "Extensions are local Python code. Only allow tools from extensions you trust."
+        "MCP servers and extensions can connect to external systems or run local code. "
+        "Only allow tools from sources you trust."
     )
     caution.setWordWrap(True)
     caution.setStyleSheet(_muted_label_style())

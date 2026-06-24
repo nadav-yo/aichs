@@ -1992,6 +1992,7 @@ def extension_panel_heading_style(*, tone: str = "") -> str:
 COMBO_POPUP_MIN_VISIBLE_ROWS = 4
 COMBO_POPUP_MAX_VISIBLE_ROWS = 10
 COMBO_POPUP_VIEW_PADDING = 6
+COMBO_POPUP_MIN_ROW_HEIGHT = 36
 
 
 def combo_popup_item_hover_bg(theme: str | None = None) -> str:
@@ -2018,13 +2019,15 @@ def combo_popup_visible_row_count(
 def _combo_popup_item_row_height(view, *, font_pt: int | None = None) -> int:
     from PyQt6.QtWidgets import QAbstractItemView
 
+    fs = font_pt or chat_font_pt()
+    fallback = max(COMBO_POPUP_MIN_ROW_HEIGHT, fs + 22)
     if not isinstance(view, QAbstractItemView):
-        return max(24, (font_pt or chat_font_pt()) + 10)
+        return fallback
     hinted = view.sizeHintForRow(0)
     if hinted > 0:
-        return hinted
+        return max(hinted, fallback)
     metrics = view.fontMetrics()
-    return max(24, metrics.height() + 10)
+    return max(fallback, metrics.height() + 18)
 
 
 def resize_combo_popup_container(

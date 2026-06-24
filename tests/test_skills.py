@@ -6,7 +6,7 @@ import services.skills as skills_service
 
 
 def test_load_skill_from_project(workspace):
-    skills_dir = workspace / ".aichs" / "skills"
+    skills_dir = workspace / ".agents" / "skills"
     skills_dir.mkdir(parents=True)
     (skills_dir / "review.md").write_text(
         "---\nname: review\ndescription: Code review\ntools: read_file, search_files\n---\n"
@@ -21,8 +21,18 @@ def test_load_skill_from_project(workspace):
     assert skills[0].tools == ["read_file", "search_files"]
 
 
-def test_skill_without_frontmatter_ignored(workspace):
+def test_legacy_project_aichs_skills_are_not_loaded(workspace):
     skills_dir = workspace / ".aichs" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "legacy.md").write_text("---\nname: legacy\n---\nLegacy prompt.\n", encoding="utf-8")
+
+    from services.skills import load_all
+
+    assert load_all(str(workspace)) == []
+
+
+def test_skill_without_frontmatter_ignored(workspace):
+    skills_dir = workspace / ".agents" / "skills"
     skills_dir.mkdir(parents=True)
     (skills_dir / "bad.md").write_text("no frontmatter\n", encoding="utf-8")
     from services.skills import load_all
@@ -45,7 +55,7 @@ def test_load_skill_from_configured_user_home(workspace):
 
 
 def test_load_skills_uses_top_level_iterdir_and_skips_hidden(workspace, monkeypatch):
-    skills_dir = workspace / ".aichs" / "skills"
+    skills_dir = workspace / ".agents" / "skills"
     skills_dir.mkdir(parents=True)
     (skills_dir / ".hidden.md").write_text("---\nname: hidden\n---\nHidden prompt.\n", encoding="utf-8")
     (skills_dir / "review.md").write_text("---\nname: review\n---\nReview prompt.\n", encoding="utf-8")
@@ -66,7 +76,7 @@ def test_load_skills_uses_top_level_iterdir_and_skips_hidden(workspace, monkeypa
 
 
 def test_load_skills_records_operation(workspace, monkeypatch):
-    skills_dir = workspace / ".aichs" / "skills"
+    skills_dir = workspace / ".agents" / "skills"
     skills_dir.mkdir(parents=True)
     (skills_dir / "review.md").write_text("---\nname: review\n---\nReview prompt.\n", encoding="utf-8")
     operations = []

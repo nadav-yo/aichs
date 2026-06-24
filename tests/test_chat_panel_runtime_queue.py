@@ -5,10 +5,13 @@ from storage.settings import COMPACT_RESUME_PROMPT_KEY, SettingsStore
 from services.slash_commands import SlashCommand
 from ui.widgets.chat_panel import (
     ChatPanel,
+    _ToolNoticeWidget,
     _chat_ref_context,
     _history_ends_with_assistant_text,
     _message_files,
+    _tool_output_display_text,
     _tool_debug_text,
+    _tool_notice_html,
 )
 
 
@@ -29,6 +32,9 @@ class _Button:
 
     def hide(self):
         self.hidden = True
+
+    def show(self):
+        self.hidden = False
 
 
 class _Composer:
@@ -141,6 +147,26 @@ def test_compaction_mode_keeps_composer_writable(qapp):
     assert panel.stop_btn.hidden is True
 
 
+def test_streaming_mode_keeps_composer_as_queue(qapp):
+    panel = SimpleNamespace()
+    panel.composer = _Composer()
+    panel.btn = _Button()
+    panel.stop_btn = _Button()
+    panel.jump_btn = _Button()
+    panel._sync_visible_runtime_refs = lambda: None
+    panel._visible_run = lambda: object()
+    panel._visible_compaction = lambda: None
+    panel._update_queue_ui = lambda: None
+    panel._enter_streaming = lambda: ChatPanel._enter_streaming(panel)
+
+    ChatPanel._refresh_runtime_controls(panel)
+
+    assert panel.composer.enabled is True
+    assert panel.btn.text == "Queue"
+    assert panel.stop_btn.hidden is False
+    assert panel.stop_btn.enabled is True
+
+
 def test_draft_diagnostic_fix_inserts_prompt_and_hidden_file_ref():
     panel = SimpleNamespace()
     panel.composer = _DraftComposer("Existing thought")
@@ -189,6 +215,64 @@ def test_send_queues_during_compaction(workspace):
     assert panel.composer.skill_cleared is True
     assert len(runtime.queued) == 1
     assert runtime.queued[0]["title_text"] == "write this next"
+
+
+def test_send_queues_during_active_run(workspace):
+    runtime = SimpleNamespace(queued=[])
+    panel = SimpleNamespace()
+    panel.cwd = str(workspace)
+    panel.conv_id = "c1"
+    panel.composer = _Composer("use a smaller patch")
+    panel._skill_picker = None
+    panel._file_picker = None
+    panel._settings = SimpleNamespace(load=lambda: {})
+    panel.model_combo = SimpleNamespace(currentText=lambda: "claude-sonnet-4-6")
+    panel._visible_run = lambda: object()
+    panel._visible_compaction = lambda: None
+    panel._ensure_conversation = lambda _title, _model: None
+    panel._runtime_for = lambda _conv_id: runtime
+    panel._update_queue_ui = lambda: None
+    panel._add_notice = lambda _message: None
+    panel._queue_visible_draft = lambda draft: ChatPanel._queue_visible_draft(panel, draft)
+    panel._send_draft = lambda _draft: (_ for _ in ()).throw(AssertionError("should queue"))
+
+    ChatPanel.send(panel)
+
+    assert panel.composer.cleared is True
+    assert len(runtime.queued) == 1
+    assert runtime.queued[0]["title_text"] == "use a smaller patch"
+
+
+def test_steer_queued_promotes_message_and_cancels_active_run(workspace):
+    cancelled = []
+    notices = []
+    runtime = SimpleNamespace(
+        queued=[
+            {"title_text": "already queued"},
+            {"title_text": "use a smaller patch"},
+        ],
+        run=SimpleNamespace(thread=SimpleNamespace(cancel=lambda: cancelled.append(True))),
+    )
+    panel = SimpleNamespace()
+    panel.conv_id = "c1"
+    panel.stop_btn = _Button()
+    panel._visible_run = lambda: runtime.run
+    panel._visible_compaction = lambda: None
+    panel._runtime_for = lambda _conv_id: runtime
+    panel._visible_queue = lambda: runtime.queued
+    panel._update_queue_ui = lambda: None
+    panel._add_notice = notices.append
+    panel._start_next_queued = lambda: (_ for _ in ()).throw(AssertionError("should cancel active run"))
+
+    ChatPanel._steer_queued(panel, 1)
+
+    assert [draft["title_text"] for draft in runtime.queued] == [
+        "use a smaller patch",
+        "already queued",
+    ]
+    assert cancelled == [True]
+    assert panel.stop_btn.enabled is False
+    assert notices == ["Steering current response with queued message: use a smaller patch"]
 
 
 def test_send_runs_loaded_extension_command_without_sync_file_refs(workspace, monkeypatch):
@@ -280,6 +364,38 @@ def test_send_uses_loaded_builtin_prompt_command_without_sync_settings(workspace
     assert drafts[0]["skill"].name == "archivist"
     assert drafts[0]["skill"].prompt == "Use project memory."
     assert drafts[0]["skill"].tools == ["search_project_chats", "read_project_chat"]
+
+
+def test_send_uses_bare_mcp_command_as_tool_request(workspace):
+    drafts = []
+    command = SlashCommand(
+        "mcp__unreal_mcp__describe_toolset",
+        "Describe a toolset",
+        prompt="Use the selected MCP tool.",
+        tools=["mcp__unreal_mcp__describe_toolset"],
+        source="mcp",
+    )
+    panel = SimpleNamespace()
+    panel.cwd = str(workspace)
+    panel.composer = _Composer("/mcp__unreal_mcp__describe_toolset")
+    panel._slash_commands = [command]
+    panel._slash_commands_cwd = str(workspace)
+    panel._skill_picker = None
+    panel._file_picker = None
+    panel._settings = SimpleNamespace(load=lambda: {})
+    panel._visible_run = lambda: None
+    panel._visible_compaction = lambda: None
+    panel._skill_from_command = lambda cmd: ChatPanel._skill_from_command(panel, cmd)
+    panel._skill_from_extension_command = lambda cmd: ChatPanel._skill_from_extension_command(panel, cmd)
+    panel._send_draft = drafts.append
+
+    ChatPanel.send(panel)
+
+    assert drafts[0]["title_text"] == "Use MCP capability mcp__unreal_mcp__describe_toolset."
+    assert drafts[0]["skill"].name == "mcp__unreal_mcp__describe_toolset"
+    assert drafts[0]["skill"].tools == ["mcp__unreal_mcp__describe_toolset"]
+    assert panel.composer.cleared is True
+    assert panel.composer.skill_cleared is True
 
 
 def test_send_carries_file_refs_without_reading_files_on_ui_thread(workspace, monkeypatch):
@@ -441,6 +557,42 @@ def test_edit_file_result_emits_completion_signal():
     assert run.last_edit_path == ""
 
 
+def test_tool_error_updates_existing_notice_without_second_error_row():
+    added = []
+    updates = []
+    run = SimpleNamespace(
+        conv_id="c1",
+        active_terminal=None,
+        last_edit_path="",
+        last_tool_name="mcp__docs__lookup",
+        last_tool_inputs={},
+        last_tool_notice=object(),
+    )
+    panel = SimpleNamespace(
+        conv_id="c1",
+        cwd="C:\\repo",
+        _find_run=lambda _run_id: run,
+        _add_tool_notice=lambda *args, **kwargs: added.append((args, kwargs)),
+        _update_tool_notice_debug=lambda wrapper, text: updates.append((wrapper, text)),
+        _show_post_tool_thinking=lambda _run: None,
+        _active_terminal=None,
+    )
+
+    ChatPanel._on_tool_result(panel, "run-1", "mcp__docs__lookup", "[tool error] HTTP 400")
+
+    assert added == []
+    assert updates
+    assert updates[0][0] is run.last_tool_notice
+    assert "HTTP 400" in updates[0][1]
+
+
+def test_mcp_notice_uses_mcp_tool_label():
+    html = _tool_notice_html("Using tool 'mcp__docs__lookup'")
+
+    assert "MCP tool" in html
+    assert "mcp__docs__lookup" in html
+
+
 def test_chat_panel_initializes_context_ui(qapp, store, workspace):
     panel = ChatPanel(store, cwd=str(workspace))
 
@@ -549,6 +701,200 @@ def test_tool_notice_context_menu_copies_message(qapp, store, workspace, monkeyp
     parent.close()
     parent.deleteLater()
     qapp.processEvents()
+
+
+def test_tool_notice_details_toggle_shows_input_and_output(qapp):
+    from PyQt6.QtWidgets import QFrame, QPlainTextEdit, QToolButton
+
+    widget = _ToolNoticeWidget("Using tool 'lookup'", "Inputs:\n{}")
+    details = widget.findChild(QFrame, "aichs-tool-details-panel")
+    boxes = widget.findChildren(QPlainTextEdit)
+    button = widget.findChild(QToolButton, "aichs-tool-details-toggle")
+
+    assert details is not None
+    assert button is not None
+    assert boxes
+    assert button.text() == ">"
+    assert details.isHidden()
+
+    widget.set_debug_text("Inputs:\n{\"q\":\"x\"}\nOutput:\nok")
+    button.click()
+
+    assert not details.isHidden()
+    assert button.text() == "v"
+    assert any("\"q\":\"x\"" in box.toPlainText() for box in boxes)
+    assert any("ok" in box.toPlainText() for box in boxes)
+    widget.close()
+    widget.deleteLater()
+    qapp.processEvents()
+
+
+def test_tool_notice_hides_empty_inputs(qapp):
+    widget = _ToolNoticeWidget("Using tool 'lookup'", "Tool: lookup\nCWD: C:\\repo\nOutput:\nok")
+
+    assert widget._section_frames["inputs"].isHidden()
+    assert "not captured" not in widget._section_boxes["inputs"].toPlainText()
+    assert widget._section_boxes["output"].toPlainText() == "ok"
+    widget.close()
+    widget.deleteLater()
+    qapp.processEvents()
+
+
+def test_mcp_notice_error_uses_mcp_tool_label_and_clean_output(qapp):
+    widget = _ToolNoticeWidget(
+        "Using tool 'mcp__docs__lookup'",
+        "Tool: mcp__docs__lookup\nCWD: C:\\repo\nOutput:\n[tool error] Connection closed",
+    )
+
+    assert widget._meta_title_labels["tool"].text() == "MCP tool"
+    assert widget._section_titles["output"].text() == "Error"
+    assert widget._section_boxes["output"].toPlainText() == "Connection closed"
+    assert not widget._error_status.isHidden()
+    widget.close()
+    widget.deleteLater()
+    qapp.processEvents()
+
+
+def test_tool_notice_error_status_hides_on_success(qapp):
+    widget = _ToolNoticeWidget("Using tool 'lookup'", "Tool: lookup\nCWD: C:\\repo\nOutput:\n[tool error] failed")
+
+    assert not widget._error_status.isHidden()
+    widget.set_debug_text("Tool: lookup\nCWD: C:\\repo\nOutput:\nok")
+
+    assert widget._meta_title_labels["tool"].text() == "Tool"
+    assert widget._section_titles["output"].text() == "Output"
+    assert widget._section_boxes["output"].toPlainText() == "ok"
+    assert widget._error_status.isHidden()
+    widget.close()
+    widget.deleteLater()
+    qapp.processEvents()
+
+
+def test_tool_notice_renders_image_output_preview(qapp):
+    import base64
+    import json
+
+    from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+    from PyQt6.QtGui import QColor, QPixmap
+    from PyQt6.QtWidgets import QLabel
+
+    pixmap = QPixmap(2, 2)
+    pixmap.fill(QColor("#ff0000"))
+    raw = QByteArray()
+    buffer = QBuffer(raw)
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    pixmap.save(buffer, "PNG")
+    payload = {
+        "returnValue": {
+            "image": {
+                "mimeType": "image/png",
+                "data": base64.b64encode(bytes(raw)).decode("ascii"),
+            }
+        }
+    }
+    widget = _ToolNoticeWidget(
+        "Using tool 'mcp__docs__screenshot'",
+        f"Tool: mcp__docs__screenshot\nCWD: C:\\repo\nOutput:\n{json.dumps(payload)}",
+    )
+
+    image = widget.findChild(QLabel, "aichs-tool-output-image")
+
+    assert image is not None
+    assert not image.isHidden()
+    assert image.pixmap() is not None
+    assert not image.pixmap().isNull()
+    assert "base64 image/png data omitted" in widget._section_boxes["output"].toPlainText()
+    widget.close()
+    widget.deleteLater()
+    qapp.processEvents()
+
+
+def test_tool_notice_renders_standard_mcp_image_output_preview(qapp):
+    import base64
+    import json
+
+    from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+    from PyQt6.QtGui import QColor, QPixmap
+    from PyQt6.QtWidgets import QLabel
+
+    pixmap = QPixmap(2, 2)
+    pixmap.fill(QColor("#00ff00"))
+    raw = QByteArray()
+    buffer = QBuffer(raw)
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    pixmap.save(buffer, "PNG")
+    payload = {
+        "content": [
+            {"type": "text", "text": "captured viewport"},
+            {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": base64.b64encode(bytes(raw)).decode("ascii"),
+            },
+        ]
+    }
+    widget = _ToolNoticeWidget(
+        "Using tool 'mcp__docs__screenshot'",
+        f"Tool: mcp__docs__screenshot\nCWD: C:\\repo\nOutput:\n{json.dumps(payload)}",
+    )
+
+    image = widget.findChild(QLabel, "aichs-tool-output-image")
+    output = widget._section_boxes["output"].toPlainText()
+
+    assert image is not None
+    assert not image.isHidden()
+    assert image.pixmap() is not None
+    assert not image.pixmap().isNull()
+    assert "captured viewport" in output
+    assert "Image: image/png" in output
+    assert payload["content"][1]["data"] not in output
+    widget.close()
+    widget.deleteLater()
+    qapp.processEvents()
+
+
+def test_tool_output_display_text_summarizes_standard_mcp_content_types():
+    import json
+
+    payload = {
+        "content": [
+            {"type": "audio", "mimeType": "audio/wav", "data": "abcdef"},
+            {
+                "type": "resource_link",
+                "name": "main.py",
+                "uri": "file:///repo/main.py",
+                "mimeType": "text/x-python",
+            },
+            {
+                "type": "resource",
+                "resource": {
+                    "uri": "file:///repo/readme.md",
+                    "mimeType": "text/markdown",
+                    "text": "# Title",
+                },
+            },
+            {
+                "type": "resource",
+                "resource": {
+                    "uri": "file:///repo/screenshot.png",
+                    "mimeType": "image/png",
+                    "blob": "abc123",
+                },
+            },
+        ],
+        "structuredContent": {"ok": True},
+    }
+
+    text = _tool_output_display_text(json.dumps(payload))
+
+    assert "Audio: audio/wav" in text
+    assert "Resource link: main.py" in text
+    assert "Embedded resource: file:///repo/readme.md (text/markdown)" in text
+    assert "# Title" in text
+    assert "Embedded resource: image/png" in text
+    assert "URI: file:///repo/screenshot.png" in text
+    assert "Structured content:" in text
+    assert "abc123" not in text
 
 
 def test_chat_ref_context_dedupes_and_names_exact_tool():

@@ -158,7 +158,7 @@ def _git_status(
 def _is_visible_tree_entry(name: str, is_dir: bool) -> bool:
     if name in IGNORED:
         return False
-    return is_dir or not name.startswith(".")
+    return True
 
 
 def _cancelled(cancelled) -> bool:

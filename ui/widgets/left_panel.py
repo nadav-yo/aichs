@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import threading
@@ -96,6 +97,9 @@ _FILE_ICON_TYPES = {
 }
 
 _FILE_NAME_ICON_TYPES = {
+    ".gitattributes": ("GIT", "#f05032"),
+    ".gitignore": ("GIT", "#f05032"),
+    ".gitmodules": ("GIT", "#f05032"),
     "dockerfile": ("DOCK", "#2496ed"),
     "makefile": ("MK", "#8b949e"),
     "cmakelists.txt": ("CMAKE", "#064f8c"),
@@ -106,6 +110,7 @@ _ICON_CACHE: dict[tuple, QIcon] = {}
 _DISPLAY_NAME_ROLE = Qt.ItemDataRole.UserRole.value + 1
 _LOAD_GENERATION_ROLE = Qt.ItemDataRole.UserRole.value + 2
 _IS_DIR_ROLE = Qt.ItemDataRole.UserRole.value + 3
+_FILE_TREE_MOVE_MIME = "application/x-aichs-file-tree-move"
 
 
 def _path_key(path: str) -> str:
@@ -193,10 +198,60 @@ def _delete_workspace_path(root_path: str, path: str) -> None:
     raise FileNotFoundError(f"Path not found: {target}")
 
 
+def _move_workspace_paths(root_path: str, paths: list[str], folder: str) -> Path:
+    root = Path(root_path).resolve()
+    destination = Path(folder)
+    if not destination.is_dir():
+        raise ValueError("Choose a destination folder in the workspace.")
+    _ensure_path_in_workspace(root_path, destination)
+    destination_resolved = destination.resolve(strict=False)
+
+    moves: list[tuple[Path, Path]] = []
+    seen_sources: set[str] = set()
+    seen_targets: set[str] = set()
+    for raw_path in paths:
+        source = Path(raw_path)
+        if not source.is_file() and not source.is_dir():
+            raise ValueError("Choose a file or folder in the workspace.")
+        _ensure_path_in_workspace(root_path, source)
+        source_resolved = source.resolve(strict=False)
+        source_key = _path_key(str(source_resolved))
+        if source_key in seen_sources:
+            continue
+        seen_sources.add(source_key)
+        if source_resolved == root:
+            raise ValueError("Cannot move the workspace folder.")
+        if source_resolved == destination_resolved:
+            raise ValueError("Cannot move a folder into itself.")
+        if source.is_dir() and source_resolved in destination_resolved.parents:
+            raise ValueError("Cannot move a folder into one of its children.")
+        target = destination / source.name
+        _ensure_path_in_workspace(root_path, target)
+        if target.resolve(strict=False) == source_resolved:
+            raise ValueError("Path is already in that folder.")
+        if target.exists():
+            raise FileExistsError(f"Path already exists: {target.name}")
+        target_key = _path_key(str(target))
+        if target_key in seen_targets:
+            raise FileExistsError(f"Path already exists: {target.name}")
+        seen_targets.add(target_key)
+        moves.append((source, target))
+
+    selected_sources = [source.resolve(strict=False) for source, _target in moves]
+    for source in selected_sources:
+        for other in selected_sources:
+            if source != other and other in source.parents:
+                raise ValueError("Cannot move both a folder and one of its children.")
+
+    for source, target in moves:
+        shutil.move(str(source), str(target))
+    return destination
+
+
 def _is_visible_tree_entry(name: str, is_dir: bool) -> bool:
     if name in IGNORED:
         return False
-    return is_dir or not name.startswith(".")
+    return True
 
 
 def _file_icon_type(name: str) -> tuple[str, str]:
@@ -526,6 +581,7 @@ class _FileTreeActionThread(QThread):
         parent=None,
         *,
         name: str = "",
+        destination: str = "",
         rel_path: str | list[str] = "",
         staged: bool = False,
     ):
@@ -535,10 +591,11 @@ class _FileTreeActionThread(QThread):
         self._paths = [path] if isinstance(path, str) else list(path)
         if not self._paths:
             raise ValueError("No paths provided for action")
-        if len(self._paths) > 1 and action not in {"delete", "discard"}:
+        if len(self._paths) > 1 and action not in {"delete", "discard", "move"}:
             raise ValueError(f"Action {action!r} expects one path.")
         self._path = self._paths[0]
         self._name = name
+        self._destination = destination
         rel_paths = [rel_path] if isinstance(rel_path, str) else list(rel_path)
         self._rel_paths = rel_paths
         self._staged = staged
@@ -555,6 +612,8 @@ class _FileTreeActionThread(QThread):
                 for path in self._paths:
                     _delete_workspace_path(self._root_path, path)
                 result_path = Path(self._paths[0])
+            elif self._action == "move":
+                result_path = _move_workspace_paths(self._root_path, self._paths, self._destination)
             elif self._action == "discard":
                 if len(self._paths) != len(self._rel_paths):
                     raise ValueError("Discard action path mismatch.")
@@ -593,6 +652,7 @@ class FileTree(QTreeWidget):
         self._git_status_generation = 0
         self._pending_expanded_path_keys: set[str] = set()
         self._pending_current_path = ""
+        self._move_drop_highlight_item: QTreeWidgetItem | None = None
         self._refresh_threads: list[_FileTreeRefreshThread] = []
         self._children_threads: list[_FileTreeChildrenThread] = []
         self._git_status_threads: list[_FileTreeGitStatusThread] = []
@@ -606,8 +666,9 @@ class FileTree(QTreeWidget):
         self.setIconSize(QSize(18, 18))
         self.setStyle(QStyleFactory.create("Fusion"))
         self.setDragEnabled(True)
-        self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
-        self.setDefaultDropAction(Qt.DropAction.CopyAction)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self._apply_tree_style()
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._context_menu)
@@ -785,10 +846,15 @@ class FileTree(QTreeWidget):
 
     def mimeData(self, items: list[QTreeWidgetItem]) -> QMimeData:
         refs = []
+        move_paths = []
         root = Path(self.root_path).resolve()
         for item in items:
             path = item.data(0, Qt.ItemDataRole.UserRole)
-            if not path or not os.path.isfile(path):
+            if not path:
+                continue
+            if os.path.isfile(path) or os.path.isdir(path):
+                move_paths.append(str(Path(path).resolve(strict=False)))
+            if not os.path.isfile(path):
                 continue
             try:
                 refs.append(Path(path).resolve().relative_to(root).as_posix())
@@ -798,7 +864,191 @@ class FileTree(QTreeWidget):
         if refs:
             mime.setData(AICHS_FILE_DROP_MIME, file_drop_payload(refs))
             mime.setText(file_drop_text(refs))
+        if move_paths:
+            payload = {
+                "kind": "aichs-file-tree-move",
+                "root": _path_key(self.root_path),
+                "paths": move_paths,
+            }
+            mime.setData(_FILE_TREE_MOVE_MIME, json.dumps(payload).encode("utf-8"))
         return mime
+
+    def dragEnterEvent(self, event):
+        if self._has_move_drag_payload(event):
+            self._set_move_drop_highlight(
+                self._event_pos(event),
+                self._move_paths_from_mime(event.mimeData()),
+            )
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+            return
+        self._clear_move_drop_highlight()
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        if self._has_move_drag_payload(event):
+            self._set_move_drop_highlight(
+                self._event_pos(event),
+                self._move_paths_from_mime(event.mimeData()),
+            )
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+            return
+        self._clear_move_drop_highlight()
+        event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self._clear_move_drop_highlight()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        paths = self._move_paths_from_mime(event.mimeData())
+        destination = self._move_drop_target_folder(self._event_pos(event))
+        self._clear_move_drop_highlight()
+        if not self._is_valid_move_drop(paths, destination):
+            event.ignore()
+            return
+        if self._move_paths_dialog(paths, destination):
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+            return
+        event.ignore()
+
+    def _has_move_drag_payload(self, event) -> bool:
+        return bool(self._move_paths_from_mime(event.mimeData()))
+
+    @staticmethod
+    def _event_pos(event):
+        if hasattr(event, "position"):
+            return event.position().toPoint()
+        if hasattr(event, "pos"):
+            return event.pos()
+        return None
+
+    def _move_paths_from_mime(self, mime: QMimeData) -> list[str]:
+        if not mime.hasFormat(_FILE_TREE_MOVE_MIME):
+            return []
+        try:
+            data = json.loads(bytes(mime.data(_FILE_TREE_MOVE_MIME)).decode("utf-8"))
+        except (TypeError, ValueError, UnicodeDecodeError):
+            return []
+        if data.get("kind") != "aichs-file-tree-move":
+            return []
+        if data.get("root") != _path_key(self.root_path):
+            return []
+        paths = data.get("paths")
+        if not isinstance(paths, list):
+            return []
+        clean: list[str] = []
+        seen: set[str] = set()
+        for raw_path in paths:
+            if not isinstance(raw_path, str) or not raw_path:
+                continue
+            key = _path_key(raw_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            clean.append(raw_path)
+        return clean
+
+    def _move_drop_target_folder(self, pos) -> str:
+        item = self.itemAt(pos) if pos is not None else None
+        path = item.data(0, Qt.ItemDataRole.UserRole) if item else ""
+        if path and os.path.isdir(path):
+            return str(path)
+        if path and os.path.isfile(path):
+            return str(Path(path).parent)
+        return self.root_path
+
+    def _is_valid_move_drop(self, paths: list[str], destination: str) -> bool:
+        if not paths or not destination:
+            return False
+        try:
+            root = Path(self.root_path).resolve()
+            dest = Path(destination)
+            if not dest.is_dir():
+                return False
+            _ensure_path_in_workspace(self.root_path, dest)
+            dest_resolved = dest.resolve(strict=False)
+            selected: list[Path] = []
+            seen_targets: set[str] = set()
+            for raw_path in paths:
+                source = Path(raw_path)
+                if not source.is_file() and not source.is_dir():
+                    return False
+                _ensure_path_in_workspace(self.root_path, source)
+                source_resolved = source.resolve(strict=False)
+                if source_resolved == root:
+                    return False
+                if source_resolved == dest_resolved:
+                    return False
+                if source.is_dir() and source_resolved in dest_resolved.parents:
+                    return False
+                target = dest / source.name
+                if target.resolve(strict=False) == source_resolved:
+                    return False
+                if target.exists():
+                    return False
+                target_key = _path_key(str(target))
+                if target_key in seen_targets:
+                    return False
+                seen_targets.add(target_key)
+                selected.append(source_resolved)
+            for source in selected:
+                for other in selected:
+                    if source != other and other in source.parents:
+                        return False
+        except (OSError, ValueError):
+            return False
+        return True
+
+    def _move_drop_target_item(self, pos) -> QTreeWidgetItem | None:
+        item = self.itemAt(pos) if pos is not None else None
+        if item is None:
+            return None
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if path and os.path.isdir(path):
+            return item
+        if path and os.path.isfile(path):
+            return item.parent()
+        return None
+
+    def _set_move_drop_highlight(self, pos, paths: list[str]) -> None:
+        item = self._move_drop_target_item(pos)
+        destination = self._move_drop_target_folder(pos)
+        if item is not None and not self._is_valid_move_drop(paths, destination):
+            item = None
+        if item is self._move_drop_highlight_item:
+            return
+        self._clear_move_drop_highlight()
+        if item is None:
+            return
+        self._move_drop_highlight_item = item
+        self.viewport().update()
+
+    def _clear_move_drop_highlight(self) -> None:
+        if self._move_drop_highlight_item is None:
+            return
+        self._move_drop_highlight_item = None
+        self.viewport().update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._move_drop_highlight_item is None:
+            return
+        rect = self.visualItemRect(self._move_drop_highlight_item)
+        if not rect.isValid() or rect.isEmpty():
+            return
+        fill = QColor(ACCENT)
+        fill.setAlpha(42)
+        outline = QColor(ACCENT)
+        outline.setAlpha(190)
+        painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(outline, 1.4))
+        painter.setBrush(QBrush(fill))
+        painter.drawRoundedRect(rect.adjusted(1, 1, -2, -2), 4, 4)
+        painter.end()
 
     def _context_menu(self, pos):
         menu = QMenu(self)
@@ -809,15 +1059,18 @@ class FileTree(QTreeWidget):
             selected = []
         if path and path not in selected:
             selected = [path]
+        new_item_folder = self._context_new_item_folder(path)
         if selected and len(selected) == 1 and path and os.path.isdir(path):
             new_file = QAction("New File...", self)
             new_file.setShortcut(QKeySequence("Ctrl+Alt+N"))
             new_file.triggered.connect(lambda: self._new_file_dialog(path))
             menu.addAction(new_file)
+        if new_item_folder:
             new_folder = QAction("New Folder...", self)
             new_folder.setShortcut(QKeySequence("Ctrl+Shift+N"))
-            new_folder.triggered.connect(lambda: self._new_folder_dialog(path))
+            new_folder.triggered.connect(lambda: self._new_folder_dialog(new_item_folder))
             menu.addAction(new_folder)
+        if selected and len(selected) == 1 and path and os.path.isdir(path):
             rename_folder = QAction("Rename...", self)
             rename_folder.setShortcut(QKeySequence("F2"))
             rename_folder.triggered.connect(lambda: self._rename_path_dialog(path))
@@ -869,11 +1122,20 @@ class FileTree(QTreeWidget):
                 discard.triggered.connect(lambda: self._discard_file_dialog(selected, staged=staged))
                 menu.addAction(discard)
             menu.addSeparator()
+        elif new_item_folder:
+            menu.addSeparator()
         refresh = QAction("Refresh", self)
         refresh.setShortcut(QKeySequence("F5"))
         refresh.triggered.connect(self.refresh)
         menu.addAction(refresh)
         menu.exec(self.viewport().mapToGlobal(pos))
+
+    def _context_new_item_folder(self, path: str) -> str:
+        if path and os.path.isdir(path):
+            return path
+        if path and os.path.isfile(path):
+            return str(Path(path).parent)
+        return self.root_path
 
     def _new_file_dialog(self, folder: str):
         name, ok = QInputDialog.getText(self, "New file", "File name:")
@@ -960,12 +1222,38 @@ class FileTree(QTreeWidget):
             return
         self._start_action("delete", targets)
 
+    def _move_paths_dialog(self, paths: list[str], destination: str) -> bool:
+        targets = self._as_path_list(paths)
+        if not targets:
+            return False
+        target_folder = Path(destination)
+        if len(targets) == 1:
+            source = Path(targets[0])
+            kind = "folder" if source.is_dir() else "file"
+            title = f"Move {kind}"
+            message = f"Move {kind} '{source.name}' to '{target_folder.name}'?"
+        else:
+            title = f"Move {len(targets)} items"
+            message = f"Move {len(targets)} selected items to '{target_folder.name}'?"
+        answer = QMessageBox.question(
+            self,
+            title,
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        self._start_action("move", targets, destination=destination)
+        return True
+
     def _start_action(
         self,
         action: str,
         path: str | list[str],
         *,
         name: str = "",
+        destination: str = "",
         rel_path: str | list[str] = "",
         staged: bool = False,
     ) -> None:
@@ -977,6 +1265,7 @@ class FileTree(QTreeWidget):
             path,
             None,
             name=name,
+            destination=destination,
             rel_path=rel_path,
             staged=staged,
         )
@@ -992,7 +1281,7 @@ class FileTree(QTreeWidget):
             return
         clear_workspace_file_cache(self.root_path)
         self.refresh()
-        if action in {"create_file", "create_folder", "rename"} and path:
+        if action in {"create_file", "create_folder", "rename", "move"} and path:
             self.mark_touched(path)
         if action == "create_file" and path:
             self.file_opened.emit(path)
@@ -1014,6 +1303,8 @@ class FileTree(QTreeWidget):
             return f"Delete {kind} failed"
         if action == "discard":
             return "Discard failed"
+        if action == "move":
+            return "Move failed"
         return "File action failed"
 
     def create_file(self, folder: str, name: str) -> Path:
@@ -1040,6 +1331,11 @@ class FileTree(QTreeWidget):
     def delete_path(self, path: str) -> None:
         _delete_workspace_path(self.root_path, path)
         clear_workspace_file_cache(self.root_path)
+
+    def move_paths(self, paths: list[str], destination: str) -> Path:
+        moved_to = _move_workspace_paths(self.root_path, paths, destination)
+        clear_workspace_file_cache(self.root_path)
+        return moved_to
 
     def _ensure_in_workspace(self, path: Path) -> None:
         _ensure_path_in_workspace(self.root_path, path)
@@ -1653,6 +1949,7 @@ class LeftPanel(QWidget):
     file_search_requested = pyqtSignal()
     text_search_requested = pyqtSignal()
     extensions_requested  = pyqtSignal()
+    mcp_requested         = pyqtSignal()
     workspace_requested   = pyqtSignal()
     canvas_requested      = pyqtSignal()
     activity_selected     = pyqtSignal(str)
@@ -1763,6 +2060,12 @@ class LeftPanel(QWidget):
         self._extensions_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._extensions_btn.clicked.connect(self.extensions_requested.emit)
         rail_layout.addWidget(self._extensions_btn)
+
+        self._mcp_btn = QPushButton("MCP")
+        self._mcp_btn.setToolTip("MCP servers")
+        self._mcp_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mcp_btn.clicked.connect(self.mcp_requested.emit)
+        rail_layout.addWidget(self._mcp_btn)
 
         self._docs_btn = QPushButton("Docs")
         self._docs_btn.setToolTip("Documentation")
@@ -1905,6 +2208,7 @@ class LeftPanel(QWidget):
         self._git_header.apply_appearance()
         footer_style = sidebar_footer_button_style()
         self._extensions_btn.setStyleSheet(footer_style)
+        self._mcp_btn.setStyleSheet(footer_style)
         self._search_btn.setStyleSheet(footer_style)
         self._docs_btn.setStyleSheet(footer_style)
         self._settings_btn.setStyleSheet(footer_style)

@@ -57,6 +57,8 @@ class RemoteImageTextBrowser(QTextBrowser):
         try:
             if reply.error() != QNetworkReply.NetworkError.NoError:
                 return
+            if not reply.isOpen():
+                return
             data = bytes(reply.readAll())
             image = image_from_markdown_image_data(data)
             if image.isNull():

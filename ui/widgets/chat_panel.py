@@ -1,3 +1,4 @@
+import base64
 import copy
 import html
 import json
@@ -13,6 +14,7 @@ from uuid import uuid4
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QFrame,
     QLabel, QPushButton, QComboBox, QSizePolicy, QMenu, QFileDialog, QMessageBox,
+    QPlainTextEdit, QToolButton,
 )
 from PyQt6.QtCore import (
     Qt, QPoint, QPointF, QSize, QTimer, pyqtSignal, QThread,
@@ -66,7 +68,7 @@ from ui.theme import (
     palette, input_bar_style, separator_color,
     send_button_style, stop_button_style, floating_button_style,
     tool_notice_style, center_notice_style, icon_button_style, inline_code_style,
-    secondary_button_style, surface_frame_style, hint_label_style,
+    secondary_button_style, surface_frame_style, hint_label_style, code_text_edit_style,
     compact_combo_box_style,
     chat_header_style, WORKBENCH_HEADER_MARGINS, WORKBENCH_HEADER_SPACING,
 )
@@ -89,6 +91,7 @@ from ui.widgets.context_ring import ContextRing
 from ui.widgets.context_breakdown import ContextBreakdownDialog
 from ui.widgets.extension_contributions import ExtensionContributionsBar
 from ui.widgets.extensions_dialog import ExtensionsDialog
+from ui.widgets.mcp_dialog import McpDialog
 
 _INITIAL_RENDER_BYTES = 1 * 1024 * 1024
 _INITIAL_RENDER_MESSAGES = 150
@@ -379,6 +382,7 @@ class _AssistantRun:
     last_edit_path: str = ""
     last_tool_name: str = ""
     last_tool_inputs: dict = field(default_factory=dict)
+    last_tool_notice: QWidget | None = None
     active_terminal: TerminalCard | None = None
     crew: dict | None = None
     crew_bubbles: dict[str, MessageBubble] = field(default_factory=dict)
@@ -473,14 +477,22 @@ def _tool_call_notice(name: str, inputs: dict, cwd: str) -> str:
 
 
 def _saved_tool_calls(msg: dict) -> list[tuple[str, dict]]:
-    calls: list[tuple[str, dict]] = []
+    return [(record["name"], record["inputs"]) for record in _saved_tool_call_records(msg)]
+
+
+def _saved_tool_call_records(msg: dict) -> list[dict]:
+    calls: list[dict] = []
     for call in msg.get("tool_calls") or []:
         if not isinstance(call, dict):
             continue
         fn = call.get("function") if isinstance(call.get("function"), dict) else {}
         name = str(fn.get("name") or call.get("name") or "tool")
         args = fn.get("arguments", call.get("arguments", call.get("args", {})))
-        calls.append((name, _tool_inputs_from_saved(args)))
+        calls.append({
+            "id": str(call.get("id") or ""),
+            "name": name,
+            "inputs": _tool_inputs_from_saved(args),
+        })
 
     content = msg.get("content")
     if isinstance(content, list):
@@ -488,8 +500,61 @@ def _saved_tool_calls(msg: dict) -> list[tuple[str, dict]]:
             if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
             name = str(block.get("name") or "tool")
-            calls.append((name, _tool_inputs_from_saved(block.get("input", {}))))
+            calls.append({
+                "id": str(block.get("id") or ""),
+                "name": name,
+                "inputs": _tool_inputs_from_saved(block.get("input", {})),
+            })
     return calls
+
+
+def _saved_tool_outputs(history: list[dict], assistant_index: int, records: list[dict]) -> list[str]:
+    outputs_by_id: dict[str, str] = {}
+    ordered_outputs: list[str] = []
+    index = assistant_index + 1
+    while index < len(history):
+        msg = history[index]
+        if msg.get("role") == "tool":
+            output = _saved_tool_output_text(msg.get("content", ""))
+            tool_call_id = str(msg.get("tool_call_id") or "")
+            if tool_call_id:
+                outputs_by_id[tool_call_id] = output
+            ordered_outputs.append(output)
+            index += 1
+            continue
+        if msg.get("synthetic") == "tool_results" and isinstance(msg.get("content"), list):
+            for block in msg.get("content") or []:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                output = _saved_tool_output_text(block.get("content", ""))
+                tool_use_id = str(block.get("tool_use_id") or "")
+                if tool_use_id:
+                    outputs_by_id[tool_use_id] = output
+                ordered_outputs.append(output)
+            index += 1
+            continue
+        break
+    outputs: list[str] = []
+    for idx, record in enumerate(records):
+        tool_id = str(record.get("id") or "")
+        if tool_id and tool_id in outputs_by_id:
+            outputs.append(outputs_by_id[tool_id])
+        elif idx < len(ordered_outputs):
+            outputs.append(ordered_outputs[idx])
+        else:
+            outputs.append("")
+    return outputs
+
+
+def _saved_tool_output_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, (dict, list)):
+        try:
+            return json.dumps(content, indent=2, ensure_ascii=False, default=str)
+        except TypeError:
+            return content_preview(content)
+    return str(content or "")
 
 
 def _tool_inputs_from_saved(raw) -> dict:
@@ -538,6 +603,9 @@ def _tool_notice_html(text: str) -> str:
     elif raw.startswith("Tool error: "):
         label = "Tool error"
         detail = raw[len("Tool error: "):]
+    elif raw.startswith("Using tool 'mcp__"):
+        label = _mcp_notice_label(raw)
+        detail = _mcp_notice_detail(raw)
 
     label_html = html.escape(label)
     detail_html = html.escape(detail)
@@ -554,19 +622,299 @@ def _tool_notice_html(text: str) -> str:
     )
 
 
+def _mcp_notice_label(text: str) -> str:
+    return "MCP tool"
+
+
+def _mcp_notice_detail(text: str) -> str:
+    return _mcp_notice_name(text) or str(text or "")
+
+
+def _mcp_notice_name(text: str) -> str:
+    match = re.search(r"Using tool '([^']+)'", str(text or ""))
+    return match.group(1) if match else ""
+
+
 def _tool_debug_text(name: str, inputs: dict | None, output: str, cwd: str) -> str:
     inputs = dict(inputs or {})
     lines = [
         f"Tool: {name}",
         f"CWD: {cwd}",
-        "Inputs:",
-        _json_debug(inputs) if inputs else "(not captured)",
     ]
+    if inputs:
+        lines.extend(["Inputs:", _json_debug(inputs)])
     if output:
         lines.extend(["Output:", str(output)])
     if name == "edit_file":
         lines.extend(_edit_file_debug_lines(inputs, cwd))
     return "\n".join(lines)
+
+
+def _parse_tool_debug_text(text: str) -> dict[str, str]:
+    parsed = {"tool": "", "cwd": "", "inputs": "", "output": "", "diagnostics": ""}
+    current = ""
+    sections: dict[str, list[str]] = {"inputs": [], "output": [], "diagnostics": []}
+    for raw_line in str(text or "").splitlines():
+        if raw_line.startswith("Tool: "):
+            parsed["tool"] = raw_line[len("Tool: ") :].strip()
+            current = ""
+        elif raw_line.startswith("CWD: "):
+            parsed["cwd"] = raw_line[len("CWD: ") :].strip()
+            current = ""
+        elif raw_line == "Inputs:":
+            current = "inputs"
+        elif raw_line == "Output:":
+            current = "output"
+        elif raw_line.endswith(" debug:"):
+            current = "diagnostics"
+            sections[current].append(raw_line)
+        elif current:
+            sections[current].append(raw_line)
+        elif raw_line.strip():
+            sections["diagnostics"].append(raw_line)
+    for key, lines in sections.items():
+        parsed[key] = "\n".join(lines).strip()
+    return parsed
+
+
+def _tool_debug_subject_label(name: str) -> str:
+    return "MCP tool" if str(name or "").startswith("mcp__") else "Tool"
+
+
+def _tool_output_is_error(output: str) -> bool:
+    text = str(output or "")
+    if text.lstrip().startswith("[tool error]"):
+        return True
+    data = _tool_output_json(text)
+    return isinstance(data, dict) and bool(data.get("isError") or data.get("is_error"))
+
+
+def _tool_output_display_text(output: str) -> str:
+    text = str(output or "")
+    if _tool_output_is_error(text):
+        text = text.lstrip()[len("[tool error]") :].strip()
+        standard = _standard_mcp_result_display_text(text)
+        if standard is not None:
+            return standard or "Failed."
+        return _redact_tool_output_images(text) or "Failed."
+    standard = _standard_mcp_result_display_text(text)
+    if standard is not None:
+        return standard
+    return _redact_tool_output_images(text)
+
+
+def _tool_output_image_pixmap(output: str) -> QPixmap | None:
+    payload = next(iter(_tool_output_image_payloads(output)), None)
+    if payload is None:
+        return None
+    data = str(payload.get("data") or "")
+    if not data:
+        return None
+    try:
+        raw = base64.b64decode("".join(data.split()), validate=False)
+    except Exception:
+        return None
+    pixmap = QPixmap()
+    if not pixmap.loadFromData(raw):
+        return None
+    max_width = 520
+    max_height = 360
+    if pixmap.width() > max_width or pixmap.height() > max_height:
+        pixmap = pixmap.scaled(
+            max_width,
+            max_height,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    return pixmap
+
+
+def _tool_output_json(output: str):
+    text = str(output or "").strip()
+    if _tool_output_is_error_prefix(text):
+        text = text.lstrip()[len("[tool error]") :].strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def _tool_output_is_error_prefix(output: str) -> bool:
+    return str(output or "").lstrip().startswith("[tool error]")
+
+
+def _standard_mcp_result_display_text(output: str) -> str | None:
+    data = _tool_output_json(output)
+    if not isinstance(data, dict):
+        return None
+    content = data.get("content")
+    structured = data.get("structuredContent", data.get("structured_content"))
+    if not isinstance(content, list) and structured is None:
+        return None
+    parts: list[str] = []
+    if isinstance(content, list):
+        for item in content:
+            summary = _mcp_content_block_display_text(item)
+            if summary:
+                parts.append(summary)
+    if structured is not None:
+        parts.append("Structured content:\n" + json.dumps(structured, indent=2, ensure_ascii=False, default=str))
+    return "\n\n".join(parts).strip()
+
+
+def _mcp_content_block_display_text(item) -> str:
+    if not isinstance(item, dict):
+        return content_preview(item)
+    kind = str(item.get("type") or "").casefold()
+    if kind == "text":
+        return str(item.get("text") or "")
+    if kind == "image":
+        return _binary_content_summary("image", item.get("mimeType") or item.get("mime_type"), item.get("data"))
+    if kind == "audio":
+        return _binary_content_summary("audio", item.get("mimeType") or item.get("mime_type"), item.get("data"))
+    if kind == "resource_link":
+        title = str(item.get("title") or item.get("name") or "resource")
+        uri = str(item.get("uri") or "")
+        mime = str(item.get("mimeType") or item.get("mime_type") or "")
+        details = [f"Resource link: {title}"]
+        if uri:
+            details.append(f"URI: {uri}")
+        if mime:
+            details.append(f"MIME: {mime}")
+        return "\n".join(details)
+    if kind == "resource":
+        return _embedded_resource_display_text(item.get("resource"))
+    return json.dumps(_redact_mcp_binary_payloads(item), indent=2, ensure_ascii=False, default=str)
+
+
+def _embedded_resource_display_text(resource) -> str:
+    if not isinstance(resource, dict):
+        return content_preview(resource)
+    uri = str(resource.get("uri") or "embedded resource")
+    mime = str(resource.get("mimeType") or resource.get("mime_type") or "")
+    if resource.get("text") is not None:
+        header = f"Embedded resource: {uri}"
+        if mime:
+            header += f" ({mime})"
+        return f"{header}\n{resource.get('text')}"
+    if resource.get("blob") is not None:
+        return _binary_content_summary("embedded resource", mime, resource.get("blob"), uri=uri)
+    return f"Embedded resource: {uri}"
+
+
+def _binary_content_summary(kind: str, mime, data, *, uri: str = "") -> str:
+    label = str(kind or "binary")
+    mime_text = str(mime or "")
+    size = len(data) if isinstance(data, str) else 0
+    bits = [f"{label.capitalize()}: {mime_text or 'unknown MIME'}"]
+    if uri:
+        bits.append(f"URI: {uri}")
+    if size:
+        bits.append(f"Base64 data: {size} chars")
+    return "\n".join(bits)
+
+
+def _tool_output_image_payloads(output: str) -> list[dict]:
+    data = _tool_output_json(output)
+    if data is None:
+        return []
+    images: list[dict] = []
+    if isinstance(data, dict) and isinstance(data.get("content"), list):
+        for item in data.get("content") or []:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("type") or "").casefold()
+            if kind == "image" and isinstance(item.get("data"), str):
+                images.append({
+                    "mime": str(item.get("mimeType") or item.get("mime_type") or ""),
+                    "data": item["data"],
+                })
+            elif kind == "resource":
+                resource = item.get("resource")
+                if not isinstance(resource, dict):
+                    continue
+                mime = str(resource.get("mimeType") or resource.get("mime_type") or "")
+                blob = resource.get("blob")
+                if mime.casefold().startswith("image/") and isinstance(blob, str):
+                    images.append({"mime": mime, "data": blob})
+        if images:
+            return images
+
+    def walk(value):
+        if isinstance(value, dict):
+            mime = str(
+                value.get("mimeType")
+                or value.get("mime_type")
+                or value.get("mime")
+                or value.get("media_type")
+                or ""
+            )
+            kind = str(value.get("type") or "").casefold()
+            raw_data = value.get("data")
+            if isinstance(raw_data, str) and (mime.casefold().startswith("image/") or kind == "image"):
+                images.append({"mime": mime, "data": raw_data})
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(data)
+    return images
+
+
+def _redact_tool_output_images(output: str) -> str:
+    text = str(output or "")
+    stripped = text.strip()
+    if not stripped:
+        return text
+    data = _tool_output_json(stripped)
+    if data is None:
+        return text
+    redacted, changed = _redact_mcp_binary_payloads(data, report_changed=True)
+    if not changed:
+        return text
+    return json.dumps(redacted, indent=2, ensure_ascii=False, default=str)
+
+
+def _redact_mcp_binary_payloads(data, *, report_changed: bool = False):
+    changed = False
+
+    def redact(value):
+        nonlocal changed
+        if isinstance(value, dict):
+            mime = str(
+                value.get("mimeType")
+                or value.get("mime_type")
+                or value.get("mime")
+                or value.get("media_type")
+                or ""
+            )
+            kind = str(value.get("type") or "").casefold()
+            is_binary = kind in {"image", "audio"} or mime.casefold().startswith(("image/", "audio/"))
+            updated = {}
+            for key, child in value.items():
+                if (
+                    key in {"data", "blob"}
+                    and isinstance(child, str)
+                    and is_binary
+                ):
+                    label = kind or mime or "binary"
+                    updated[key] = f"[base64 {label} data omitted: {len(child)} chars]"
+                    changed = True
+                else:
+                    updated[key] = redact(child)
+            return updated
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        return value
+
+    redacted = redact(data)
+    if report_changed:
+        return redacted, changed
+    return redacted
 
 
 def _edit_file_debug_lines(inputs: dict, cwd: str) -> list[str]:
@@ -694,6 +1042,213 @@ class _ScrollHost(QWidget):
         btn.move(self.width() - btn.width() - 16, self.height() - btn.height() - 16)
 
 
+class _ToolNoticeWidget(QFrame):
+    def __init__(self, text: str, debug_text: str, parent=None):
+        super().__init__(parent)
+        self._text = str(text or "")
+        self._debug_text = str(debug_text or self._text)
+        self._section_boxes: dict[str, QPlainTextEdit] = {}
+        self._section_frames: dict[str, QFrame] = {}
+        self._meta_labels: dict[str, QLabel] = {}
+        self._meta_title_labels: dict[str, QLabel] = {}
+        self._section_titles: dict[str, QLabel] = {}
+        self._output_image: QLabel | None = None
+        self.setObjectName("aichs-tool-notice-frame")
+        self.setProperty("aichs-tool-text", self._text)
+        self.setProperty("aichs-tool-debug-text", self._debug_text)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        header = QWidget(self)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(6)
+
+        self._details_btn = QToolButton(header)
+        self._details_btn.setObjectName("aichs-tool-details-toggle")
+        self._details_btn.setText(">")
+        self._details_btn.setCheckable(True)
+        self._details_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._details_btn.setToolTip("Show tool details")
+        self._details_btn.clicked.connect(self._toggle_details)
+
+        self._label = QLabel(self._text, header)
+        self._label.setObjectName("aichs-tool-notice")
+        self._label.setProperty("aichs-tool-text", self._text)
+        self._label.setProperty("aichs-tool-debug-text", self._debug_text)
+        self._label.setTextFormat(Qt.TextFormat.RichText)
+        self._label.setWordWrap(True)
+        self._label.setMaximumWidth(760)
+        self._label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+
+        self._error_status = QLabel("X", header)
+        self._error_status.setObjectName("aichs-tool-error-status")
+        self._error_status.setToolTip("Tool failed")
+        self._error_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._error_status.hide()
+
+        header_layout.addWidget(self._details_btn, 0, Qt.AlignmentFlag.AlignTop)
+        header_layout.addWidget(self._label, 1)
+        header_layout.addWidget(self._error_status, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(header)
+
+        self._details = QFrame(self)
+        self._details.setObjectName("aichs-tool-details-panel")
+        details_layout = QVBoxLayout(self._details)
+        details_layout.setContentsMargins(22, 4, 0, 0)
+        details_layout.setSpacing(6)
+
+        meta = QFrame(self._details)
+        meta.setObjectName("aichs-tool-details-meta")
+        meta_layout = QHBoxLayout(meta)
+        meta_layout.setContentsMargins(8, 5, 8, 5)
+        meta_layout.setSpacing(10)
+        for key, label in (("tool", "Tool"), ("cwd", "CWD")):
+            title = QLabel(label, meta)
+            title.setObjectName("aichs-tool-detail-key")
+            value = QLabel("", meta)
+            value.setObjectName("aichs-tool-detail-value")
+            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            value.setWordWrap(False)
+            value.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            self._meta_title_labels[key] = title
+            self._meta_labels[key] = value
+            meta_layout.addWidget(title, 0)
+            meta_layout.addWidget(value, 1)
+        details_layout.addWidget(meta)
+
+        io_row = QWidget(self._details)
+        io_layout = QHBoxLayout(io_row)
+        io_layout.setContentsMargins(0, 0, 0, 0)
+        io_layout.setSpacing(8)
+        for key, title in (("inputs", "Inputs"), ("output", "Output")):
+            section, box = self._detail_section(key, title)
+            self._section_frames[key] = section
+            self._section_boxes[key] = box
+            io_layout.addWidget(section, 1)
+        details_layout.addWidget(io_row)
+
+        extra_section, extra_box = self._detail_section("diagnostics", "Diagnostics")
+        self._section_frames["diagnostics"] = extra_section
+        self._section_boxes["diagnostics"] = extra_box
+        details_layout.addWidget(extra_section)
+        extra_section.setProperty("aichs-extra-section", True)
+        self._extra_section = extra_section
+
+        self._details.hide()
+        layout.addWidget(self._details)
+
+        self._sync_details()
+        self.apply_appearance()
+
+    def label(self) -> QLabel:
+        return self._label
+
+    def set_debug_text(self, debug_text: str) -> None:
+        self._debug_text = str(debug_text or self._text)
+        self.setProperty("aichs-tool-debug-text", self._debug_text)
+        self._label.setProperty("aichs-tool-debug-text", self._debug_text)
+        self._sync_details()
+
+    def _detail_section(self, key: str, title: str) -> tuple[QFrame, QPlainTextEdit]:
+        section = QFrame(self._details)
+        section.setObjectName("aichs-tool-detail-section")
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(8, 6, 8, 8)
+        layout.setSpacing(5)
+        label = QLabel(title, section)
+        label.setObjectName("aichs-tool-detail-title")
+        box = QPlainTextEdit(section)
+        box.setObjectName(f"aichs-tool-detail-{key}")
+        box.setReadOnly(True)
+        box.setMaximumHeight(180)
+        box.setMinimumHeight(72)
+        self._section_titles[key] = label
+        layout.addWidget(label)
+        layout.addWidget(box)
+        if key == "output":
+            self._output_image = QLabel(section)
+            self._output_image.setObjectName("aichs-tool-output-image")
+            self._output_image.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            self._output_image.setScaledContents(False)
+            self._output_image.hide()
+            layout.addWidget(self._output_image)
+        return section, box
+
+    def _sync_details(self):
+        parsed = _parse_tool_debug_text(self._debug_text)
+        is_error = _tool_output_is_error(parsed["output"])
+        output = _tool_output_display_text(parsed["output"])
+        image_pixmap = _tool_output_image_pixmap(parsed["output"])
+        self._meta_title_labels["tool"].setText(_tool_debug_subject_label(parsed["tool"]))
+        self._meta_labels["tool"].setText(parsed["tool"] or "(unknown)")
+        self._meta_labels["cwd"].setText(parsed["cwd"] or "(unknown)")
+        self._section_boxes["inputs"].setPlainText(parsed["inputs"] or "(none)")
+        self._section_titles["output"].setText("Error" if is_error else "Output")
+        self._section_boxes["output"].setPlainText(output or "(pending)")
+        if self._output_image is not None:
+            if image_pixmap is None:
+                self._output_image.clear()
+                self._output_image.hide()
+            else:
+                self._output_image.setPixmap(image_pixmap)
+                self._output_image.setVisible(True)
+        self._section_boxes["diagnostics"].setPlainText(parsed["diagnostics"])
+        self._section_frames["inputs"].setVisible(bool(parsed["inputs"].strip()))
+        self._extra_section.setVisible(bool(parsed["diagnostics"].strip()))
+        self._error_status.setVisible(is_error)
+
+    def apply_appearance(self):
+        p = palette()
+        section_style = (
+            "QFrame#aichs-tool-notice-frame { background:transparent; border:none; }"
+            "QFrame#aichs-tool-details-panel { background:transparent; border:none; }"
+            f"QFrame#aichs-tool-details-meta, QFrame#aichs-tool-detail-section {{"
+            f" background:{p['BG2']}; border:1px solid {p['BORDER_SUBTLE']}; border-radius:7px;"
+            "}"
+            f"QLabel#aichs-tool-detail-key, QLabel#aichs-tool-detail-title {{"
+            f" color:{p['TEXT_DIM']}; font-weight:650;"
+            "}"
+            f"QLabel#aichs-tool-detail-value {{ color:{p['TEXT']}; }}"
+            "QLabel#aichs-tool-error-status {"
+            " color:#f87171; background:transparent; border:1px solid #5f252d;"
+            " border-radius:9px; font-weight:800; min-width:18px; max-width:18px;"
+            " min-height:18px; max-height:18px;"
+            "}"
+            "QLabel#aichs-tool-output-image {"
+            f" background:{p['BG3']}; border:1px solid {p['BORDER_SUBTLE']};"
+            " border-radius:6px; padding:6px;"
+            "}"
+        )
+        self.setStyleSheet(section_style)
+        self._label.setStyleSheet(tool_notice_style())
+        self._label.setText(_tool_notice_html(self._text))
+        self._details_btn.setStyleSheet(
+            "QToolButton#aichs-tool-details-toggle {"
+            f"background:transparent; color:{p['TEXT_DIM']}; border:none;"
+            f"font-size:{max(13, self.font().pointSize() + 2)}px; font-weight:700;"
+            "min-width:18px; max-width:18px; min-height:18px; max-height:18px; padding:0;"
+            "}"
+            "QToolButton#aichs-tool-details-toggle:hover {"
+            f"background:{p['BG3']}; color:{p['TEXT']};"
+            "}"
+            "QToolButton#aichs-tool-details-toggle:checked {"
+            f"background:{p['BG3']}; color:{p['TEXT']};"
+            "}"
+        )
+        for box in self._section_boxes.values():
+            box.setStyleSheet(code_text_edit_style(font_pt=max(10, self.font().pointSize()), padding="7px"))
+
+    def _toggle_details(self):
+        expanded = self._details_btn.isChecked()
+        self._details.setVisible(expanded)
+        self._details_btn.setText("v" if expanded else ">")
+        self._details_btn.setToolTip("Hide tool details" if expanded else "Show tool details")
+
+
 class ChatPanel(QWidget):
     saved        = pyqtSignal()
     conversation_created = pyqtSignal(str)
@@ -791,6 +1346,7 @@ class ChatPanel(QWidget):
         self._stream_flush_timer.timeout.connect(self._flush_stream_buffer)
         self._external_stream_conv_id = ""
         self._external_stream_bubble: MessageBubble | None = None
+        self._external_tool_notices: dict[tuple[str, str], tuple[QWidget, dict]] = {}
         self._scroll_layout_timer = QTimer(self)
         self._scroll_layout_timer.setSingleShot(True)
         self._scroll_layout_timer.setInterval(100)
@@ -1174,9 +1730,13 @@ class ChatPanel(QWidget):
         if self._external_stream_bubble is not None:
             self._external_stream_bubble = None
             self.active_bubble = None
-        self._add_tool_notice(
+        notice = self._add_tool_notice(
             _tool_call_notice(str(name or "tool"), dict(inputs or {}), self.cwd),
             debug_text=_tool_debug_text(str(name or "tool"), dict(inputs or {}), "", self.cwd),
+        )
+        self._external_tool_notices[(str(conv_id or ""), str(name or "tool"))] = (
+            notice,
+            copy.deepcopy(dict(inputs or {})),
         )
         return True
 
@@ -1184,12 +1744,9 @@ class ChatPanel(QWidget):
         if str(conv_id or "") != self.current_conversation_id():
             return False
         output = str(output or "")
-        if output.startswith("[tool error]"):
-            message = output[len("[tool error]") :].strip() or "Tool failed."
-            self._add_tool_notice(
-                f"Tool error: {message}",
-                debug_text=_tool_debug_text(str(name or "tool"), {}, output, self.cwd),
-            )
+        tool_name = str(name or "tool")
+        notice, inputs = self._external_tool_notices.pop((str(conv_id or ""), tool_name), (None, {}))
+        self._update_tool_notice_debug(notice, _tool_debug_text(tool_name, inputs, output, self.cwd))
         self._show_external_post_tool_thinking(conv_id)
         return True
 
@@ -1403,6 +1960,9 @@ class ChatPanel(QWidget):
             on_reload=self._refresh_extension_ui,
         ).exec()
 
+    def show_mcp(self):
+        McpDialog(self.cwd, parent=self.window()).exec()
+
     def _handle_extension_action(self, action: dict):
         action_type = str(action.get("type") or "")
         if action_type == "open_file":
@@ -1517,15 +2077,21 @@ class ChatPanel(QWidget):
                 self._run_extension_command(ext_cmd.name, trailing_text)
                 return
             if not trailing_text:
-                self.composer.clear()
-                self.composer.input.exit_slash_mode()
-                self.composer.input.exit_mention_mode()
-                if self._skill_picker:
-                    self._skill_picker.hide()
-                self._activate_extension_command(ext_cmd)
-                return
-            text = trailing_text
-            self.composer.set_skill(self._skill_from_extension_command(ext_cmd))
+                if _is_mcp_command(ext_cmd):
+                    text = _mcp_command_default_message(ext_cmd)
+                    self.composer.set_skill(self._skill_from_extension_command(ext_cmd))
+                else:
+                    self.composer.clear()
+                    self.composer.input.exit_slash_mode()
+                    self.composer.input.exit_mention_mode()
+                    if self._skill_picker:
+                        self._skill_picker.hide()
+                    self._activate_extension_command(ext_cmd)
+                    return
+            else:
+                text = trailing_text
+                self.composer.set_skill(self._skill_from_extension_command(ext_cmd))
+
         elif ChatPanel._slash_command_snapshot_needed(self, text, images):
             self._start_skill_picker_load()
             self._add_notice("Slash commands are still loading. Try again in a moment.")
@@ -2141,7 +2707,7 @@ class ChatPanel(QWidget):
         self.composer.focus_input()
 
     def _on_command_selected(self, command):
-        if _should_complete_slash_selection(self.composer.text(), command.name):
+        if _is_mcp_command(command) or _should_complete_slash_selection(self.composer.text(), command.name):
             self._complete_slash_item(command)
             return
         self.composer.clear()
@@ -2413,7 +2979,7 @@ class ChatPanel(QWidget):
             self._last_edit_path = path
             if path:
                 self.file_written.emit(path)
-        self._add_tool_notice(
+        run.last_tool_notice = self._add_tool_notice(
             _tool_call_notice(name, inputs, self.cwd),
             debug_text=_tool_debug_text(name, inputs, "", self.cwd),
         )
@@ -2503,6 +3069,12 @@ class ChatPanel(QWidget):
             return
         if run.conv_id != self.conv_id:
             return
+        inputs = getattr(run, "last_tool_inputs", {}) if getattr(run, "last_tool_name", "") == name else {}
+        if hasattr(self, "_update_tool_notice_debug"):
+            self._update_tool_notice_debug(
+                getattr(run, "last_tool_notice", None),
+                _tool_debug_text(name, inputs, output, self.cwd),
+            )
         if is_shell_tool(name) and run.active_terminal:
             import re
             m = re.search(r'\[exit (\d+)\]', output)
@@ -2511,11 +3083,6 @@ class ChatPanel(QWidget):
             self._active_terminal = None
         elif name == "edit_file" and output.startswith("[tool error]"):
             preview = output[:200].replace("\n", " ") + ("…" if len(output) > 200 else "")
-            inputs = run.last_tool_inputs if run.last_tool_name == name else {}
-            self._add_tool_notice(
-                f"Tool error: {preview[len('[tool error] '):]}",
-                debug_text=_tool_debug_text(name, inputs, output, self.cwd),
-            )
             run.last_edit_path = ""
             self._last_edit_path = ""
         elif name == "edit_file" and run.last_edit_path:
@@ -2523,14 +3090,6 @@ class ChatPanel(QWidget):
             self._add_file_card(run.last_edit_path)
             run.last_edit_path = ""
             self._last_edit_path = ""
-        elif output.startswith("[tool error]"):
-            preview = output[:200].replace("\n", " ") + ("…" if len(output) > 200 else "")
-            message = preview.removeprefix("[tool error]").strip()
-            inputs = run.last_tool_inputs if run.last_tool_name == name else {}
-            self._add_tool_notice(
-                f"Tool error: {message}",
-                debug_text=_tool_debug_text(name, inputs, output, self.cwd),
-            )
         self._show_post_tool_thinking(run)
 
     def _on_user_terminal_done(
@@ -3053,21 +3612,13 @@ class ChatPanel(QWidget):
         row = QHBoxLayout(wrapper)
         row.setContentsMargins(60, 1, 24, 1)
         row.setSpacing(0)
-        lbl = QLabel(text)
-        lbl.setObjectName("aichs-tool-notice")
-        lbl.setProperty("aichs-tool-text", text)
-        lbl.setProperty("aichs-tool-debug-text", debug_text or text)
-        lbl.setTextFormat(Qt.TextFormat.RichText)
-        lbl.setText(_tool_notice_html(text))
-        lbl.setWordWrap(True)
-        lbl.setMaximumWidth(880)
-        lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        lbl.setStyleSheet(tool_notice_style())
-        lbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        lbl.customContextMenuRequested.connect(
-            lambda pos, label=lbl: self._show_tool_notice_menu(label, pos)
+        notice = _ToolNoticeWidget(text, debug_text or text)
+        notice.setMaximumWidth(880)
+        notice.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        notice.label().customContextMenuRequested.connect(
+            lambda pos, label=notice.label(): self._show_tool_notice_menu(label, pos)
         )
-        row.addWidget(lbl, 1)
+        row.addWidget(notice, 1)
         row.addStretch()
         insert_at = self._history_insert_index(at_top=at_top)
         self.msg_layout.insertWidget(insert_at, wrapper)
@@ -3075,7 +3626,7 @@ class ChatPanel(QWidget):
         return wrapper
 
     def _add_tool_notice(self, text: str, debug_text: str = ""):
-        self._insert_tool_notice(text, debug_text, emit_activity=True)
+        return self._insert_tool_notice(text, debug_text, emit_activity=True)
 
     def _show_tool_notice_menu(self, label: QLabel, pos):
         text = str(label.property("aichs-tool-text") or label.text() or "")
@@ -3088,6 +3639,14 @@ class ChatPanel(QWidget):
             QGuiApplication.clipboard().setText(text)
         elif selected == copy_debug:
             QGuiApplication.clipboard().setText(debug_text)
+
+    def _update_tool_notice_debug(self, wrapper: QWidget | None, debug_text: str):
+        if wrapper is None:
+            return
+        notice = wrapper.findChild(_ToolNoticeWidget)
+        if notice is None:
+            return
+        notice.set_debug_text(debug_text)
 
     def _add_notice(self, text: str):
         lbl = QLabel(text)
@@ -3244,6 +3803,8 @@ class ChatPanel(QWidget):
                     card.apply_appearance()
                 for card in w.findChildren(TerminalCard):
                     card.apply_appearance()
+                for notice in w.findChildren(_ToolNoticeWidget):
+                    notice.apply_appearance()
         for lbl in self.msg_container.findChildren(QLabel):
             name = lbl.objectName()
             if name == "aichs-tool-notice":
@@ -3260,6 +3821,7 @@ class ChatPanel(QWidget):
         self._update_context_ui()
 
     def _clear_bubbles(self):
+        self._external_tool_notices.clear()
         self._history_render_timer.stop()
         self._pending_history_render_target = None
         self._pending_history_render_next = -1
@@ -3453,16 +4015,21 @@ class ChatPanel(QWidget):
             widget = self._add_terminal_result_card(msg, at_top=at_top)
             self._track_history_widget(history_index, widget)
             return widget
-        tool_calls = _saved_tool_calls(msg)
-        if tool_calls and not content_preview(msg.get("content")).strip():
-            for name, inputs in (reversed(tool_calls) if at_top else tool_calls):
+        tool_records = _saved_tool_call_records(msg)
+        if tool_records:
+            outputs = _saved_tool_outputs(self.history, history_index, tool_records)
+            indexed_records = list(enumerate(tool_records))
+            for record_index, record in (reversed(indexed_records) if at_top else indexed_records):
+                name = str(record.get("name") or "tool")
+                inputs = dict(record.get("inputs") or {})
                 widget = self._insert_tool_notice(
                     _tool_call_notice(name, inputs, self.cwd),
-                    _tool_debug_text(name, inputs, "", self.cwd),
+                    _tool_debug_text(name, inputs, outputs[record_index], self.cwd),
                     at_top=at_top,
                 )
                 self._track_history_widget(history_index, widget)
-            return None
+            if not is_visible_message(msg):
+                return None
         if not is_visible_message(msg):
             return None
         bubble = self._make_bubble(
@@ -3839,14 +4406,36 @@ class ChatPanel(QWidget):
         cancel.setFixedSize(24, 24)
         cancel.clicked.connect(lambda _, i=idx: self._cancel_queued(i))
 
+        steer = QPushButton("Steer")
+        steer.setToolTip("Steer with this queued message")
+        steer.setFixedSize(56, 24)
+        steer.clicked.connect(lambda _, i=idx: self._steer_queued(i))
+
         layout.addWidget(label, 1)
+        layout.addWidget(steer)
         layout.addWidget(cancel)
 
         palette()
         row.setStyleSheet(surface_frame_style(selector="QFrame#queueItem"))
         label.setStyleSheet(hint_label_style())
+        steer.setStyleSheet(secondary_button_style(border_radius=7, padding="3px 8px"))
         cancel.setStyleSheet(icon_button_style(24))
         return row
+
+    def _steer_queued(self, idx: int):
+        queue = self._visible_queue()
+        if not (0 <= idx < len(queue)):
+            return
+        draft = queue.pop(idx)
+        queue.insert(0, draft)
+        self._update_queue_ui()
+        run = self._visible_run()
+        if run:
+            self._add_notice(f"Steering current response with queued message: {_queue_preview(draft)}")
+            run.thread.cancel()
+            self.stop_btn.setEnabled(False)
+        elif not self._visible_compaction():
+            self._start_next_queued()
 
     def _cancel_queued(self, idx: int):
         queue = self._visible_queue()
@@ -3883,6 +4472,15 @@ def _should_complete_slash_selection(text: str, name: str) -> bool:
         return False
     typed, args = invocation
     return not args.strip() and typed.casefold() != str(name or "").casefold()
+
+
+def _is_mcp_command(command) -> bool:
+    return str(getattr(command, "source", "") or "").casefold() == "mcp"
+
+
+def _mcp_command_default_message(command) -> str:
+    name = str(getattr(command, "name", "") or "MCP capability")
+    return f"Use MCP capability {name}."
 
 
 def _first_summoned_crew(text: str, settings: dict | None = None) -> CrewMember | None:

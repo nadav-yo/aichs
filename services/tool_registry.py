@@ -469,6 +469,7 @@ class ToolRegistry:
         approval: str | None = None,
         source: str = "extension",
         surfaces: list[str] | tuple[str, ...] | None = None,
+        extension_id: str | None = None,
     ) -> None:
         if not self._allow_contribution(source, "tools", f"tool {name}"):
             return
@@ -485,7 +486,7 @@ class ToolRegistry:
             parallel_safe=parallel_safe,
             approval=approval,
             source=source,
-            extension_id="builtin" if source == "builtin" else self._current_extension_id,
+            extension_id=extension_id or ("builtin" if source == "builtin" else self._current_extension_id),
             surfaces=tool_surfaces,
         )
 
@@ -756,7 +757,7 @@ class ToolRegistry:
         return list(self._languages.values())
 
     def _allow_contribution(self, source: str, permission: str, label: str) -> bool:
-        if source == "builtin" or permission not in _ENFORCED_PERMISSIONS:
+        if source in {"builtin", "mcp"} or permission not in _ENFORCED_PERMISSIONS:
             return True
         if self._current_permissions.allows(permission):
             return True

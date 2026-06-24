@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import re
+from urllib.parse import unquote
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPlainTextEdit, QFrame, QTabWidget,
@@ -13,7 +14,8 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QColor, QCursor, QDrag, QGuiApplication, QKeySequence, QPainter, QPixmap,
-    QShortcut, QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextFormat,
+    QShortcut, QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextDocument,
+    QTextFormat, QDesktopServices,
 )
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_for_filename, guess_lexer, TextLexer
@@ -1290,11 +1292,14 @@ class _FileTextEdit(QPlainTextEdit):
 class _MarkdownPreview(RemoteImageTextBrowser):
     edit_requested = pyqtSignal()
     cancel_requested = pyqtSignal()
+    file_open_requested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setOpenExternalLinks(False)
         self.setFrameShape(QFrame.Shape.NoFrame)
+        self._base_path = ""
+        self._repo_root = ""
 
     def apply_appearance(self):
         p = palette()
@@ -1303,17 +1308,23 @@ class _MarkdownPreview(RemoteImageTextBrowser):
             f"border:none; padding:14px 18px; }}"
         )
 
-    def set_html(self, html: str, base_path: str):
+    def set_html(self, html: str, base_path: str, *, repo_root: str = ""):
+        self._base_path = base_path
+        self._repo_root = repo_root
         parent = str(Path(base_path).parent)
         self.document().setBaseUrl(QUrl.fromLocalFile(parent + os.sep))
         self.setHtml(html)
 
-    def set_markdown(self, text: str, base_path: str):
-        self.set_html(_markdown_preview_html(text), base_path)
+    def set_markdown(self, text: str, base_path: str, *, repo_root: str = ""):
+        self.set_html(_markdown_preview_html(text), base_path, repo_root=repo_root)
 
     def mousePressEvent(self, event):
-        if copy_code_url_to_clipboard(self.anchorAt(_event_pos(event))):
+        href = self.anchorAt(_event_pos(event))
+        if href and self._handle_link(href):
             event.accept()
+            return
+        if href:
+            super().mousePressEvent(event)
             return
         self.edit_requested.emit()
         super().mousePressEvent(event)
@@ -1324,6 +1335,84 @@ class _MarkdownPreview(RemoteImageTextBrowser):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def setSource(
+        self,
+        name: QUrl,
+        resource_type=QTextDocument.ResourceType.UnknownResource,
+    ) -> None:
+        if self._handle_link(name.toString()):
+            return
+        super().setSource(name, resource_type)
+
+    def _handle_link(self, href: str) -> bool:
+        if copy_code_url_to_clipboard(href):
+            return True
+        path = _repo_file_for_markdown_link(href, self._base_path, self._repo_root)
+        if path:
+            self.file_open_requested.emit(path)
+            return True
+        if _is_external_markdown_link(href):
+            self._prompt_open_external_link(href)
+            return True
+        return bool(href and not str(href).startswith("#"))
+
+    def _prompt_open_external_link(self, href: str):
+        url = QUrl(href)
+        answer = QMessageBox.question(
+            self,
+            "Open external link?",
+            f"Open this link in your browser?\n\n{url.toString()}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            QDesktopServices.openUrl(url)
+
+
+def _repo_file_for_markdown_link(href: str, base_path: str, repo_root: str) -> str:
+    raw = str(href or "").strip()
+    if not raw or not base_path or not repo_root or raw.startswith("#"):
+        return ""
+
+    url = QUrl(raw)
+    scheme = url.scheme().lower()
+    decoded_raw = unquote(raw)
+    candidate: Path | None = None
+    if scheme == "aichs-file":
+        ref = decoded_raw[len("aichs-file:"):].lstrip("@")
+        candidate = Path(repo_root) / ref
+    elif scheme == "file":
+        local = url.toLocalFile()
+        if local:
+            candidate = Path(local)
+            if not candidate.is_absolute():
+                candidate = Path(base_path).parent / candidate
+    elif not scheme:
+        ref = unquote(url.path() or raw.split("#", 1)[0].split("?", 1)[0])
+        if ref:
+            candidate = Path(base_path).parent / ref
+    elif (
+        len(scheme) == 1
+        and len(decoded_raw) > 2
+        and decoded_raw[1:3] in {":\\", ":/"}
+    ):
+        candidate = Path(decoded_raw.split("#", 1)[0].split("?", 1)[0])
+
+    if candidate is None:
+        return ""
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return ""
+    if not path_in_repo(resolved, repo_root) or not resolved.is_file():
+        return ""
+    return str(resolved)
+
+
+def _is_external_markdown_link(href: str) -> bool:
+    scheme = QUrl(str(href or "")).scheme().lower()
+    return bool(scheme and scheme not in {"aichs-file", "file"} and len(scheme) != 1)
 
 
 def _markdown_preview_html(
@@ -1356,6 +1445,7 @@ class _TextFileTab(QWidget):
 
     dirty_changed = pyqtSignal(bool)
     diagnostic_fix_requested = pyqtSignal(str, object)
+    file_open_requested = pyqtSignal(str)
     language_context_changed = pyqtSignal()
     markdown_preview_pane_changed = pyqtSignal()
 
@@ -1501,6 +1591,7 @@ class _TextFileTab(QWidget):
         self._preview = _MarkdownPreview()
         self._preview.edit_requested.connect(self._enter_edit_mode)
         self._preview.cancel_requested.connect(self._cancel_edit)
+        self._preview.file_open_requested.connect(self.file_open_requested.emit)
         self._minimap = _TextMinimap(self._editor)
 
         view = QSplitter(Qt.Orientation.Horizontal)
@@ -2101,7 +2192,7 @@ class _TextFileTab(QWidget):
             return
         if path != self._path or not self._is_markdown_preview():
             return
-        self._preview.set_html(html, path)
+        self._preview.set_html(html, path, repo_root=self._repo_root)
         if self.is_markdown_preview_pane_active() and not self._preview_pane_active:
             self._preview_pane_active = True
             self.markdown_preview_pane_changed.emit()
@@ -2806,6 +2897,9 @@ class FileViewerPanel(QWidget):
                 lambda dirty, w=widget: self._on_tab_dirty_changed(w, dirty)
             )
             widget.diagnostic_fix_requested.connect(self.diagnostic_fix_requested.emit)
+            widget.file_open_requested.connect(
+                lambda path, w=widget: self._open_preview_link(path, w)
+            )
             widget.language_context_changed.connect(
                 lambda w=widget: self._emit_language_context_for(w)
             )
@@ -2954,6 +3048,21 @@ class FileViewerPanel(QWidget):
             file_review_prompt=self._file_review_prompt,
             diagnostic_fix_prompt=self._diagnostic_fix_prompt,
         )
+
+    def _open_preview_link(self, path: str, widget: _TextFileTab):
+        if widget is not self._tabs.currentWidget():
+            return
+        keep_preview = widget.is_markdown_preview_pane_active()
+        self.open_file(path, repo_root=self._repo_root)
+        if not keep_preview or Path(path).suffix.lower() not in _MARKDOWN_EXTS:
+            return
+        target = self._active_text_tab()
+        if target is None or not target._markdown:
+            return
+        if not target._preview_toggle.isChecked():
+            target._preview_toggle.setChecked(True)
+        else:
+            target._render()
 
     def _should_read_text_async(self, path: str) -> bool:
         try:

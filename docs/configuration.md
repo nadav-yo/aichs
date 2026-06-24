@@ -2,8 +2,8 @@
 
 By default, settings are stored in `~/.aichs/settings.json` (written by
 **Settings** in the app). Set `AICHS_HOME` before launch to move all app-owned
-user data, including settings, models, skills, conversations, extensions, and
-recent workspaces, to another directory.
+user data, including settings, models, skills, conversations, extensions, MCP
+state, and recent workspaces, to another directory.
 
 | Key | Description |
 |---|---|
@@ -27,3 +27,6 @@ recent workspaces, to another directory.
 | `compaction.keep_recent_tokens` | Optional. Recent message tokens to keep verbatim when compacting (omit to scale automatically) |
 
 API keys can also be set via environment variables or **Settings → Models** before launch.
+
+MCP servers are configured separately in standard `mcp.json` files; see
+[MCP](mcp.md).

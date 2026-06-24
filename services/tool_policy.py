@@ -33,6 +33,8 @@ class PendingApproval:
     grant_edit: bool = False
     grant_bash_skip: bool = False
     grant_extension_tool: bool = False
+    tool_source: str = "extension"
+    tool_owner: str = ""
 
 
 def repo_root(cwd: str) -> Path:
@@ -133,10 +135,22 @@ class ToolApprovalBus(QObject):
         cwd: str,
         policy: ConversationToolPolicy,
         is_cancelled: Callable[[], bool],
+        *,
+        source: str = "extension",
+        owner: str = "",
     ) -> str | None:
         if name in policy.approved_extension_tools:
             return None
-        return self._wait_for_ui("tool", inputs, cwd, policy, is_cancelled, tool_name=name)
+        return self._wait_for_ui(
+            "tool",
+            inputs,
+            cwd,
+            policy,
+            is_cancelled,
+            tool_name=name,
+            tool_source=source,
+            tool_owner=owner,
+        )
 
     def cancel_wait(self, message: str = "[cancelled]") -> None:
         with self._lock:
@@ -172,6 +186,8 @@ class ToolApprovalBus(QObject):
         policy: ConversationToolPolicy,
         is_cancelled: Callable[[], bool],
         tool_name: str = "",
+        tool_source: str = "extension",
+        tool_owner: str = "",
     ) -> str | None:
         pending = PendingApproval(
             kind=kind,
@@ -179,6 +195,8 @@ class ToolApprovalBus(QObject):
             cwd=cwd,
             policy=policy,
             tool_name=tool_name,
+            tool_source=tool_source,
+            tool_owner=tool_owner,
         )
         with self._lock:
             self._current = pending

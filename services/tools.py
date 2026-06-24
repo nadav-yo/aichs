@@ -27,6 +27,7 @@ from storage.repository import ConversationStore, project_conversation_summaries
 from services.subprocess_utils import popen_no_window, run_no_window  # noqa: E402
 from services.tool_policy import resolve_path, validate_tool_paths  # noqa: E402
 from services.tool_registry import ToolContext, ToolRegistry, load_extensions  # noqa: E402
+from services.mcp_tools import register_mcp_tools  # noqa: E402
 
 # ── Tool schemas ──────────────────────────────────────────────────────────────
 
@@ -75,6 +76,7 @@ def registry_for(cwd: str | None = None) -> ToolRegistry:
     registry = ToolRegistry()
     _register_builtin_tools(registry)
     load_extensions(registry, cwd)
+    register_mcp_tools(registry, cwd)
     return registry
 
 
@@ -115,6 +117,16 @@ def tool_names(cwd: str | None = None) -> list[str]:
 def tool_approval(name: str, cwd: str | None = None) -> str | None:
     tool = registry_for(cwd).get(name)
     return tool.approval if tool else None
+
+
+def tool_source(name: str, cwd: str | None = None) -> str:
+    tool = registry_for(cwd).get(name)
+    return tool.source if tool else ""
+
+
+def tool_extension_id(name: str, cwd: str | None = None) -> str:
+    tool = registry_for(cwd).get(name)
+    return tool.extension_id if tool else ""
 
 
 # ── Executor ──────────────────────────────────────────────────────────────────

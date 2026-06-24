@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QDialogButtonBox, QTreeWidget, QTreeWidgetItem,
 )
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, Qt, QSize, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QIcon, QIntValidator, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QColor, QFont, QIcon, QIntValidator, QMouseEvent, QPainter, QPen, QPixmap
 
 from config import MODELS, SYSTEM_PROMPT
 from services import model_registry
@@ -266,6 +266,8 @@ class _ReorderableProviderTable(QTableWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_row = self.rowAt(int(event.position().y()))
+        if not isinstance(event, QMouseEvent):
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -295,6 +297,7 @@ class _ModelOrderList(QListWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._drag_row = -1
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
@@ -305,8 +308,41 @@ class _ModelOrderList(QListWidget):
         self.setAlternatingRowColors(False)
         self.setMinimumHeight(132)
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_row = self.indexAt(event.position().toPoint()).row()
+        if not isinstance(event, QMouseEvent):
+            return
+        super().mousePressEvent(event)
+
     def dropEvent(self, event):
-        super().dropEvent(event)
+        source = self._drag_row
+        self._drag_row = -1
+        if source < 0 or source >= self.count():
+            source = self.currentRow()
+        if source < 0 or source >= self.count():
+            event.ignore()
+            return
+
+        pos = event.position().toPoint()
+        target = self.indexAt(pos).row()
+        if target < 0:
+            insert_row = self.count()
+        else:
+            rect = self.visualItemRect(self.item(target))
+            insert_row = target + (1 if pos.y() >= rect.center().y() else 0)
+
+        if source < insert_row:
+            insert_row -= 1
+        insert_row = max(0, min(insert_row, self.count() - 1))
+        if insert_row == source:
+            event.acceptProposedAction()
+            return
+
+        item = self.takeItem(source)
+        self.insertItem(insert_row, item)
+        self.setCurrentRow(insert_row)
+        event.acceptProposedAction()
         self.order_changed.emit()
 
 
@@ -2114,6 +2150,16 @@ class SettingsDialog(QDialog):
 
     def _remove_provider(self, row: int):
         if row < 0 or row >= len(self._providers):
+            return
+        provider = self._providers[row]
+        answer = QMessageBox.question(
+            self,
+            "Remove provider",
+            f"Remove {_provider_title(provider['id'])} from configured providers?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
             return
         del self._providers[row]
         self._refresh_provider_table()

@@ -424,7 +424,7 @@ def _avatar_setting_path(item_id: str) -> str:
 def _skill_roots(cwd: str | None) -> list[tuple[str, Path]]:
     roots = [("global", config.AICHS_HOME / "skills")]
     if cwd:
-        roots.append(("project", Path(cwd) / ".aichs" / "skills"))
+        roots.append(("project", Path(cwd) / config.PROJECT_AGENTS_DIR / "skills"))
     return roots
 
 
@@ -570,7 +570,11 @@ def _target_for_entry(entry: dict, cwd: str | None) -> Path:
     scope = str(entry.get("scope") or "global")
     name = _safe_name(str(entry.get("name") or Path(str(entry.get("archive_path") or "")).name))
     if kind == "skill":
-        root = config.AICHS_HOME / "skills" if scope == "global" else Path(cwd or os.getcwd()) / ".aichs" / "skills"
+        root = (
+            config.AICHS_HOME / "skills"
+            if scope == "global"
+            else Path(cwd or os.getcwd()) / config.PROJECT_AGENTS_DIR / "skills"
+        )
         return root / name
     if kind in ("extension_file", "extension_folder"):
         root = config.AICHS_HOME / "extensions" if scope == "global" else Path(cwd or os.getcwd()) / ".aichs" / "extensions"

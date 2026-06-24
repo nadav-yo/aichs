@@ -1,5 +1,4 @@
 import json
-import shutil
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -90,11 +89,60 @@ def test_canvas_extension_tool_and_context_are_explicit(workspace):
 
 
 def test_canvas_examples_load(workspace):
-    source_root = Path(__file__).resolve().parents[1] / ".aichs" / "extensions"
-    target_root = workspace / ".aichs" / "extensions"
-    target_root.mkdir(parents=True, exist_ok=True)
-    for name in ("canvas_briefing", "canvas_notes"):
-        shutil.copytree(source_root / name, target_root / name)
+    (workspace / ".aichs" / "extensions" / "canvas_briefing").mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    write_extension(
+        workspace,
+        "canvas_briefing/extension.py",
+        """
+        def register(registry):
+            registry.canvas_context("Canvas briefing", canvas_briefing)
+
+        def canvas_briefing(ctx):
+            canvas = ctx.canvas
+            node = canvas.get("node") or {}
+            lines = [f"Canvas mode: {canvas.get('kind') or 'unknown'}"]
+            if node:
+                lines.append(
+                    "Current run node: "
+                    f"#{node.get('id')} {node.get('kind')} '{node.get('title')}'"
+                )
+            return "\\n".join(lines)
+        """,
+    )
+    (workspace / ".aichs" / "extensions" / "canvas_notes").mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    write_extension(
+        workspace,
+        "canvas_notes/extension.py",
+        """
+        def register(registry):
+            registry.canvas_tool(
+                name="canvas_project_note",
+                description="Read canvas project notes.",
+                input_schema={"type": "object", "properties": {}},
+                execute=canvas_project_note,
+                parallel_safe=True,
+            )
+            registry.canvas_tool(
+                name="remember_canvas_note",
+                description="Save a canvas note.",
+                input_schema={"type": "object", "properties": {}},
+                execute=remember_canvas_note,
+                parallel_safe=True,
+            )
+
+        def canvas_project_note(ctx, inputs):
+            return "No canvas notes saved."
+
+        def remember_canvas_note(ctx, inputs):
+            return "Canvas note saved."
+        """,
+    )
 
     snippets, errors = extension_canvas_context_snippets(
         str(workspace),

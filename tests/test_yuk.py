@@ -41,7 +41,7 @@ def test_export_yuk_selected_items_excludes_models_and_secrets(workspace, tmp_pa
     global_skills = config.AICHS_HOME / "skills"
     global_skills.mkdir(parents=True)
     (global_skills / "global.md").write_text("---\nname: global\n---\nGlobal\n", encoding="utf-8")
-    project_skills = workspace / ".aichs" / "skills"
+    project_skills = workspace / ".agents" / "skills"
     project_skills.mkdir(parents=True)
     (project_skills / "project.md").write_text("---\nname: project\n---\nProject\n", encoding="utf-8")
 
@@ -95,7 +95,7 @@ def test_export_yuk_prompt_items_only_include_non_defaults(workspace, tmp_path):
 
 
 def test_yuk_discovery_uses_top_level_scans_without_glob(workspace, monkeypatch):
-    skills = workspace / ".aichs" / "skills"
+    skills = workspace / ".agents" / "skills"
     skills.mkdir(parents=True)
     (skills / "visible.md").write_text("---\nname: visible\n---\nVisible\n", encoding="utf-8")
     nested_skill = skills / "nested"
@@ -253,14 +253,14 @@ def test_inspect_yuk_warns_and_ignores_malformed_optional_sections(tmp_path):
 
 
 def test_yuk_import_conflict_skip_and_rename(workspace, tmp_path):
-    skills = workspace / ".aichs" / "skills"
+    skills = workspace / ".agents" / "skills"
     skills.mkdir(parents=True)
     (skills / "review.md").write_text("---\nname: review\n---\nOriginal\n", encoding="utf-8")
     package = tmp_path / "skill.yuk"
     export_yuk(package, str(workspace), YukExportSelection({"skill:project:review.md"}))
 
     target = tmp_path / "target"
-    target_skill = target / ".aichs" / "skills" / "review.md"
+    target_skill = target / ".agents" / "skills" / "review.md"
     target_skill.parent.mkdir(parents=True)
     target_skill.write_text("---\nname: review\n---\nExisting\n", encoding="utf-8")
 
@@ -270,7 +270,7 @@ def test_yuk_import_conflict_skip_and_rename(workspace, tmp_path):
 
     renamed = apply_yuk(package, str(target), {"skill:project:review.md": "rename"})
     assert any(path.endswith("review-2.md") for path in renamed.skills_installed)
-    assert (target / ".aichs" / "skills" / "review-2.md").exists()
+    assert (target / ".agents" / "skills" / "review-2.md").exists()
 
 
 def test_yuk_avatar_round_trip_rewrites_imported_setting(workspace, tmp_path, monkeypatch):
@@ -393,7 +393,7 @@ def test_yuk_import_strips_secret_and_model_settings(tmp_path, workspace):
 
 
 def test_inspect_yuk_reports_skill_conflict(workspace, tmp_path):
-    skills = workspace / ".aichs" / "skills"
+    skills = workspace / ".agents" / "skills"
     skills.mkdir(parents=True)
     (skills / "review.md").write_text("---\nname: review\n---\nReview\n", encoding="utf-8")
     package = tmp_path / "skill.yuk"

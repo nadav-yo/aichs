@@ -71,9 +71,9 @@ def test_file_tree_snapshot_lists_visible_root_entries(workspace, monkeypatch):
     snapshot = build_file_tree_snapshot(str(workspace))
 
     names = [entry.name for entry in snapshot.entries]
+    assert ".env" in names
     assert "src" in names
     assert "README.md" in names
-    assert ".env" not in names
     assert not snapshot.filter_text
 
 

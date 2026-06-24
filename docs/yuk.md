@@ -11,7 +11,7 @@ The export dialog lets you choose whole sections or individual items:
 |---|---|
 | Personality & Prompts | Custom system prompt and prompt-related settings that differ from built-in defaults |
 | Crew | Crew prompts, enabled flags, colors, portraits, and crew model choices |
-| Skills | Global and project `.aichs/skills/*.md` files |
+| Skills | Global and project `.agents/skills/*.md` files |
 | Extensions | Global and project extensions with enabled/disabled state |
 | Avatars | Custom avatar files copied into `AICHS_HOME/avatars/` |
 

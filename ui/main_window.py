@@ -24,6 +24,7 @@ from storage.workspace_session import (
 )
 from services.git_snapshot import build_git_snapshot
 from services.key_bindings import shortcut_sequences
+from services.mcp_tools import start_mcp_capability_warmup
 from services.palette import PaletteContext, build_palette_items
 from services.processes import get_process_manager
 from services.tool_registry import disable_unreviewed_extensions
@@ -317,6 +318,7 @@ class MainWindow(QMainWindow):
         self._left.file_search_requested.connect(self._open_file_search)
         self._left.text_search_requested.connect(self._open_text_search)
         self._left.extensions_requested.connect(self._chat.show_extensions)
+        self._left.mcp_requested.connect(self._chat.show_mcp)
         self._left.workspace_requested.connect(self._show_workspace_dashboard)
         self._left.canvas_requested.connect(self._show_agent_canvas)
         self._left.activity_selected.connect(self._on_activity_selected)
@@ -353,6 +355,7 @@ class MainWindow(QMainWindow):
 
     def _run_after_first_paint(self):
         self._review_new_extensions()
+        start_mcp_capability_warmup(os.getcwd())
         if not self._pending_default_activity_width:
             self._start_initial_git_status_refresh()
             self._maybe_restore_workspace_session()
@@ -1039,6 +1042,7 @@ class MainWindow(QMainWindow):
         self._settings.update({"workspace_path": target})
         self._left.clear_conversation_selection()
         self._context.set_current_conversation("")
+        start_mcp_capability_warmup(target)
         self._queue_workspace_session_restore(target)
         self._show_workspace_dashboard()
         self._extension_review_prompt_shown = False

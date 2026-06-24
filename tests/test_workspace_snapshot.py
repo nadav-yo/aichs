@@ -14,7 +14,7 @@ from storage.repository import ConversationStore, register_workspace
 def test_workspace_snapshot_collects_home_context(workspace, tmp_path):
     (workspace / "README.md").write_text("# Project Readme\n\nUseful context.\n", encoding="utf-8")
     (workspace / "AGENTS.md").write_text("Always run the tests.\n", encoding="utf-8")
-    skills_dir = workspace / ".aichs" / "skills"
+    skills_dir = workspace / ".agents" / "skills"
     skills_dir.mkdir(parents=True)
     (skills_dir / "review.md").write_text("Review carefully.\n", encoding="utf-8")
     ext_dir = workspace / ".aichs" / "extensions"
@@ -141,7 +141,7 @@ def test_workspace_snapshot_recent_workspaces_do_not_resolve_saved_paths(workspa
 
 
 def test_workspace_snapshot_skill_count_uses_top_level_iterdir(workspace, monkeypatch):
-    skills_dir = workspace / ".aichs" / "skills"
+    skills_dir = workspace / ".agents" / "skills"
     skills_dir.mkdir(parents=True)
     (skills_dir / "review.md").write_text("Review carefully.\n", encoding="utf-8")
     (skills_dir / ".hidden.md").write_text("hidden\n", encoding="utf-8")

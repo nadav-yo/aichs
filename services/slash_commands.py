@@ -1,7 +1,10 @@
 """Built-in composer slash commands (not skills)."""
 
+import hashlib
 from dataclasses import dataclass
 
+from services.mcp_config import McpServerConfig, load_mcp_config, mcp_config_exists
+from services.mcp_tools import McpCapability, McpServerCapabilities, cached_mcp_server_capabilities
 from services.tool_registry import extension_command, extension_commands
 from storage.settings import DEFAULT_ARCHIVIST_PROMPT, SettingsStore, archivist_prompt
 
@@ -85,7 +88,77 @@ def load_all_commands(cwd: str | None = None) -> list[SlashCommand]:
         )
         for cmd in extension_commands(cwd)
     )
+    commands.extend(_mcp_commands(cwd))
     return sorted(commands, key=lambda c: (c.source != "builtin", c.name))
+
+
+def _mcp_commands(cwd: str | None = None) -> list[SlashCommand]:
+    if not mcp_config_exists(cwd):
+        return []
+    commands: list[SlashCommand] = []
+    for server in load_mcp_config(cwd).servers:
+        if not server.available:
+            continue
+        capabilities = cached_mcp_server_capabilities(server)
+        if capabilities is None:
+            continue
+        commands.extend(_mcp_server_commands(server, capabilities))
+    return commands
+
+
+def _mcp_server_commands(server: McpServerConfig, capabilities: McpServerCapabilities) -> list[SlashCommand]:
+    commands: list[SlashCommand] = []
+    prefix = _mcp_tool_prefix(server)
+    used_tool_names: set[str] = set()
+
+    for tool in capabilities.tools:
+        if not tool.enabled:
+            continue
+        command_name = _unique_mcp_tool_name(f"{prefix}{_safe_mcp_name(tool.name)}", tool.name, used_tool_names)
+        used_tool_names.add(command_name)
+        commands.append(
+            SlashCommand(
+                name=command_name,
+                description=_mcp_description(server, "Tool", tool),
+                prompt=(
+                    f"Use the MCP tool `{tool.name}` from server `{server.name}` for this request. "
+                    f"Call `{command_name}` with arguments inferred from the user's message."
+                ),
+                tools=[command_name],
+                source="mcp",
+                capabilities=["mcp:tools"],
+            )
+        )
+
+    return commands
+
+
+def _mcp_description(server: McpServerConfig, kind: str, capability: McpCapability) -> str:
+    text = capability.description or capability.name or capability.uri
+    return f"[MCP: {server.name}] {kind}: {text}"
+
+
+def _mcp_tool_prefix(server: McpServerConfig) -> str:
+    return f"mcp__{_safe_mcp_name(server.name)}__"
+
+
+def _safe_mcp_name(value: str) -> str:
+    safe = "".join(ch if ch.isalnum() else "_" for ch in str(value or "item"))
+    while "__" in safe:
+        safe = safe.replace("__", "_")
+    return safe.strip("_") or "item"
+
+
+def _unique_mcp_tool_name(candidate: str, original: str, used: set[str]) -> str:
+    if candidate not in used:
+        return candidate
+    suffix = hashlib.sha1(str(original).encode("utf-8")).hexdigest()[:8]
+    alt = f"{candidate}_{suffix}"
+    index = 2
+    while alt in used:
+        alt = f"{candidate}_{suffix}_{index}"
+        index += 1
+    return alt
 
 
 def parse_extension_command(text: str, cwd: str | None = None) -> SlashCommand | None:

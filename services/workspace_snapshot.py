@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import config
 from services.git_snapshot import GitSnapshot, build_git_snapshot
 from services.git_status import GitFileChange
 from services.performance import time_operation
@@ -147,7 +148,7 @@ def _read_text(path: Path, limit: int = PREVIEW_LIMIT) -> str:
 
 
 def _extension_count(root: Path) -> int:
-    ext_dir = root / ".aichs" / "extensions"
+    ext_dir = root / config.PROJECT_AICHS_DIR / "extensions"
     if not ext_dir.is_dir():
         return 0
     count = 0
@@ -162,7 +163,7 @@ def _extension_count(root: Path) -> int:
 
 
 def _skill_count(root: Path) -> int:
-    skills_dir = root / ".aichs" / "skills"
+    skills_dir = root / config.PROJECT_AGENTS_DIR / "skills"
     if not skills_dir.is_dir():
         return 0
     count = 0

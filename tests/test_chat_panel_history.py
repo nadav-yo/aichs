@@ -79,6 +79,9 @@ class _Bubble:
     def finalize(self, text, on_artifact=None):
         self.finalized = text
 
+    def set_regenerable(self, _enabled):
+        pass
+
 
 class _Layout:
     def indexOf(self, _widget):
@@ -407,6 +410,79 @@ def test_insert_history_bubble_replays_openai_tool_call_notice(qapp):
     assert notices[0][0].replace("\\", "/") == "Reading file 'src/main.py'"
     assert "Tool: read_file" in notices[0][1]
     assert notices[0][2] == {"at_top": False}
+    assert panel._history_widgets == {0: [notice_widget]}
+
+
+def test_insert_history_bubble_replays_tool_notice_with_visible_text(qapp):
+    panel = SimpleNamespace()
+    notices = []
+    bubbles = []
+    notice_widget = _DeletedWidget()
+    bubble_widget = _Bubble()
+    panel.history = [
+        {
+            "role": "assistant",
+            "content": "I will inspect the file first.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "function": {"name": "read_file", "arguments": '{"path": "src/main.py"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "file body"},
+    ]
+    panel.cwd = "C:\\repo"
+    panel._history_widgets = {}
+    panel._bubbles = {}
+    panel._insert_tool_notice = lambda text, debug_text="", **kwargs: (
+        notices.append((text, debug_text, kwargs)) or notice_widget
+    )
+    panel._make_bubble = lambda *args, **kwargs: (bubbles.append((args, kwargs)) or bubble_widget)
+    panel.msg_layout = SimpleNamespace(insertWidget=lambda *_args: None)
+    panel._history_insert_index = lambda at_top=False: 0
+    panel._track_history_widget = lambda idx, widget: ChatPanel._track_history_widget(panel, idx, widget)
+
+    assert ChatPanel._insert_history_bubble(panel, 0) is bubble_widget
+
+    assert notices[0][0].replace("\\", "/") == "Reading file 'src/main.py'"
+    assert "Output:\nfile body" in notices[0][1]
+    assert bubbles
+    assert bubbles[0][0][0] == "I will inspect the file first."
+    assert panel._history_widgets == {0: [notice_widget, bubble_widget]}
+
+
+def test_insert_history_bubble_replays_anthropic_tool_result_output(qapp):
+    panel = SimpleNamespace()
+    notices = []
+    notice_widget = _DeletedWidget()
+    panel.history = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "search_files", "input": {"pattern": "needle"}},
+            ],
+        },
+        {
+            "role": "user",
+            "synthetic": "tool_results",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "match list"},
+            ],
+        },
+    ]
+    panel.cwd = "C:\\repo"
+    panel._history_widgets = {}
+    panel._make_bubble = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("hidden"))
+    panel._track_history_widget = lambda idx, widget: ChatPanel._track_history_widget(panel, idx, widget)
+    panel._insert_tool_notice = lambda text, debug_text="", **kwargs: (
+        notices.append((text, debug_text, kwargs)) or notice_widget
+    )
+
+    assert ChatPanel._insert_history_bubble(panel, 0) is None
+
+    assert notices[0][0] == "Searching files for 'needle' in '.'"
+    assert "Output:\nmatch list" in notices[0][1]
     assert panel._history_widgets == {0: [notice_widget]}
 
 

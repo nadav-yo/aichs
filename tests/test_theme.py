@@ -169,7 +169,7 @@ def test_combo_popup_container_resizes_for_multiple_rows(qapp):
     )
     view = container.findChild(QListView)
     assert view is not None
-    row_h = max(view.sizeHintForRow(0), 24)
+    row_h = max(view.sizeHintForRow(0), theme_module.COMBO_POPUP_MIN_ROW_HEIGHT)
     visible = theme_module.combo_popup_visible_row_count(8)
     assert visible == 8
     assert view.minimumHeight() >= visible * (row_h - 2)
@@ -196,10 +196,11 @@ def test_combo_popup_container_fits_short_lists(qapp):
         if w.metaObject().className() == "QComboBoxPrivateContainer" and w.isVisible()
     )
     view = container.findChild(QListView)
-    row_h = max(view.sizeHintForRow(0), 24)
+    row_h = max(view.sizeHintForRow(0), theme_module.COMBO_POPUP_MIN_ROW_HEIGHT)
     pad = theme_module.COMBO_POPUP_VIEW_PADDING * 2
     assert container.height() <= 2 * row_h + pad + 4
     assert container.height() >= 2 * row_h + pad - 4
+    assert view.minimumHeight() >= 2 * theme_module.COMBO_POPUP_MIN_ROW_HEIGHT
 
     combo.hidePopup()
     combo.deleteLater()
