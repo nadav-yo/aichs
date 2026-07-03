@@ -912,6 +912,89 @@ def rail_button_style(
     )
 
 
+def sidebar_nav_button_style(
+    *,
+    font_size: int,
+    active: bool = False,
+    attention: bool = False,
+    theme: str | None = None,
+) -> str:
+    """Icon + label sidebar navigation (Home, Sessions, …)."""
+    p = palette(theme)
+    bg = p["SELECTION"] if active else "transparent"
+    fg = p["SELECTION_TEXT"] if active else p["TEXT_DIM"]
+    marker = "#f59e0b" if attention else "transparent"
+    return (
+        f"QPushButton {{ background-color:{bg}; color:{fg}; border:0px;"
+        f"border-left:3px solid {marker}; border-radius:7px;"
+        f"padding:8px 10px 8px 7px; text-align:left;"
+        f"font-size:{font_size}px; font-weight:{'600' if active else '500'}; }}"
+        f"QPushButton:hover {{ background-color:{p['BG3']}; color:{p['TEXT']}; }}"
+    )
+
+
+def sidebar_nav_section_style(*, theme: str | None = None) -> str:
+    p = palette(theme)
+    fs = meta_font_pt()
+    return (
+        f"QLabel#sidebarNavSection {{ color:{p['TEXT_DIM']}; font-size:{fs}px;"
+        f"font-weight:600; letter-spacing:0.06em; padding:4px 10px 2px 10px; }}"
+    )
+
+
+def sidebar_workspace_row_style(
+    *,
+    active: bool = False,
+    theme: str | None = None,
+) -> str:
+    p = palette(theme)
+    fs = max(12, chat_font_pt() - 1)
+    bg = p["SELECTION"] if active else "transparent"
+    fg = p["SELECTION_TEXT"] if active else p["TEXT"]
+    weight = "600" if active else "400"
+    return (
+        f"QPushButton {{ background:{bg}; color:{fg}; border:0px; border-radius:6px;"
+        f"padding:6px 10px 6px 18px; text-align:left; font-size:{fs}px;"
+        f"font-weight:{weight}; }}"
+        f"QPushButton:hover {{ background:{p['BG3']}; color:{p['TEXT']}; }}"
+    )
+
+
+def sidebar_workspace_add_button_style(*, theme: str | None = None) -> str:
+    p = palette(theme)
+    fs = meta_font_pt()
+    return (
+        f"QPushButton {{ color:{p['TEXT_DIM']}; background:transparent; border:0px;"
+        f"padding:6px 10px 6px 18px; text-align:left; font-size:{fs}px; }}"
+        f"QPushButton:hover {{ color:{p['TEXT']}; background:{p['BG3']}; border-radius:6px; }}"
+    )
+
+
+def files_panel_title_style(*, theme: str | None = None) -> str:
+    p = palette(theme)
+    fs = max(13, chat_font_pt() - 1)
+    return (
+        f"color:{p['TEXT']}; font-size:{fs}px; font-weight:650; background:transparent;"
+    )
+
+
+def activity_rail_style(*, theme: str | None = None) -> str:
+    p = palette(theme)
+    return (
+        f"QFrame#activityRail {{ background:{p['BG']};"
+        f"border-right:1px solid {p['BORDER_SUBTLE']}; }}"
+        f"QFrame#sidebarNavSeparator {{ color:{p['BORDER_SUBTLE']}; max-height:1px; }}"
+    )
+
+
+def activity_stack_style(*, theme: str | None = None) -> str:
+    p = palette(theme)
+    return (
+        f"QStackedWidget#activityStack {{ background:{p['BG2']};"
+        f"border-right:1px solid {p['BORDER_SUBTLE']}; }}"
+    )
+
+
 def git_action_button_style(
     accent_color: str = ACCENT,
     theme: str | None = None,

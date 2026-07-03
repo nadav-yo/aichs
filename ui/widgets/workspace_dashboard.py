@@ -1,32 +1,30 @@
 import os
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QSize, Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
-    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMenu,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from services.relative_time import format_relative_ago
 from services.workspace_snapshot import (
     README_NAMES,
     WorkspaceSnapshot,
     build_workspace_snapshot,
-    display_chat_time,
-    display_updated_at,
 )
 from services.performance import time_operation
-from storage.repository import remove_workspace
 from ui.theme import (
     chat_font_pt,
     contained_list_style,
@@ -42,8 +40,6 @@ from ui.theme import (
 from ui.markdown_html import markdown_body
 from ui.widgets.markdown_browser import RemoteImageTextBrowser
 
-_ROLE_PATH = Qt.ItemDataRole.UserRole
-_ROLE_EXISTS = Qt.ItemDataRole.UserRole + 1
 _ROLE_CONVERSATION_PATH = Qt.ItemDataRole.UserRole + 2
 
 
@@ -104,7 +100,6 @@ class _DashboardListRow(QWidget):
     def apply_appearance(self):
         p = palette()
         fs = chat_font_pt()
-        meta_font_pt()
         title_color = p["TEXT_DIM"] if self._empty else p["TEXT"]
         self.setStyleSheet("background:transparent;")
         self.title.setStyleSheet(
@@ -133,6 +128,7 @@ class WorkspaceDashboard(QWidget):
         self._agents_exists = False
         self._agents_text = ""
         self._snapshot_applied = False
+        self._session_context: dict = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
@@ -141,11 +137,10 @@ class WorkspaceDashboard(QWidget):
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(14)
-
         title_col = QVBoxLayout()
         title_col.setContentsMargins(0, 0, 0, 0)
         title_col.setSpacing(4)
-        self._title = QLabel("Workspace")
+        self._title = QLabel("Welcome back")
         self._title.setObjectName("workspaceDashboardTitle")
         self._path = QLabel()
         self._path.setObjectName("workspaceDashboardPath")
@@ -154,13 +149,54 @@ class WorkspaceDashboard(QWidget):
         title_col.addWidget(self._title)
         title_col.addWidget(self._path)
         header.addLayout(title_col, 1)
-
-        self._open_btn = QPushButton("Open Folder")
-        self._open_btn.setObjectName("workspaceOpenFolder")
-        self._open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._open_btn.clicked.connect(self._open_folder)
-        header.addWidget(self._open_btn, 0, Qt.AlignmentFlag.AlignTop)
         root.addLayout(header)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body = QWidget()
+        body.setObjectName("homeDashboardBody")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(14)
+
+        self._active_card = _card()
+        active_layout = QVBoxLayout(self._active_card)
+        active_layout.setContentsMargins(16, 14, 16, 14)
+        active_layout.setSpacing(8)
+        active_header = QHBoxLayout()
+        active_header.setContentsMargins(0, 0, 0, 0)
+        self._active_title = QLabel("No active session")
+        self._active_title.setObjectName("homeActiveTitle")
+        self._active_badge = QLabel()
+        self._active_badge.setObjectName("homeActiveBadge")
+        self._active_badge.hide()
+        active_header.addWidget(self._active_title, 1)
+        active_header.addWidget(self._active_badge, 0, Qt.AlignmentFlag.AlignTop)
+        active_layout.addLayout(active_header)
+        self._active_meta = QLabel()
+        self._active_meta.setObjectName("homeActiveMeta")
+        self._active_meta.setWordWrap(True)
+        active_layout.addWidget(self._active_meta)
+        self._active_model = QLabel()
+        self._active_model.setObjectName("homeActiveModel")
+        self._active_model.hide()
+        active_layout.addWidget(self._active_model)
+        active_actions = QHBoxLayout()
+        active_actions.setContentsMargins(0, 4, 0, 0)
+        active_actions.setSpacing(8)
+        self._open_session_btn = QPushButton("Open Session")
+        self._open_session_btn.setObjectName("homeOpenSession")
+        self._open_session_btn.clicked.connect(self._open_active_session)
+        self._new_session_btn = QPushButton("New Session")
+        self._new_session_btn.clicked.connect(self.new_chat_requested.emit)
+        for button in (self._open_session_btn, self._new_session_btn):
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            active_actions.addWidget(button)
+        active_actions.addStretch(1)
+        active_layout.addLayout(active_actions)
+        body_layout.addWidget(self._active_card)
 
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
@@ -168,46 +204,25 @@ class WorkspaceDashboard(QWidget):
         grid.setVerticalSpacing(14)
         grid.setColumnStretch(0, 3)
         grid.setColumnStretch(1, 2)
-        root.addLayout(grid, 1)
 
-        self._overview_card = _card()
-        overview_layout = QVBoxLayout(self._overview_card)
-        overview_layout.setContentsMargins(16, 14, 16, 14)
-        overview_layout.setSpacing(8)
-        overview_layout.addWidget(_section_label("Overview"))
-        self._current_name = QLabel()
-        self._current_name.setObjectName("workspaceCurrentName")
-        self._current_name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._current_full_path = QLabel()
-        self._current_full_path.setObjectName("workspaceCurrentPath")
-        self._current_full_path.setWordWrap(True)
-        self._current_full_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        overview_layout.addWidget(self._current_name)
-        overview_layout.addWidget(self._current_full_path)
+        self._recent_card = _card()
+        recent_layout = QVBoxLayout(self._recent_card)
+        recent_layout.setContentsMargins(16, 14, 16, 14)
+        recent_layout.setSpacing(8)
+        recent_layout.addWidget(_section_label("Recent Sessions"))
+        self._recent_chats = QListWidget()
+        self._recent_chats.setObjectName("workspaceRecentChats")
+        self._recent_chats.itemActivated.connect(self._activate_chat)
+        self._recent_chats.itemClicked.connect(self._activate_chat)
+        recent_layout.addWidget(self._recent_chats, 1)
+        grid.addWidget(self._recent_card, 0, 0)
 
-        self._status_row = QHBoxLayout()
-        self._status_row.setContentsMargins(0, 4, 0, 0)
-        self._status_row.setSpacing(6)
-        self._git_status = _status_pill()
-        self._branch_status = _status_pill()
-        self._agents_status = _status_pill()
-        self._skills_status = _status_pill()
-        self._extensions_status = _status_pill()
-        for label in (
-            self._git_status,
-            self._branch_status,
-            self._agents_status,
-            self._skills_status,
-            self._extensions_status,
-        ):
-            self._status_row.addWidget(label)
-        self._status_row.addStretch(1)
-        overview_layout.addLayout(self._status_row)
-
-        actions = QHBoxLayout()
-        actions.setContentsMargins(0, 4, 0, 0)
-        actions.setSpacing(8)
-        self._new_chat_btn = QPushButton("New Chat")
+        self._actions_card = _card()
+        actions_layout = QVBoxLayout(self._actions_card)
+        actions_layout.setContentsMargins(16, 14, 16, 14)
+        actions_layout.setSpacing(8)
+        actions_layout.addWidget(_section_label("Quick Actions"))
+        self._new_chat_btn = QPushButton("New Session")
         self._new_chat_btn.clicked.connect(self.new_chat_requested.emit)
         self._file_search_btn = QPushButton("File Search")
         self._file_search_btn.clicked.connect(self.file_search_requested.emit)
@@ -215,10 +230,61 @@ class WorkspaceDashboard(QWidget):
         self._text_search_btn.clicked.connect(self.text_search_requested.emit)
         for button in (self._new_chat_btn, self._file_search_btn, self._text_search_btn):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-            actions.addWidget(button)
-        actions.addStretch(1)
-        overview_layout.addLayout(actions)
-        grid.addWidget(self._overview_card, 0, 0)
+            actions_layout.addWidget(button)
+        actions_layout.addStretch(1)
+        grid.addWidget(self._actions_card, 0, 1)
+        body_layout.addLayout(grid)
+
+        self._workspace_toggle = QToolButton()
+        self._workspace_toggle.setObjectName("homeWorkspaceToggle")
+        self._workspace_toggle.setText("▸ About this workspace")
+        self._workspace_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._workspace_toggle.setCheckable(True)
+        self._workspace_toggle.setChecked(False)
+        self._workspace_toggle.clicked.connect(self._sync_workspace_section)
+        body_layout.addWidget(self._workspace_toggle)
+
+        self._workspace_section = QWidget()
+        self._workspace_section.hide()
+        workspace_layout = QVBoxLayout(self._workspace_section)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_layout.setSpacing(14)
+
+        self._overview_card = _card()
+        overview_layout = QVBoxLayout(self._overview_card)
+        overview_layout.setContentsMargins(16, 14, 16, 14)
+        overview_layout.setSpacing(8)
+        self._current_name = QLabel()
+        self._current_name.setObjectName("workspaceCurrentName")
+        self._current_full_path = QLabel()
+        self._current_full_path.setObjectName("workspaceCurrentPath")
+        self._current_full_path.setWordWrap(True)
+        self._current_full_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        overview_layout.addWidget(self._current_name)
+        overview_layout.addWidget(self._current_full_path)
+        self._status_row = QHBoxLayout()
+        self._status_row.setContentsMargins(0, 4, 0, 0)
+        self._status_row.setSpacing(6)
+        self._git_status = _status_pill()
+        self._branch_status = _status_pill()
+        self._agents_status = _status_pill()
+        self._extensions_status = _status_pill()
+        for label in (
+            self._git_status,
+            self._branch_status,
+            self._agents_status,
+            self._extensions_status,
+        ):
+            self._status_row.addWidget(label)
+        self._status_row.addStretch(1)
+        overview_layout.addLayout(self._status_row)
+        workspace_layout.addWidget(self._overview_card)
+
+        docs = QGridLayout()
+        docs.setContentsMargins(0, 0, 0, 0)
+        docs.setHorizontalSpacing(14)
+        docs.setColumnStretch(0, 1)
+        docs.setColumnStretch(1, 1)
 
         self._readme_card = _card()
         readme_layout = QVBoxLayout(self._readme_card)
@@ -226,8 +292,7 @@ class WorkspaceDashboard(QWidget):
         readme_layout.setSpacing(8)
         readme_header = QHBoxLayout()
         readme_header.setContentsMargins(0, 0, 0, 0)
-        self._readme_title = _section_label("README")
-        readme_header.addWidget(self._readme_title, 1)
+        readme_header.addWidget(_section_label("README"), 1)
         self._open_readme_btn = QPushButton("Open")
         self._open_readme_btn.clicked.connect(self._open_readme)
         readme_header.addWidget(self._open_readme_btn)
@@ -236,7 +301,7 @@ class WorkspaceDashboard(QWidget):
         self._readme_preview.setObjectName("workspacePreview")
         self._readme_preview.setOpenExternalLinks(False)
         readme_layout.addWidget(self._readme_preview, 1)
-        grid.addWidget(self._readme_card, 1, 0)
+        docs.addWidget(self._readme_card, 0, 0)
 
         self._instructions_card = _card()
         instructions_layout = QVBoxLayout(self._instructions_card)
@@ -244,8 +309,7 @@ class WorkspaceDashboard(QWidget):
         instructions_layout.setSpacing(8)
         instructions_header = QHBoxLayout()
         instructions_header.setContentsMargins(0, 0, 0, 0)
-        self._instructions_title = _section_label("Project Instructions")
-        instructions_header.addWidget(self._instructions_title, 1)
+        instructions_header.addWidget(_section_label("Project Instructions"), 1)
         self._open_agents_btn = QPushButton("Open")
         self._open_agents_btn.clicked.connect(self._open_agents)
         instructions_header.addWidget(self._open_agents_btn)
@@ -254,37 +318,17 @@ class WorkspaceDashboard(QWidget):
         self._instructions_preview.setObjectName("workspaceInstructionsPreview")
         self._instructions_preview.setOpenExternalLinks(False)
         self._instructions_preview.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse |
-            Qt.TextInteractionFlag.LinksAccessibleByMouse
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.LinksAccessibleByMouse
         )
         instructions_layout.addWidget(self._instructions_preview, 1)
-        grid.addWidget(self._instructions_card, 2, 0)
+        docs.addWidget(self._instructions_card, 0, 1)
+        workspace_layout.addLayout(docs)
+        body_layout.addWidget(self._workspace_section)
 
-        self._chats_card = _card()
-        chats_layout = QVBoxLayout(self._chats_card)
-        chats_layout.setContentsMargins(16, 14, 16, 14)
-        chats_layout.setSpacing(8)
-        chats_layout.addWidget(_section_label("Recent Chats"))
-        self._recent_chats = QListWidget()
-        self._recent_chats.setObjectName("workspaceRecentChats")
-        self._recent_chats.itemActivated.connect(self._activate_chat)
-        self._recent_chats.itemClicked.connect(self._activate_chat)
-        chats_layout.addWidget(self._recent_chats, 1)
-        grid.addWidget(self._chats_card, 0, 1, 2, 1)
-
-        self._workspaces_card = _card()
-        workspaces_layout = QVBoxLayout(self._workspaces_card)
-        workspaces_layout.setContentsMargins(16, 14, 16, 14)
-        workspaces_layout.setSpacing(8)
-        workspaces_layout.addWidget(_section_label("Recent Workspaces"))
-        self._recent = QListWidget()
-        self._recent.setObjectName("workspaceRecentList")
-        self._recent.itemActivated.connect(self._activate_item)
-        self._recent.itemClicked.connect(self._activate_item)
-        self._recent.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._recent.customContextMenuRequested.connect(self._show_recent_menu)
-        workspaces_layout.addWidget(self._recent, 1)
-        grid.addWidget(self._workspaces_card, 2, 1)
+        body_layout.addStretch(1)
+        scroll.setWidget(body)
+        root.addWidget(scroll, 1)
 
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         if defer_refresh:
@@ -292,6 +336,10 @@ class WorkspaceDashboard(QWidget):
         else:
             self.refresh()
         self.apply_appearance()
+
+    def set_session_context(self, context: dict | None):
+        self._session_context = dict(context or {})
+        self._apply_session_context()
 
     def set_current_workspace(self, path: str):
         self._current_workspace = os.path.abspath(path)
@@ -301,7 +349,7 @@ class WorkspaceDashboard(QWidget):
         self._has_loaded = True
         current = self._current_workspace
         current_name = Path(current).name or current
-        self._path.setText(current)
+        self._path.setText(f"{current_name}  ·  {current}")
         self._current_name.setText(current_name)
         self._current_full_path.setText(current)
         if not self._snapshot_applied:
@@ -327,7 +375,7 @@ class WorkspaceDashboard(QWidget):
         fs = chat_font_pt()
         meta = meta_font_pt()
         primary = primary_button_style(
-            selector="QPushButton#workspaceOpenFolder",
+            selector="QPushButton#homeOpenSession",
             border_radius=7,
             padding="9px 14px",
         )
@@ -339,7 +387,7 @@ class WorkspaceDashboard(QWidget):
             border_color=p["BORDER_SUBTLE"],
         )
         recent_list_style = contained_list_style(
-            selector="QListWidget#workspaceRecentList, QListWidget#workspaceRecentChats",
+            selector="QListWidget#workspaceRecentChats",
             item_padding="10px 12px",
             item_radius=6,
             item_margin="0px",
@@ -366,8 +414,17 @@ class WorkspaceDashboard(QWidget):
             f"QLabel#workspaceCurrentName {{ color:{p['TEXT']};"
             f"font-size:{max(14, fs + 1)}px; font-weight:650; }}"
             f"{hint_label_style(selector='QLabel#workspaceCurrentPath')}"
+            f"QLabel#homeActiveTitle {{ color:{p['TEXT']}; font-size:{max(15, fs + 1)}px;"
+            f"font-weight:650; }}"
+            f"{hint_label_style(selector='QLabel#homeActiveMeta, QLabel#homeActiveModel')}"
+            f"QLabel#homeActiveBadge {{ color:{p['SUCCESS']}; font-size:{meta}px;"
+            f"font-weight:600; padding:2px 8px; border:1px solid {p['SUCCESS_BORDER']};"
+            f"border-radius:999px; background:{p['SUCCESS_BG']}; }}"
             f"QFrame#workspaceHomeCard {{ background:{p['BG2']};"
             f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:8px; }}"
+            f"QToolButton#homeWorkspaceToggle {{ color:{p['TEXT_DIM']}; border:0px;"
+            f"padding:4px 0px; font-size:{meta}px; font-weight:600; text-align:left; }}"
+            f"QToolButton#homeWorkspaceToggle:hover {{ color:{p['TEXT']}; }}"
             f"{status_style}"
             f"QTextBrowser#workspacePreview, QTextBrowser#workspaceInstructionsPreview {{"
             f"background:{p['BG3']}; color:{p['TEXT']};"
@@ -400,69 +457,69 @@ class WorkspaceDashboard(QWidget):
             )
         for widget in self.findChildren(_DashboardListRow):
             widget.apply_appearance()
+        self._apply_session_context()
 
-    def _add_workspace_item(self, row):
-        path = str(row.path or "")
-        exists = bool(row.exists)
-        name = str(row.name or Path(path).name or path)
-        when = display_updated_at(str(row.updated_at or ""))
-        suffix = when if exists else "Missing folder"
-        item = QListWidgetItem()
-        item.setSizeHint(_dashboard_row_size(3))
-        item.setToolTip(path)
-        item.setData(_ROLE_PATH, path)
-        item.setData(_ROLE_EXISTS, exists)
-        if not exists:
-            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
-        self._recent.addItem(item)
-        self._recent.setItemWidget(item, _DashboardListRow(name, [path, suffix]))
+    def _sync_workspace_section(self):
+        expanded = self._workspace_toggle.isChecked()
+        self._workspace_toggle.setText(
+            "▾ About this workspace" if expanded else "▸ About this workspace"
+        )
+        self._workspace_section.setVisible(expanded)
 
-    def _activate_item(self, item: QListWidgetItem):
-        if not bool(item.data(_ROLE_EXISTS)):
-            return
-        path = str(item.data(_ROLE_PATH) or "")
+    def _open_active_session(self):
+        path = str(self._session_context.get("conversation_path") or "")
         if path:
-            self.switch_requested.emit(path)
+            self.conversation_requested.emit(path)
+
+    def _apply_session_context(self):
+        ctx = self._session_context
+        path = str(ctx.get("conversation_path") or "")
+        title = str(ctx.get("title") or "").strip() or "Untitled"
+        if not path:
+            self._active_title.setText("No active session")
+            self._active_meta.setText("Start a new session or pick one from recent sessions.")
+            self._active_badge.hide()
+            self._active_model.hide()
+            self._open_session_btn.setEnabled(False)
+            return
+        self._active_title.setText(title)
+        self._open_session_btn.setEnabled(True)
+        parts: list[str] = []
+        updated = str(ctx.get("updated_at") or "")
+        if updated:
+            try:
+                rel = format_relative_ago(datetime.fromisoformat(updated))
+                parts.append(f"Last active {rel} ago" if rel != "now" else "Last active now")
+            except ValueError:
+                pass
+        count = int(ctx.get("message_count") or 0)
+        if count:
+            word = "message" if count == 1 else "messages"
+            parts.append(f"{count} {word}")
+        open_files = int(ctx.get("open_file_count") or 0)
+        if open_files:
+            word = "file" if open_files == 1 else "files"
+            parts.append(f"{open_files} open {word}")
+        self._active_meta.setText(" · ".join(parts) if parts else "Ready to continue")
+        model = str(ctx.get("current_model") or "").strip()
+        if model:
+            self._active_model.setText(f"Current model: {model}")
+            self._active_model.show()
+        else:
+            self._active_model.hide()
+        if ctx.get("is_streaming"):
+            self._active_badge.setText("Active")
+            self._active_badge.show()
+        elif ctx.get("is_queued"):
+            self._active_badge.setText("Queued")
+            self._active_badge.show()
+        else:
+            self._active_badge.hide()
 
     def _activate_chat(self, item: QListWidgetItem):
         path = str(item.data(_ROLE_CONVERSATION_PATH) or "")
         if path:
             self.conversation_requested.emit(path)
-
-    def _show_recent_menu(self, pos):
-        item = self._recent.itemAt(pos)
-        if item is None:
-            return
-        path = str(item.data(_ROLE_PATH) or "")
-        if not path:
-            return
-        menu = QMenu(self)
-        remove = QAction("Remove from Recent", self)
-        menu.addAction(remove)
-        chosen = menu.exec(self._recent.mapToGlobal(pos))
-        if chosen is remove:
-            self._remove_recent_workspace(path)
-
-    def _remove_recent_workspace(self, path: str):
-        if not remove_workspace(path):
-            return
-        target = _path_key(path)
-        for index in range(self._recent.count() - 1, -1, -1):
-            item = self._recent.item(index)
-            if _path_key(str(item.data(_ROLE_PATH) or "")) == target:
-                self._recent.takeItem(index)
-        if self._recent.count() == 0:
-            self._add_empty_workspace_item()
-
-    def _open_folder(self):
-        path = QFileDialog.getExistingDirectory(
-            self,
-            "Open workspace",
-            self._current_workspace,
-            QFileDialog.Option.ShowDirsOnly,
-        )
-        if path:
-            self.switch_requested.emit(path)
 
     def _open_readme(self):
         path = _first_existing(self._current_workspace, README_NAMES)
@@ -477,41 +534,38 @@ class WorkspaceDashboard(QWidget):
     def _set_placeholders(self):
         current = self._current_workspace
         current_name = Path(current).name or current
-        self._path.setText(current)
+        self._path.setText(f"{current_name}  ·  {current}")
         self._current_name.setText(current_name)
         self._current_full_path.setText(current)
         self._git_status.setText("Git pending")
         self._branch_status.setText("Branch pending")
         self._agents_status.setText("Project pending")
-        self._skills_status.setText("Skills pending")
         self._extensions_status.setText("Extensions pending")
         self._readme_preview.setHtml(_empty_html("Workspace preview pending."))
         self._instructions_preview.setHtml(_empty_html("Project instructions pending."))
         self._recent_chats.clear()
-        self._recent.clear()
 
     def _apply_snapshot(self, generation: int, snapshot: WorkspaceSnapshot):
         if generation != self._refresh_generation:
             return
-        if os.path.normcase(os.path.abspath(snapshot.root)) != os.path.normcase(os.path.abspath(self._current_workspace)):
+        if os.path.normcase(os.path.abspath(snapshot.root)) != os.path.normcase(
+            os.path.abspath(self._current_workspace)
+        ):
             return
         with time_operation(
             "workspace.apply",
-            detail=(
-                f"chats={len(snapshot.recent_chats)} "
-                f"workspaces={len(snapshot.recent_workspaces)}"
-            ),
+            detail=f"chats={len(snapshot.recent_chats)}",
             slow_ms=50,
         ):
             self._snapshot_applied = True
-            self._path.setText(snapshot.root)
+            current_name = snapshot.name
+            self._path.setText(f"{current_name}  ·  {snapshot.root}")
             self._current_name.setText(snapshot.name)
             self._current_full_path.setText(snapshot.root)
             self._apply_status(snapshot)
             self._apply_readme(snapshot)
             self._apply_agents(snapshot)
             self._apply_chats(snapshot)
-            self._apply_recent_workspaces(snapshot)
 
     def _release_refresh_thread(self, thread: _WorkspaceRefreshThread):
         if thread in self._refresh_threads:
@@ -539,9 +593,6 @@ class WorkspaceDashboard(QWidget):
 
     def _apply_status(self, snapshot: WorkspaceSnapshot):
         self._agents_status.setText("AGENTS.md" if snapshot.agents_exists else "No AGENTS.md")
-        skill_count = snapshot.skills_count
-        skill_word = "skill" if skill_count == 1 else "skills"
-        self._skills_status.setText(f"{skill_count} {skill_word}" if skill_count else "No skills")
         ext_count = snapshot.extensions_count
         ext_word = "extension" if ext_count == 1 else "extensions"
         self._extensions_status.setText(f"{ext_count} {ext_word}" if ext_count else "No extensions")
@@ -583,10 +634,17 @@ class WorkspaceDashboard(QWidget):
         self._recent_chats.clear()
         for chat in snapshot.recent_chats:
             title = str(chat.title or "Untitled")
-            updated = display_chat_time(str(chat.updated_at or ""))
+            updated = str(chat.updated_at or "")
+            rel = ""
+            if updated:
+                try:
+                    rel = format_relative_ago(datetime.fromisoformat(updated))
+                    rel = "now" if rel == "now" else f"{rel} ago"
+                except ValueError:
+                    rel = "Recent"
             count = int(chat.message_count or 0)
             message_word = "message" if count == 1 else "messages"
-            meta = f"{updated} - {count} {message_word}"
+            meta = f"{rel} · {count} {message_word}" if rel else f"{count} {message_word}"
             item = QListWidgetItem()
             item.setSizeHint(_dashboard_row_size(2))
             item.setData(_ROLE_CONVERSATION_PATH, str(chat.path))
@@ -600,25 +658,8 @@ class WorkspaceDashboard(QWidget):
             self._recent_chats.addItem(item)
             self._recent_chats.setItemWidget(
                 item,
-                _DashboardListRow("No chats in this workspace yet", empty=True),
+                _DashboardListRow("No sessions in this workspace yet", empty=True),
             )
-
-    def _apply_recent_workspaces(self, snapshot: WorkspaceSnapshot):
-        self._recent.clear()
-        for row in snapshot.recent_workspaces:
-            self._add_workspace_item(row)
-        if not snapshot.recent_workspaces:
-            self._add_empty_workspace_item()
-
-    def _add_empty_workspace_item(self):
-        item = QListWidgetItem()
-        item.setSizeHint(_dashboard_row_size(1))
-        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-        self._recent.addItem(item)
-        self._recent.setItemWidget(
-            item,
-            _DashboardListRow("No recent workspaces yet", empty=True),
-        )
 
 
 def _card() -> QFrame:
@@ -654,12 +695,6 @@ def _first_existing(root: str, names: tuple[str, ...]) -> Path | None:
     return None
 
 
-def _path_key(path: str) -> str:
-    if not path:
-        return ""
-    return os.path.normcase(os.path.abspath(path))
-
-
 def _preview_html(text: str) -> str:
     return _markdown_panel_html(text, empty_text="README is empty.")
 
@@ -669,10 +704,7 @@ def _markdown_panel_html(text: str, *, empty_text: str) -> str:
         return _empty_html(empty_text)
     body = markdown_body(text, extensions=["fenced_code", "tables", "toc"])
     p = palette()
-    css = (
-        markdown_css()
-        + f"body {{ background:{p['BG3']}; padding:6px 8px 12px 8px; }}"
-    )
+    css = markdown_css() + f"body {{ background:{p['BG3']}; padding:6px 8px 12px 8px; }}"
     return f"<style>{css}</style>{body}"
 
 
@@ -683,4 +715,3 @@ def _empty_html(text: str) -> str:
         "margin:0; padding:6px 8px; }}</style>"
         f"<p>{text}</p>"
     )
-

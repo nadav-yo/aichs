@@ -16,7 +16,7 @@ from PyQt6.QtGui import (
     QPainter, QPen, QPixmap, QShortcut,
 )
 
-from config import IGNORED, ACTIVITY_RAIL_WIDTH, MIN_ACTIVITY_WIDTH, MAX_ACTIVITY_WIDTH, ACTIVITY_STACK_MIN_WIDTH
+from config import IGNORED, ACTIVITY_NAV_WIDTH, MIN_ACTIVITY_WIDTH, MAX_ACTIVITY_WIDTH, ACTIVITY_STACK_MIN_WIDTH
 from services.chat_drag import AICHS_FILE_DROP_MIME, file_drop_payload, file_drop_text
 from services.file_tree_snapshot import (
     FileTreeSnapshot,
@@ -27,14 +27,17 @@ from services.file_search import clear_workspace_file_cache
 from services.git_snapshot import GitSnapshot
 from services.git_status import discard_files, list_file_changes
 from services.performance import time_operation
-from storage.repository import ConversationStore
+from storage.repository import ConversationStore, list_workspaces
 from storage.settings import SettingsStore
 from ui.theme import (
     palette, ACCENT, git_status_color, icon_button_style, files_header_style,
     WORKBENCH_HEADER_MARGINS, WORKBENCH_HEADER_SPACING,
     file_tree_sidebar_style, mono_font_pt, mono_font,
-    chat_font_pt, current_theme, rail_button_style,
-    sidebar_footer_button_style,
+    chat_font_pt, current_theme, meta_font_pt, hint_label_style,
+    activity_rail_style, activity_stack_style, files_panel_title_style,
+    sidebar_nav_button_style,
+    sidebar_nav_section_style, sidebar_workspace_row_style,
+    sidebar_workspace_add_button_style,
 )
 from ui.widgets.conversation_panel import ConversationPanel
 from ui.widgets.git_panel import GitPanel
@@ -390,6 +393,80 @@ def _activity_attention_icon(key: str, *, active: bool = False) -> QIcon:
     return icon
 
 
+def _normalize_activity_key(key: str) -> str:
+    aliases = {"workspace": "home", "chats": "sessions"}
+    normalized = str(key or "").strip()
+    return aliases.get(normalized, normalized)
+
+
+def _nav_activity_icon(key: str, *, active: bool = False) -> QIcon:
+    theme = current_theme()
+    cache_key = (theme, "nav", key, active)
+    cached = _ICON_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    p = palette()
+    line = QColor(p["TEXT"] if active else p["TEXT_DIM"])
+    fill = QColor(p["BG3"])
+    pixmap = QPixmap(18, 18)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(QPen(line, 1.4))
+    painter.setBrush(QBrush(fill))
+
+    if key == "home":
+        painter.drawLine(4, 9, 9, 4)
+        painter.drawLine(9, 4, 14, 9)
+        painter.drawLine(4, 9, 4, 14)
+        painter.drawLine(14, 9, 14, 14)
+        painter.drawLine(4, 14, 14, 14)
+    elif key == "canvas":
+        painter.drawRoundedRect(QRectF(3, 4, 12, 10), 2.5, 2.5)
+        painter.drawLine(6, 7, 12, 7)
+        painter.drawLine(6, 10, 10, 10)
+    elif key == "sessions":
+        painter.drawRoundedRect(QRectF(3, 4, 12, 9), 2.5, 2.5)
+        painter.drawLine(6, 8, 12, 8)
+        painter.drawLine(6, 11, 10, 11)
+    elif key == "files":
+        painter.drawRoundedRect(QRectF(4, 3, 10, 12), 2, 2)
+        painter.drawLine(7, 3, 7, 6)
+        painter.drawLine(7, 6, 11, 6)
+    elif key == "git":
+        painter.drawEllipse(QRectF(3.5, 3.5, 4, 4))
+        painter.drawEllipse(QRectF(10.5, 3.5, 4, 4))
+        painter.drawEllipse(QRectF(6.8, 10.5, 4, 4))
+        painter.drawLine(7, 6, 7, 10)
+        painter.drawLine(7, 6, 12, 6)
+    elif key == "search":
+        painter.drawEllipse(QRectF(3.5, 3.5, 7, 7))
+        painter.drawLine(10, 10, 14, 14)
+    elif key == "extensions":
+        painter.drawRect(QRectF(3, 3, 5, 5))
+        painter.drawRect(QRectF(10, 3, 5, 5))
+        painter.drawRect(QRectF(3, 10, 5, 5))
+        painter.drawRect(QRectF(10, 10, 5, 5))
+    elif key == "mcp":
+        painter.drawRoundedRect(QRectF(3, 5, 12, 8), 2, 2)
+        painter.drawLine(6, 9, 12, 9)
+    elif key == "docs":
+        painter.drawRoundedRect(QRectF(4, 3, 10, 12), 1.5, 1.5)
+        painter.drawLine(7, 7, 11, 7)
+        painter.drawLine(7, 10, 11, 10)
+    elif key == "settings":
+        painter.drawEllipse(QRectF(4, 4, 10, 10))
+        painter.drawEllipse(QRectF(7.5, 7.5, 3, 3))
+    else:
+        painter.drawRoundedRect(QRectF(4, 4, 10, 10), 2.5, 2.5)
+
+    painter.end()
+    icon = QIcon(pixmap)
+    _ICON_CACHE[cache_key] = icon
+    return icon
+
+
 class _PathLabel(QLabel):
     """Workspace folder name; elides when the sidebar is narrow."""
 
@@ -432,6 +509,130 @@ class _PathLabel(QLabel):
             self._full_text, Qt.TextElideMode.ElideMiddle, self.width(),
         )
         super().setText(elided)
+
+
+class _FilesPanelHeader(QWidget):
+    new_file_clicked = pyqtSignal()
+    new_folder_clicked = pyqtSignal()
+    refresh_clicked = pyqtSignal()
+    filter_changed = pyqtSignal(str)
+
+    def __init__(self, path: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("filesPanelHeader")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(*WORKBENCH_HEADER_MARGINS)
+        root.setSpacing(8)
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(8)
+        self._title = QLabel("Files")
+        self._title.setObjectName("filesPanelTitle")
+        title_row.addWidget(self._title, 1)
+        self._new_file_btn = QPushButton("+")
+        self._new_file_btn.setToolTip("New File (Ctrl+Alt+N)")
+        self._new_folder_btn = QPushButton("Dir")
+        self._new_folder_btn.setToolTip("New Folder (Ctrl+Shift+N)")
+        self._refresh = QPushButton("↻")
+        self._refresh.setToolTip("Refresh file tree (F5)")
+        for button in (self._new_file_btn, self._new_folder_btn, self._refresh):
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setFixedSize(28, 28)
+        self._new_file_btn.clicked.connect(self.new_file_clicked.emit)
+        self._new_folder_btn.clicked.connect(self.new_folder_clicked.emit)
+        self._refresh.clicked.connect(self.refresh_clicked.emit)
+        title_row.addWidget(self._new_file_btn)
+        title_row.addWidget(self._new_folder_btn)
+        title_row.addWidget(self._refresh)
+        root.addLayout(title_row)
+
+        self._filter = QLineEdit()
+        self._filter.setObjectName("filesFilter")
+        self._filter.setPlaceholderText("Search files…")
+        self._filter.setClearButtonEnabled(True)
+        self._filter.setToolTip(path)
+        self._filter.textChanged.connect(self.filter_changed.emit)
+        root.addWidget(self._filter)
+        self.apply_appearance()
+
+    def set_path(self, path: str):
+        self._filter.setToolTip(path)
+
+    def apply_appearance(self):
+        self.setStyleSheet(files_header_style())
+        self._title.setStyleSheet(files_panel_title_style())
+        button_style = icon_button_style()
+        self._new_file_btn.setStyleSheet(button_style)
+        self._new_folder_btn.setStyleSheet(button_style)
+        self._refresh.setStyleSheet(button_style)
+
+
+class _WorkspaceNavPanel(QWidget):
+    switch_requested = pyqtSignal(str)
+    add_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("workspaceNavPanel")
+        self._current_workspace = ""
+        self._buttons: list[QPushButton] = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        self._section = QLabel("WORKSPACES")
+        self._section.setObjectName("sidebarNavSection")
+        layout.addWidget(self._section)
+        self._list_layout = QVBoxLayout()
+        self._list_layout.setContentsMargins(0, 0, 0, 0)
+        self._list_layout.setSpacing(2)
+        layout.addLayout(self._list_layout)
+        self._add_btn = QPushButton("+ Add workspace")
+        self._add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._add_btn.clicked.connect(self.add_requested.emit)
+        layout.addWidget(self._add_btn)
+        self.apply_appearance()
+
+    def set_current_workspace(self, path: str):
+        self._current_workspace = os.path.abspath(path)
+        self.refresh()
+
+    def refresh(self):
+        current_key = os.path.normcase(self._current_workspace)
+        while self._list_layout.count():
+            item = self._list_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._buttons.clear()
+        rows = list_workspaces()
+        if not rows:
+            placeholder = QLabel("No workspaces yet")
+            placeholder.setObjectName("workspaceNavEmpty")
+            self._list_layout.addWidget(placeholder)
+            self.apply_appearance()
+            return
+        for row in rows:
+            path = str(row.get("path") or "")
+            if not path:
+                continue
+            name = Path(path).name or path
+            button = QPushButton(name)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setToolTip(path)
+            active = os.path.normcase(os.path.abspath(path)) == current_key
+            button.setStyleSheet(sidebar_workspace_row_style(active=active))
+            button.clicked.connect(lambda _checked=False, p=path: self.switch_requested.emit(p))
+            self._list_layout.addWidget(button)
+            self._buttons.append(button)
+        self.apply_appearance()
+
+    def apply_appearance(self):
+        self._section.setStyleSheet(sidebar_nav_section_style())
+        self._add_btn.setStyleSheet(sidebar_workspace_add_button_style())
+        empty = self.findChild(QLabel, "workspaceNavEmpty")
+        if empty is not None:
+            empty.setStyleSheet(hint_label_style(selector="QLabel#workspaceNavEmpty"))
 
 
 class _FilesHeader(QWidget):
@@ -748,6 +949,12 @@ class FileTree(QTreeWidget):
         self._rebuild_dirty_dirs()
         self._update_git_labels()
         self._apply_decorations()
+
+    def new_file(self):
+        self._new_file_selected()
+
+    def new_folder(self):
+        self._new_folder_selected()
 
     def _on_double_click(self, item: QTreeWidgetItem, _column: int):
         path = item.data(0, Qt.ItemDataRole.UserRole)
@@ -1971,12 +2178,13 @@ class LeftPanel(QWidget):
         self._activity_buttons: dict[str, QPushButton] = {}
         self._activity_widgets: dict[str, QWidget] = {}
         self._activity_attention: dict[str, bool] = {}
-        self._active_activity = "chats"
-        self._collapsed_width = ACTIVITY_RAIL_WIDTH
+        self._active_activity = "sessions"
+        self._collapsed_width = ACTIVITY_NAV_WIDTH
         self._expanded_min_width = MIN_ACTIVITY_WIDTH
         self._expanded_max_width = MAX_ACTIVITY_WIDTH
-        self._stack_panel_width = MAX_ACTIVITY_WIDTH - ACTIVITY_RAIL_WIDTH
+        self._stack_panel_width = MAX_ACTIVITY_WIDTH - ACTIVITY_NAV_WIDTH
         self._defer_refresh = defer_refresh
+        self._root_path = root_path
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1984,15 +2192,15 @@ class LeftPanel(QWidget):
 
         self._rail = QFrame()
         self._rail.setObjectName("activityRail")
-        self._rail.setFixedWidth(ACTIVITY_RAIL_WIDTH)
+        self._rail.setFixedWidth(ACTIVITY_NAV_WIDTH)
         rail_layout = QVBoxLayout(self._rail)
-        rail_layout.setContentsMargins(6, 8, 6, 8)
-        rail_layout.setSpacing(6)
+        rail_layout.setContentsMargins(8, 8, 8, 8)
+        rail_layout.setSpacing(4)
 
         self._stack = QStackedWidget()
         self._stack.setObjectName("activityStack")
         self._stack.setMinimumWidth(ACTIVITY_STACK_MIN_WIDTH)
-        self._stack.setMaximumWidth(MAX_ACTIVITY_WIDTH - ACTIVITY_RAIL_WIDTH)
+        self._stack.setMaximumWidth(MAX_ACTIVITY_WIDTH - ACTIVITY_NAV_WIDTH)
 
         self._conv = ConversationPanel(store, settings=self._settings)
         self._conv.selected.connect(self.selected)
@@ -2010,9 +2218,11 @@ class LeftPanel(QWidget):
         files_layout.setContentsMargins(0, 0, 0, 0)
         files_layout.setSpacing(0)
 
-        self._files_header = _FilesHeader(root_path, filter_enabled=True)
+        self._files_header = _FilesPanelHeader(root_path)
         self._files_header.refresh_clicked.connect(self._file_tree.refresh)
         self._files_header.filter_changed.connect(self._file_tree.set_filter_text)
+        self._files_header.new_file_clicked.connect(self._file_tree.new_file)
+        self._files_header.new_folder_clicked.connect(self._file_tree.new_folder)
         files_layout.addWidget(self._files_header)
         files_layout.addWidget(self._file_tree, 1)
 
@@ -2041,54 +2251,53 @@ class LeftPanel(QWidget):
         git_layout.addWidget(self._git_header)
         git_layout.addWidget(self._git, 1)
 
-        self._add_activity_action("workspace", "Work", rail_layout, tooltip="Workspace")
+        self._add_activity_action("home", "Home", rail_layout, tooltip="Home")
         self._add_activity_action("canvas", "Canvas", rail_layout, tooltip="Agent Canvas")
-        self._add_activity("chats", "Chats", self._conv, rail_layout)
+        self._add_nav_separator(rail_layout)
+        self._add_activity("sessions", "Sessions", self._conv, rail_layout)
         self._add_activity("files", "Files", files_wrap, rail_layout)
         self._add_activity("git", "Git", git_wrap, rail_layout)
+        self._add_nav_separator(rail_layout)
 
-        rail_layout.addStretch()
+        self._workspace_nav = _WorkspaceNavPanel()
+        self._workspace_nav.set_current_workspace(root_path)
+        rail_layout.addWidget(self._workspace_nav, 1)
 
-        self._search_btn = QPushButton("Search")
-        self._search_btn.setToolTip("Open search")
-        self._search_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._add_nav_separator(rail_layout)
+
+        self._search_btn = self._add_footer_action("search", "Search", rail_layout)
         self._search_btn.clicked.connect(self._show_search_menu)
-        rail_layout.addWidget(self._search_btn)
-
-        self._extensions_btn = QPushButton("Ext")
-        self._extensions_btn.setToolTip("Extensions")
-        self._extensions_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._extensions_btn = self._add_footer_action("extensions", "Extensions", rail_layout)
         self._extensions_btn.clicked.connect(self.extensions_requested.emit)
-        rail_layout.addWidget(self._extensions_btn)
-
-        self._mcp_btn = QPushButton("MCP")
-        self._mcp_btn.setToolTip("MCP servers")
-        self._mcp_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mcp_btn = self._add_footer_action("mcp", "MCP Servers", rail_layout)
         self._mcp_btn.clicked.connect(self.mcp_requested.emit)
-        rail_layout.addWidget(self._mcp_btn)
-
-        self._docs_btn = QPushButton("Docs")
-        self._docs_btn.setToolTip("Documentation")
-        self._docs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._docs_btn = self._add_footer_action("docs", "Docs", rail_layout)
         self._docs_btn.clicked.connect(self.open_docs)
-        rail_layout.addWidget(self._docs_btn)
-
-        self._settings_btn = QPushButton("Settings")
-        self._settings_btn.setToolTip("Settings (Ctrl+,)")
-        self._settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._settings_btn = self._add_footer_action("settings", "Settings", rail_layout)
         self._settings_btn.clicked.connect(self.open_settings)
-        rail_layout.addWidget(self._settings_btn)
 
         root.addWidget(self._rail)
         root.addWidget(self._stack, 1)
-        self.set_active_activity("chats")
+        self.set_active_activity("sessions")
 
         self._apply_styles()
 
-    def _add_activity(self, key: str, label: str, widget: QWidget, rail_layout: QVBoxLayout):
-        button = QPushButton(label)
+    def _configure_nav_button(self, button: QPushButton, key: str, label: str, *, tooltip: str = ""):
         button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setToolTip(label)
+        button.setToolTip(tooltip or label)
+        button.setText(f"  {label}")
+        button.setIcon(_nav_activity_icon(key, active=False))
+        button.setIconSize(QSize(18, 18))
+
+    def _add_nav_separator(self, rail_layout: QVBoxLayout):
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setObjectName("sidebarNavSeparator")
+        rail_layout.addWidget(line)
+
+    def _add_activity(self, key: str, label: str, widget: QWidget, rail_layout: QVBoxLayout):
+        button = QPushButton()
+        self._configure_nav_button(button, key, label)
         button.clicked.connect(lambda _checked=False, k=key: self._on_activity_clicked(k))
         self._activity_buttons[key] = button
         self._activity_widgets[key] = widget
@@ -2103,16 +2312,22 @@ class LeftPanel(QWidget):
         *,
         tooltip: str | None = None,
     ):
-        button = QPushButton(label)
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setToolTip(tooltip or label)
+        button = QPushButton()
+        self._configure_nav_button(button, key, label, tooltip=tooltip or label)
         button.clicked.connect(lambda _checked=False, k=key: self._on_activity_clicked(k))
         self._activity_buttons[key] = button
         rail_layout.addWidget(button)
 
+    def _add_footer_action(self, key: str, label: str, rail_layout: QVBoxLayout) -> QPushButton:
+        button = QPushButton()
+        self._configure_nav_button(button, key, label)
+        rail_layout.addWidget(button)
+        return button
+
     def _on_activity_clicked(self, key: str):
-        if key == "workspace":
-            self.show_workspace_activity()
+        key = _normalize_activity_key(key)
+        if key == "home":
+            self.show_home_activity()
             return
         if key == "canvas":
             self.show_canvas_activity()
@@ -2122,11 +2337,13 @@ class LeftPanel(QWidget):
             return
         self.set_active_activity(key)
 
-    def show_workspace_activity(self):
-        self._active_activity = "workspace"
+    def show_home_activity(self):
+        self._active_activity = "home"
         self.collapse_activity_panel()
         self._sync_activity_buttons()
         self.workspace_requested.emit()
+
+    show_workspace_activity = show_home_activity
 
     def show_canvas_activity(self):
         self._active_activity = "canvas"
@@ -2135,6 +2352,7 @@ class LeftPanel(QWidget):
         self.canvas_requested.emit()
 
     def set_active_activity(self, key: str, *, expand: bool = True):
+        key = _normalize_activity_key(key)
         widget = self._activity_widgets.get(key)
         if widget is None:
             return
@@ -2151,6 +2369,7 @@ class LeftPanel(QWidget):
         return self._active_activity
 
     def set_activity_attention(self, key: str, active: bool):
+        key = _normalize_activity_key(key)
         active = bool(active)
         if self._activity_attention.get(key, False) == active:
             return
@@ -2181,37 +2400,28 @@ class LeftPanel(QWidget):
             self.activity_panel_collapsed_changed.emit(False)
 
     def _sync_activity_buttons(self):
-        palette()
-        fs = max(11, chat_font_pt() - 2)
+        fs = max(12, chat_font_pt() - 1)
         for key, button in self._activity_buttons.items():
+            active = key == self._active_activity
             has_attention = self._activity_attention.get(key, False)
-            button.setIcon(QIcon())
+            if has_attention and not active:
+                button.setIcon(_activity_attention_icon(key, active=active))
+            else:
+                button.setIcon(_nav_activity_icon(key, active=active))
             button.setStyleSheet(
-                rail_button_style(
+                sidebar_nav_button_style(
                     font_size=fs,
-                    active=key == self._active_activity,
+                    active=active,
                     attention=has_attention,
                 )
             )
 
     def _apply_styles(self):
-        p = palette()
-        self._rail.setStyleSheet(
-            f"QFrame#activityRail {{ background:{p['BG']};"
-            f"border-right:1px solid {p['BORDER_SUBTLE']}; }}"
-        )
-        self._stack.setStyleSheet(
-            f"QStackedWidget#activityStack {{ background:{p['BG2']};"
-            f"border-right:1px solid {p['BORDER_SUBTLE']}; }}"
-        )
+        self._rail.setStyleSheet(activity_rail_style())
+        self._stack.setStyleSheet(activity_stack_style())
         self._files_header.apply_appearance()
         self._git_header.apply_appearance()
-        footer_style = sidebar_footer_button_style()
-        self._extensions_btn.setStyleSheet(footer_style)
-        self._mcp_btn.setStyleSheet(footer_style)
-        self._search_btn.setStyleSheet(footer_style)
-        self._docs_btn.setStyleSheet(footer_style)
-        self._settings_btn.setStyleSheet(footer_style)
+        self._workspace_nav.apply_appearance()
         self._sync_activity_buttons()
 
     def apply_appearance(self):
@@ -2241,10 +2451,12 @@ class LeftPanel(QWidget):
     def set_workspace(self, path: str, store: ConversationStore | None = None):
         if store is not None:
             self._conv.set_store(store)
+        self._root_path = path
         self._file_tree.set_root(path)
         self._git.set_repo_path(path)
         self._files_header.set_path(path)
         self._git_header.set_path(path)
+        self._workspace_nav.set_current_workspace(path)
 
     def refresh(self):
         self._conv.refresh()

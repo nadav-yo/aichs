@@ -16,6 +16,7 @@ from ui.main_window import (
     MainWindow,
     _ExtensionReviewThread,
 )
+from config import ACTIVITY_NAV_WIDTH
 from ui.theme import palette
 from ui.widgets.workspace_dashboard import WorkspaceDashboard
 
@@ -300,7 +301,7 @@ def test_main_window_left_rail_search_and_extensions_actions(qapp, workspace, mo
         window._left._extensions_btn.click()
 
         assert menu_choices == []
-        assert window._left.active_activity() == "chats"
+        assert window._left.active_activity() == "sessions"
         assert calls == ["file", "text", "extensions"]
     finally:
         window.close()
@@ -388,14 +389,14 @@ def test_main_window_left_rail_clicks_toggle_activity_drawer(qapp, workspace):
     window = MainWindow(startup_workspace=str(workspace))
     opened = workspace / "src" / "main.py"
     try:
-        assert window._left.active_activity() == "chats"
+        assert window._left.active_activity() == "sessions"
         assert not window._left.is_activity_panel_collapsed()
 
-        window._left._activity_buttons["chats"].click()
+        window._left._activity_buttons["sessions"].click()
 
-        assert window._left.active_activity() == "chats"
+        assert window._left.active_activity() == "sessions"
         assert window._left.is_activity_panel_collapsed()
-        assert window._root_splitter.sizes()[0] <= 80
+        assert window._root_splitter.sizes()[0] <= ACTIVITY_NAV_WIDTH + 20
 
         window._left._activity_buttons["files"].click()
 
@@ -406,7 +407,7 @@ def test_main_window_left_rail_clicks_toggle_activity_drawer(qapp, workspace):
         window._left._activity_buttons["files"].click()
 
         assert window._left.is_activity_panel_collapsed()
-        assert window._root_splitter.sizes()[0] <= 80
+        assert window._root_splitter.sizes()[0] <= ACTIVITY_NAV_WIDTH + 20
 
         window._left.reveal_file(str(opened), activate=True)
 
@@ -420,26 +421,23 @@ def test_main_window_left_rail_clicks_toggle_activity_drawer(qapp, workspace):
         qapp.setStyleSheet(app_style)
 
 
-def test_main_window_workspace_rail_shows_dashboard(qapp, workspace):
+def test_main_window_home_nav_shows_dashboard(qapp, workspace):
     cwd = os.getcwd()
     app_style = qapp.styleSheet()
     app_font = qapp.font()
     window = MainWindow(startup_workspace=str(workspace))
     try:
-        assert window._center_stack.currentWidget() is window._workbench
+        window._left._activity_buttons["home"].click()
 
-        window._left._activity_buttons["workspace"].click()
-
-        assert window._left.active_activity() == "workspace"
-        assert window._left._activity_buttons["workspace"].text() == "Work"
-        assert window._left._activity_buttons["workspace"].toolTip() == "Workspace"
+        assert window._left.active_activity() == "home"
+        assert "Home" in window._left._activity_buttons["home"].text()
         assert window._left.is_activity_panel_collapsed()
         assert window._center_stack.currentWidget() is window._workspace_dashboard
         dashboard_style = window._workspace_dashboard.styleSheet()
         assert "}}" not in dashboard_style
         assert "QWidget {" not in dashboard_style
         assert "QLabel { background:transparent; }" in dashboard_style
-        assert "QPushButton#workspaceOpenFolder:hover" in dashboard_style
+        assert "QPushButton#homeOpenSession:hover" in dashboard_style
         assert window._is_context_collapsed()
         assert window._context_shell.isHidden()
         assert window._context_shell.maximumWidth() == 0
@@ -457,6 +455,10 @@ def test_main_window_workspace_rail_shows_dashboard(qapp, workspace):
         qapp.setStyleSheet(app_style)
 
 
+def test_main_window_workspace_rail_shows_dashboard(qapp, workspace):
+    test_main_window_home_nav_shows_dashboard(qapp, workspace)
+
+
 def test_main_window_workspace_restores_expanded_context_rail(qapp, workspace):
     cwd = os.getcwd()
     app_style = qapp.styleSheet()
@@ -466,12 +468,12 @@ def test_main_window_workspace_restores_expanded_context_rail(qapp, workspace):
         window._expand_context()
         expanded_width = window._root_splitter.sizes()[2]
 
-        window._left._activity_buttons["workspace"].click()
+        window._left._activity_buttons["home"].click()
 
         assert window._context_shell.isHidden()
         assert window._root_splitter.sizes()[2] == 0
 
-        window._left._activity_buttons["chats"].click()
+        window._left._activity_buttons["sessions"].click()
 
         assert window._center_stack.currentWidget() is window._workbench
         assert not window._context_shell.isHidden()
@@ -520,7 +522,6 @@ def test_workspace_dashboard_shows_home_context(qapp, workspace):
         assert long_rule.strip() in dashboard._instructions_preview.toPlainText()
         assert "<h1" in dashboard._instructions_preview.toHtml().lower()
         assert dashboard._agents_status.text() == "AGENTS.md"
-        assert dashboard._skills_status.text() == "1 skill"
         assert dashboard._extensions_status.text() == "1 extension"
         assert "QLabel#workspaceSectionLabel" in dashboard.styleSheet()
         assert "QLabel#workspaceStatusPill" in dashboard.styleSheet()
@@ -528,7 +529,7 @@ def test_workspace_dashboard_shows_home_context(qapp, workspace):
         assert dashboard._recent_chats.item(0).toolTip() == str(path)
         row = dashboard._recent_chats.itemWidget(dashboard._recent_chats.item(0))
         assert row.title.text() == "Dashboard chat"
-        assert row.details.text() == "Feb 03, 2026 04:05 - 1 message"
+        assert "1 message" in row.details.text()
         assert palette()["TEXT_DIM"] in row.details.styleSheet()
     finally:
         dashboard.close()
@@ -568,11 +569,13 @@ def test_main_window_recent_workspace_switch_retargets_panels(qapp, workspace, t
     register_workspace(other)
     window = MainWindow(startup_workspace=str(workspace))
     try:
-        window._left._activity_buttons["workspace"].click()
-        _wait_until(qapp, lambda: window._workspace_dashboard._recent.count() > 0)
-        item = window._workspace_dashboard._recent.item(0)
-
-        window._workspace_dashboard._recent.itemClicked.emit(item)
+        window._left._workspace_nav.refresh()
+        qapp.processEvents()
+        buttons = window._left._workspace_nav._buttons
+        target = next(
+            button for button in buttons if button.toolTip() == str(other.resolve())
+        )
+        target.click()
         qapp.processEvents()
 
         assert os.getcwd() == str(other.resolve())
@@ -596,14 +599,12 @@ def test_main_window_workspace_open_folder_switches(qapp, workspace, tmp_path, m
     other = tmp_path / "folder-choice"
     other.mkdir()
     monkeypatch.setattr(
-        "ui.widgets.workspace_dashboard.QFileDialog.getExistingDirectory",
+        "ui.main_window.QFileDialog.getExistingDirectory",
         lambda *_args, **_kwargs: str(other),
     )
     window = MainWindow(startup_workspace=str(workspace))
     try:
-        window._left._activity_buttons["workspace"].click()
-
-        window._workspace_dashboard._open_btn.click()
+        window._left._workspace_nav._add_btn.click()
         qapp.processEvents()
 
         assert os.getcwd() == str(other.resolve())
@@ -616,63 +617,22 @@ def test_main_window_workspace_open_folder_switches(qapp, workspace, tmp_path, m
         qapp.setStyleSheet(app_style)
 
 
-def test_workspace_dashboard_missing_recent_workspace_is_disabled(qapp, workspace, tmp_path):
-    cwd = os.getcwd()
-    missing = tmp_path / "missing"
-    register_workspace(missing)
-    dashboard = WorkspaceDashboard(str(workspace))
-    calls = []
-    try:
-        _wait_until(qapp, lambda: dashboard._recent.count() > 0)
-        dashboard.switch_requested.connect(calls.append)
-        item = dashboard._recent.item(0)
-
-        row = dashboard._recent.itemWidget(item)
-        assert "Missing folder" in row.details.text()
-        assert not item.flags() & Qt.ItemFlag.ItemIsEnabled
-        dashboard._recent.itemClicked.emit(item)
-
-        assert calls == []
-        assert os.getcwd() == cwd
-    finally:
-        dashboard.close()
-        os.chdir(cwd)
-
-
-def test_workspace_dashboard_context_menu_removes_recent_workspace(qapp, workspace, tmp_path, monkeypatch):
-    other = tmp_path / "old-work"
+def test_left_panel_workspace_nav_lists_registered_workspaces(qapp, workspace, tmp_path):
+    register_workspace(workspace)
+    other = tmp_path / "listed"
     other.mkdir()
-    registered = register_workspace(other)
-    dashboard = WorkspaceDashboard(str(workspace), defer_refresh=True)
-    dashboard._recent.clear()
-    dashboard._add_workspace_item(
-        RecentWorkspace(
-            path=registered["path"],
-            name=registered["name"],
-            updated_at=registered["updated_at"],
-            exists=True,
-        )
-    )
-    item = dashboard._recent.item(0)
-    action_texts = []
+    register_workspace(other)
+    from ui.widgets.left_panel import _WorkspaceNavPanel
 
-    def choose_remove(menu, _pos):
-        action_texts.extend(action.text() for action in menu.actions())
-        return menu.actions()[0]
-
+    panel = _WorkspaceNavPanel()
     try:
-        monkeypatch.setattr(QMenu, "exec", choose_remove)
-        monkeypatch.setattr(dashboard._recent, "itemAt", lambda _pos: item)
-
-        dashboard._show_recent_menu(dashboard._recent.visualItemRect(item).center())
-
-        assert action_texts == ["Remove from Recent"]
-        assert list_workspaces() == []
-        assert dashboard._recent.count() == 1
-        row = dashboard._recent.itemWidget(dashboard._recent.item(0))
-        assert row.title.text() == "No recent workspaces yet"
+        panel.set_current_workspace(str(workspace))
+        qapp.processEvents()
+        names = [button.text() for button in panel._buttons]
+        assert workspace.name in names
+        assert other.name in names
     finally:
-        dashboard.close()
+        panel.deleteLater()
 
 
 def test_workspace_dashboard_apply_snapshot_is_timed(qapp, workspace, monkeypatch):
@@ -723,7 +683,7 @@ def test_workspace_dashboard_apply_snapshot_is_timed(qapp, workspace, monkeypatc
     finally:
         dashboard.close()
 
-    assert operations == [("workspace.apply", "chats=1 workspaces=1", 50)]
+    assert operations == [("workspace.apply", "chats=1", 50)]
 
 
 def test_workspace_dashboard_shutdown_clears_refresh_threads(qapp, workspace):

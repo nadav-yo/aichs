@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget,
     QVBoxLayout,
     QWidget,
+    QFileDialog,
 )
 from PyQt6.QtCore import Qt, QByteArray, QSize, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap, QShortcut, QKeySequence
@@ -29,7 +30,7 @@ from services.palette import PaletteContext, build_palette_items
 from services.processes import get_process_manager
 from services.tool_registry import disable_unreviewed_extensions
 from ui.theme import apply_app_theme, current_theme, palette, toggle_tab_button_style
-from ui.widgets.left_panel import LeftPanel
+from ui.widgets.left_panel import LeftPanel, _normalize_activity_key
 from ui.widgets.chat_panel import ChatPanel
 from ui.widgets.file_viewer import FileViewerPanel
 from ui.widgets.agent_canvas import AgentCanvasPanel
@@ -319,8 +320,10 @@ class MainWindow(QMainWindow):
         self._left.text_search_requested.connect(self._open_text_search)
         self._left.extensions_requested.connect(self._chat.show_extensions)
         self._left.mcp_requested.connect(self._chat.show_mcp)
-        self._left.workspace_requested.connect(self._show_workspace_dashboard)
+        self._left.workspace_requested.connect(self._show_home)
         self._left.canvas_requested.connect(self._show_agent_canvas)
+        self._left._workspace_nav.switch_requested.connect(self._switch_workspace)
+        self._left._workspace_nav.add_requested.connect(self._prompt_open_workspace)
         self._left.activity_selected.connect(self._on_activity_selected)
         self._left.activity_panel_collapsed_changed.connect(self._on_activity_panel_collapsed)
         self._chat.saved.connect(self._left.refresh)
@@ -331,7 +334,9 @@ class MainWindow(QMainWindow):
         self._chat.file_write_completed.connect(self._refresh_open_file)
         self._chat.run_log_activity.connect(self._context.add_tool_activity)
         self._chat.conversation_changed.connect(self._context.set_current_conversation)
-        self._chat.conversation_changed.connect(lambda _conv_id: self._schedule_session_save())
+        self._chat.conversation_changed.connect(self._schedule_session_save)
+        self._chat.conversation_changed.connect(lambda _conv_id: self._refresh_home_session_context())
+        self._chat.saved.connect(lambda: self._refresh_home_session_context())
         self._viewer.active_file_changed.connect(lambda _path: self._schedule_session_save())
         self._workbench.splitterMoved.connect(lambda *_args: self._schedule_session_save())
         self._left.settings_changed.connect(self._apply_appearance)
@@ -456,10 +461,52 @@ class MainWindow(QMainWindow):
         self._sync_chat_width_mode()
         self._apply_pending_workspace_session()
 
-    def _show_workspace_dashboard(self):
+    def _show_home(self):
+        self._refresh_home_session_context()
         self._workspace_dashboard.refresh(git_snapshot=self._initial_git_snapshot)
         self._center_stack.setCurrentWidget(self._workspace_dashboard)
         self._hide_context_for_workspace()
+
+    _show_workspace_dashboard = _show_home
+
+    def _refresh_home_session_context(self):
+        self._workspace_dashboard.set_session_context(self._home_session_context())
+
+    def _home_session_context(self) -> dict:
+        session = load_workspace_session(os.getcwd())
+        conv_id = str(session.get("conversation_id") or "").strip()
+        if not conv_id:
+            return {}
+        try:
+            path = str(self._chat.store.path_for_id(conv_id))
+            summary = self._chat.store.load(path)
+        except (FileNotFoundError, OSError):
+            return {}
+        open_files = session.get("open_files") or []
+        ctx = {
+            "conversation_id": conv_id,
+            "conversation_path": path,
+            "title": str(summary.get("title") or "Untitled"),
+            "updated_at": str(summary.get("updated_at") or ""),
+            "message_count": int(len(summary.get("messages") or [])),
+            "open_file_count": len(open_files),
+        }
+        if self._chat.current_conversation_id() == conv_id:
+            ctx["current_model"] = self._chat.current_model()
+            ctx["is_streaming"] = self._chat.is_streaming()
+            ctx["is_queued"] = bool(self._chat._visible_queue())
+        return ctx
+
+    def _prompt_open_workspace(self):
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Open workspace",
+            os.getcwd(),
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if path:
+            self._switch_workspace(path)
+
 
     def _show_agent_canvas(self):
         self._ensure_agent_canvas_restored()
@@ -476,12 +523,13 @@ class MainWindow(QMainWindow):
             self._show_agent_canvas()
 
     def _on_activity_selected(self, key: str):
+        key = _normalize_activity_key(key)
         if key == "canvas":
             self._show_agent_canvas()
             return
-        if key == "chats":
+        if key == "sessions":
             self._sync_workbench_markdown_preview_pane(force_chat=True)
-        if key != "workspace":
+        if key != "home":
             self._show_workbench()
 
     def _focus_file_browser(self):
@@ -500,7 +548,7 @@ class MainWindow(QMainWindow):
 
     def _new_conversation(self):
         self._show_workbench()
-        self._left.set_active_activity("chats")
+        self._left.set_active_activity("sessions")
         self._chat.new_conversation()
         self._left.clear_conversation_selection()
 
@@ -522,7 +570,7 @@ class MainWindow(QMainWindow):
             )
             return
         self._show_workbench()
-        self._left.set_active_activity("chats")
+        self._left.set_active_activity("sessions")
         self._left.refresh()
         self._left.select_conversation(conv_id)
         self._chat.load_conversation(path)
@@ -616,7 +664,7 @@ class MainWindow(QMainWindow):
         else:
             self._workbench.setSizes([620, 500])
 
-        active_activity = str(saved.get("active_activity") or "chats")
+        active_activity = _normalize_activity_key(str(saved.get("active_activity") or "sessions"))
         if active_activity == "canvas":
             self._left.show_canvas_activity()
         else:
@@ -913,9 +961,11 @@ class MainWindow(QMainWindow):
         self._session_restore_started = True
         mode = resume_session(self._settings.load())
         if mode == "never":
+            self._show_home()
             return
         session = load_workspace_session(os.getcwd())
         if not session_has_restorable_state(session):
+            self._show_home()
             return
         if mode == "ask":
             choice = QMessageBox.question(
@@ -926,6 +976,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes,
             )
             if choice != QMessageBox.StandardButton.Yes:
+                self._show_home()
                 return
         self._show_workbench()
         self._apply_workspace_session(session)
@@ -937,6 +988,7 @@ class MainWindow(QMainWindow):
         self._pending_workspace_session = None
         mode = resume_session(self._settings.load())
         if mode == "never":
+            self._show_home()
             return
         if mode == "ask":
             choice = QMessageBox.question(
@@ -947,6 +999,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes,
             )
             if choice != QMessageBox.StandardButton.Yes:
+                self._show_home()
                 return
         self._apply_workspace_session(session)
 
@@ -1012,7 +1065,7 @@ class MainWindow(QMainWindow):
 
         if os.path.normcase(target) == os.path.normcase(os.getcwd()):
             self._workspace_dashboard.set_current_workspace(target)
-            self._show_workspace_dashboard()
+            self._show_home()
             return True
 
         if not self._confirm_workspace_switch():
@@ -1044,7 +1097,7 @@ class MainWindow(QMainWindow):
         self._context.set_current_conversation("")
         start_mcp_capability_warmup(target)
         self._queue_workspace_session_restore(target)
-        self._show_workspace_dashboard()
+        self._show_home()
         self._extension_review_prompt_shown = False
         self._review_new_extensions()
         return True
