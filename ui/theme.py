@@ -2489,10 +2489,88 @@ def edit_bubble_style(font_pt: int | None = None) -> str:
     )
 
 
-def _install_combo_popup_filter(app) -> None:
-    from PyQt6.QtCore import QEvent, QObject, QRectF, QTimer, Qt
+def _fit_combo_popup_container(container, popup_theme: str, *, repeat: bool = False) -> None:
+    from PyQt6.QtCore import QRectF, QTimer
     from PyQt6.QtGui import QColor, QPainterPath, QPalette, QRegion
     from PyQt6.QtWidgets import QAbstractItemView, QFrame, QListView, QWidget
+
+    try:
+        for child in container.findChildren(QWidget):
+            if child.metaObject().className() == "QComboBoxPrivateScroller":
+                child.hide()
+                child.setFixedSize(0, 0)
+                child.setStyleSheet("background:transparent; border:none; margin:0; padding:0;")
+        if container.layout() is not None:
+            container.layout().setEnabled(False)
+            container.layout().setContentsMargins(0, 0, 0, 0)
+            container.layout().setSpacing(0)
+        view = container.findChild(QListView) or container.findChild(QAbstractItemView)
+    except RuntimeError:
+        return
+    if view is not None:
+        p = palette(popup_theme)
+        surface = p["BG3"]
+        color = QColor(surface)
+        view.setFrameShape(QFrame.Shape.NoFrame)
+        view.setLineWidth(0)
+        view.setMidLineWidth(0)
+        view.setContentsMargins(0, 0, 0, 0)
+        view.setViewportMargins(0, COMBO_POPUP_VIEW_PADDING, 0, COMBO_POPUP_VIEW_PADDING)
+        view.setAutoFillBackground(True)
+        view_pal = view.palette()
+        view_pal.setColor(QPalette.ColorRole.Window, color)
+        view_pal.setColor(QPalette.ColorRole.Base, color)
+        view_pal.setColor(QPalette.ColorRole.Highlight, QColor(combo_popup_item_selected_bg(popup_theme)))
+        view_pal.setColor(QPalette.ColorRole.HighlightedText, QColor(p["SELECTION_TEXT"]))
+        view.setPalette(view_pal)
+        view.setStyleSheet(combo_box_popup_view_style(popup_theme))
+        install_combo_popup_delegate(view, str(popup_theme))
+        if view.viewport() is not None:
+            view.viewport().setAutoFillBackground(True)
+            view.viewport().setContentsMargins(0, 0, 0, 0)
+            viewport_pal = view.viewport().palette()
+            viewport_pal.setColor(QPalette.ColorRole.Window, color)
+            viewport_pal.setColor(QPalette.ColorRole.Base, color)
+            viewport_pal.setColor(QPalette.ColorRole.Highlight, QColor(combo_popup_item_selected_bg(popup_theme)))
+            viewport_pal.setColor(QPalette.ColorRole.HighlightedText, QColor(p["SELECTION_TEXT"]))
+            view.viewport().setPalette(viewport_pal)
+            view.viewport().setStyleSheet(f"background:{surface}; border:none;")
+    try:
+        resize_combo_popup_container(container)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(container.rect()), 10, 10)
+        container.setMask(QRegion(path.toFillPolygon().toPolygon()))
+        container.updateGeometry()
+    except RuntimeError:
+        return
+    if repeat:
+        QTimer.singleShot(0, lambda: _fit_combo_popup_container(container, popup_theme, repeat=False))
+
+
+def _prepare_combo_popup_container(container, popup_theme: str, *, repeat: bool = True) -> None:
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QColor, QPalette
+
+    try:
+        container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        container.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        container.setAutoFillBackground(False)
+        container.setContentsMargins(0, 0, 0, 0)
+        p = palette(popup_theme)
+        surface = p["BG3"]
+        pal = container.palette()
+        color = QColor(surface)
+        pal.setColor(QPalette.ColorRole.Window, color)
+        pal.setColor(QPalette.ColorRole.Base, color)
+        container.setPalette(pal)
+        container.setStyleSheet(combo_box_popup_container_style(popup_theme))
+    except RuntimeError:
+        return
+    _fit_combo_popup_container(container, popup_theme, repeat=repeat)
+
+
+def _install_combo_popup_filter(app) -> None:
+    from PyQt6.QtCore import QEvent, QObject, QTimer
 
     if not hasattr(app, "installEventFilter"):
         return
@@ -2506,85 +2584,17 @@ def _install_combo_popup_filter(app) -> None:
             if obj.metaObject().className() != "QComboBoxPrivateContainer":
                 return False
             theme_name = app.property("aichsThemeName") or current_theme()
-
-            def _fit(container=obj, popup_theme=theme_name, repeat=True):
-                try:
-                    if container.metaObject().className() != "QComboBoxPrivateContainer":
-                        return
-                except RuntimeError:
-                    return
-                for child in container.findChildren(QWidget):
-                    if child.metaObject().className() == "QComboBoxPrivateScroller":
-                        child.hide()
-                        child.setFixedSize(0, 0)
-                        child.setStyleSheet("background:transparent; border:none; margin:0; padding:0;")
-                if container.layout() is not None:
-                    container.layout().setEnabled(False)
-                    container.layout().setContentsMargins(0, 0, 0, 0)
-                    container.layout().setSpacing(0)
-                view = container.findChild(QListView) or container.findChild(QAbstractItemView)
-                if view is not None:
-                    p = palette(popup_theme)
-                    surface = p["BG3"]
-                    color = QColor(surface)
-                    view.setFrameShape(QFrame.Shape.NoFrame)
-                    view.setLineWidth(0)
-                    view.setMidLineWidth(0)
-                    view.setContentsMargins(0, 0, 0, 0)
-                    view.setViewportMargins(0, COMBO_POPUP_VIEW_PADDING, 0, COMBO_POPUP_VIEW_PADDING)
-                    view.setAutoFillBackground(True)
-                    view_pal = view.palette()
-                    view_pal.setColor(QPalette.ColorRole.Window, color)
-                    view_pal.setColor(QPalette.ColorRole.Base, color)
-                    view_pal.setColor(QPalette.ColorRole.Highlight, QColor(combo_popup_item_selected_bg(popup_theme)))
-                    view_pal.setColor(QPalette.ColorRole.HighlightedText, QColor(p["SELECTION_TEXT"]))
-                    view.setPalette(view_pal)
-                    view.setStyleSheet(combo_box_popup_view_style(popup_theme))
-                    install_combo_popup_delegate(view, str(popup_theme))
-                    if view.viewport() is not None:
-                        view.viewport().setAutoFillBackground(True)
-                        view.viewport().setContentsMargins(0, 0, 0, 0)
-                        viewport_pal = view.viewport().palette()
-                        viewport_pal.setColor(QPalette.ColorRole.Window, color)
-                        viewport_pal.setColor(QPalette.ColorRole.Base, color)
-                        viewport_pal.setColor(QPalette.ColorRole.Highlight, QColor(combo_popup_item_selected_bg(popup_theme)))
-                        viewport_pal.setColor(QPalette.ColorRole.HighlightedText, QColor(p["SELECTION_TEXT"]))
-                        view.viewport().setPalette(viewport_pal)
-                        view.viewport().setStyleSheet(f"background:{surface}; border:none;")
-                resize_combo_popup_container(container)
-                path = QPainterPath()
-                path.addRoundedRect(QRectF(container.rect()), 10, 10)
-                container.setMask(QRegion(path.toFillPolygon().toPolygon()))
-                container.updateGeometry()
-                if repeat:
-                    QTimer.singleShot(0, lambda: _fit(container, popup_theme, False))
-
-            def _prepare(container=obj, popup_theme=theme_name):
-                try:
-                    if container.metaObject().className() != "QComboBoxPrivateContainer":
-                        return
-                except RuntimeError:
-                    return
-                container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-                container.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
-                container.setAutoFillBackground(False)
-                container.setContentsMargins(0, 0, 0, 0)
-                p = palette(popup_theme)
-                surface = p["BG3"]
-                pal = container.palette()
-                color = QColor(surface)
-                pal.setColor(QPalette.ColorRole.Window, color)
-                pal.setColor(QPalette.ColorRole.Base, color)
-                container.setPalette(pal)
-                container.setStyleSheet(combo_box_popup_container_style(popup_theme))
-                _fit(container, popup_theme)
-
-            QTimer.singleShot(0, _prepare)
+            QTimer.singleShot(
+                0,
+                lambda container=obj, popup_theme=theme_name: _prepare_combo_popup_container(
+                    container,
+                    str(popup_theme),
+                ),
+            )
             return False
 
     app.installEventFilter(_ComboPopupFilter(app))
     app.setProperty("aichsComboPopupFilterInstalled", True)
-
 
 def apply_app_theme(app, theme: str | None = None) -> None:
     from ui.win_caption import install_caption_sync, sync_all_windows_captions

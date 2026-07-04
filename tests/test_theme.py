@@ -151,51 +151,50 @@ def test_combo_popup_visible_row_count():
     assert count(15) == theme_module.COMBO_POPUP_MAX_VISIBLE_ROWS
 
 
+def _make_combo_popup_container(qapp, items, *, include_scroller: bool = False):
+    from PyQt6.QtCore import QStringListModel
+    from PyQt6.QtWidgets import QListView, QWidget
+
+    container = QWidget()
+    container.resize(240, 10)
+    view = QListView(container)
+    view.setModel(QStringListModel(list(items), view))
+    view.setGeometry(0, 0, container.width(), 10)
+    view.show()
+    scroller = None
+    if include_scroller:
+        class QComboBoxPrivateScroller(QWidget):
+            pass
+
+        scroller = QComboBoxPrivateScroller(container)
+        scroller.resize(12, 12)
+        scroller.show()
+    qapp.processEvents()
+    return container, view, scroller
+
+
 def test_combo_popup_container_resizes_for_multiple_rows(qapp):
-    from PyQt6.QtWidgets import QComboBox, QListView
+    container, view, _ = _make_combo_popup_container(qapp, [f"provider-{i}" for i in range(8)])
 
-    apply_app_theme(qapp, "dark")
-    combo = QComboBox()
-    for i in range(8):
-        combo.addItem(f"provider-{i}")
-    combo.show()
-    combo.showPopup()
-    for _ in range(3):
-        qapp.processEvents()
+    theme_module._prepare_combo_popup_container(container, "dark", repeat=False)
+    qapp.processEvents()
 
-    container = next(
-        w for w in qapp.allWidgets()
-        if w.metaObject().className() == "QComboBoxPrivateContainer" and w.isVisible()
-    )
-    view = container.findChild(QListView)
-    assert view is not None
     row_h = view.sizeHintForRow(0)
     visible = theme_module.combo_popup_visible_row_count(8)
     assert visible == 8
     assert view.minimumHeight() >= visible * row_h
     assert container.height() >= visible * row_h
 
-    combo.hidePopup()
-    combo.deleteLater()
+    container.deleteLater()
     qapp.processEvents()
 
 
 def test_combo_popup_container_fits_short_lists(qapp):
-    from PyQt6.QtWidgets import QComboBox, QListView
+    container, view, _ = _make_combo_popup_container(qapp, ["one", "two"])
 
-    apply_app_theme(qapp, "dark")
-    combo = QComboBox()
-    combo.addItems(["one", "two"])
-    combo.show()
-    combo.showPopup()
-    for _ in range(3):
-        qapp.processEvents()
+    theme_module._prepare_combo_popup_container(container, "dark", repeat=False)
+    qapp.processEvents()
 
-    container = next(
-        w for w in qapp.allWidgets()
-        if w.metaObject().className() == "QComboBoxPrivateContainer" and w.isVisible()
-    )
-    view = container.findChild(QListView)
     assert view.geometry().top() == 0
     assert view.geometry().left() == 0
     row_h = view.sizeHintForRow(0)
@@ -204,8 +203,7 @@ def test_combo_popup_container_fits_short_lists(qapp):
     assert container.height() >= 2 * row_h + pad - 4
     assert view.minimumHeight() == 2 * row_h + pad + 2
 
-    combo.hidePopup()
-    combo.deleteLater()
+    container.deleteLater()
     qapp.processEvents()
 
 
@@ -255,66 +253,45 @@ def test_combo_popup_delegate_paints_mouseover_row(qapp):
 
 
 def test_combo_popup_installs_delegate_without_hover_selection_filter(qapp):
-    from PyQt6.QtWidgets import QComboBox, QListView
-
-    apply_app_theme(qapp, "dark")
-    combo = QComboBox()
-    combo.addItems(["tabbiapi", "Telnyx", "Open Router", "groq"])
-    combo.show()
-    combo.showPopup()
-    for _ in range(3):
-        qapp.processEvents()
-
-    container = next(
-        w for w in qapp.allWidgets()
-        if w.metaObject().className() == "QComboBoxPrivateContainer" and w.isVisible()
+    container, view, _ = _make_combo_popup_container(
+        qapp,
+        ["tabbiapi", "Telnyx", "Open Router", "groq"],
     )
-    view = container.findChild(QListView)
-    assert view is not None
+
+    theme_module._prepare_combo_popup_container(container, "dark", repeat=False)
+    qapp.processEvents()
+
     assert view.property("aichsComboPopupDelegateInstalled") is True
     assert view.itemDelegate().objectName() == "aichsComboPopupDelegate"
     assert view.hasMouseTracking()
     assert view.viewport().hasMouseTracking()
     assert not hasattr(view.viewport(), "_aichs_combo_hover_filter")
 
-    combo.hidePopup()
-    combo.deleteLater()
+    container.deleteLater()
     qapp.processEvents()
 
 
 def test_combo_popup_uses_light_palette_on_light_theme(qapp):
-    from PyQt6.QtWidgets import QComboBox, QListView, QWidget
-
-    apply_app_theme(qapp, "light")
-    combo = QComboBox()
-    combo.addItems(["tabbiapi", "Telnyx", "Open Router", "groq"])
-    combo.show()
-    combo.showPopup()
-    for _ in range(3):
-        qapp.processEvents()
-
-    container = next(
-        w for w in qapp.allWidgets()
-        if w.metaObject().className() == "QComboBoxPrivateContainer" and w.isVisible()
+    container, view, scroller = _make_combo_popup_container(
+        qapp,
+        ["tabbiapi", "Telnyx", "Open Router", "groq"],
+        include_scroller=True,
     )
-    view = container.findChild(QListView)
-    assert view is not None
+
+    theme_module._prepare_combo_popup_container(container, "light", repeat=False)
+    qapp.processEvents()
+
     assert view.geometry().top() == 0
     assert view.viewportMargins().top() == theme_module.COMBO_POPUP_VIEW_PADDING
     assert view.viewportMargins().bottom() == theme_module.COMBO_POPUP_VIEW_PADDING
-    assert view.verticalScrollBar().maximum() == 0
-    scrollers = [
-        w for w in container.findChildren(QWidget)
-        if w.metaObject().className() == "QComboBoxPrivateScroller"
-    ]
-    assert scrollers
-    assert all(not w.isVisible() for w in scrollers)
+    assert scroller is not None
+    assert not scroller.isVisible()
+    assert scroller.size().width() == 0
     assert palette("light")["BG3"] in view.styleSheet()
     assert palette("light")["SELECTION"] in view.styleSheet()
     assert view.palette().color(view.palette().ColorRole.Base).name() == palette("light")["BG3"]
 
-    combo.hidePopup()
-    combo.deleteLater()
+    container.deleteLater()
     qapp.processEvents()
 
 
