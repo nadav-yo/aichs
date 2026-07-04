@@ -2034,6 +2034,8 @@ class LeftPanel(QWidget):
 
         self._git_header = _FilesHeader(root_path, refresh_tooltip="Refresh git status")
         self._git_header.refresh_clicked.connect(self._git.refresh)
+        self._git_header_branch = self._git.branch_button()
+        self._git_header.add_trailing_widget(self._git_header_branch)
         self._git_header_sync = self._git.header_sync()
         self._git_header.add_trailing_widget(self._git_header_sync)
         self._git.attach_refresh_button(self._git_header.refresh_button())

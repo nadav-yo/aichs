@@ -106,6 +106,21 @@ def count_commits_ahead_behind(repo_path: str) -> tuple[int, int]:
     return ahead, behind
 
 
+def list_local_branches(repo_path: str) -> list[str]:
+    """Return local branch names sorted by git's branch order."""
+    if not is_git_repo(repo_path):
+        return []
+    raw = run_git(["git", "branch", "--format=%(refname:short)"], repo_path)
+    branches: list[str] = []
+    seen: set[str] = set()
+    for line in raw.splitlines():
+        branch = line.strip()
+        if not branch or branch in seen:
+            continue
+        seen.add(branch)
+        branches.append(branch)
+    return branches
+
 def is_git_repo(repo_path: str) -> bool:
     return os.path.isdir(os.path.join(repo_path, ".git"))
 

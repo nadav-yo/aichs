@@ -15,6 +15,7 @@ from ui.widgets.git_panel import (
     _ROLE_REF_BADGES,
     _commit_ref_badges,
     _git_action_failure_prompt,
+    _branch_button_text,
     _fit_git_action_button,
     _git_action_button_style,
     _git_action_button_text,
@@ -33,13 +34,14 @@ def _wait_until(qapp, predicate, timeout_s: float = 2.0):
     assert predicate()
 
 
-def _snapshot(workspace, *, log_line=None, ahead=0, behind=0, is_repo=True):
+def _snapshot(workspace, *, log_line=None, ahead=0, behind=0, is_repo=True, branch=""):
     return GitSnapshot(
         repo_path=str(workspace),
         is_repo=is_repo,
         log_lines=tuple([log_line] if log_line else []),
         ahead=ahead,
         behind=behind,
+        branch=branch,
     )
 
 
@@ -131,6 +133,149 @@ def test_git_action_button_expands_only_when_count_needs_room(qapp):
     assert button.height() == 24
 
 
+def test_branch_button_text_shortens_long_branch_names():
+    assert _branch_button_text("main") == "main"
+    assert _branch_button_text("feature/some-very-long-branch-name") == "feature/so...anch-name"
+
+
+def test_git_panel_branch_button_tracks_snapshot(qapp, workspace):
+    panel = GitPanel(str(workspace), defer_refresh=True)
+
+    panel.apply_snapshot(_snapshot(workspace, branch="feature/demo"))
+
+    assert panel.branch_button().text() == "feature/demo"
+    assert panel.branch_button().isEnabled()
+    assert "Current branch: feature/demo" in panel.branch_button().toolTip()
+
+    panel.apply_snapshot(_snapshot(workspace, is_repo=False))
+
+    assert panel.branch_button().text() == "branch"
+    assert not panel.branch_button().isEnabled()
+    assert panel.branch_button().toolTip() == "No git repository found"
+
+
+def test_git_panel_branch_menu_ignores_non_repo(qapp, workspace, monkeypatch):
+    import ui.widgets.git_panel as git_panel
+
+    panel = GitPanel(str(workspace), defer_refresh=True)
+    panel.apply_snapshot(_snapshot(workspace, is_repo=False))
+    monkeypatch.setattr(
+        git_panel,
+        "list_local_branches",
+        lambda _repo: (_ for _ in ()).throw(AssertionError("should not list branches")),
+    )
+
+    panel._show_branch_menu()
+
+
+def test_git_panel_branch_menu_handles_empty_and_current_missing(qapp, workspace, monkeypatch):
+    import ui.widgets.git_panel as git_panel
+
+    panel = GitPanel(str(workspace), defer_refresh=True)
+    panel.apply_snapshot(_snapshot(workspace, branch="detached-name"))
+    monkeypatch.setattr(git_panel, "list_local_branches", lambda _repo: [])
+    panel._run_git_action = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("should not switch")
+    )
+    seen_actions = []
+
+    def choose_none(menu, _pos):
+        for action in menu.actions():
+            seen_actions.append((action.text(), action.isChecked(), action.isEnabled()))
+        return None
+
+    monkeypatch.setattr(QMenu, "exec", choose_none)
+
+    panel._show_branch_menu()
+
+    assert seen_actions == [("detached-name", True, False)]
+
+
+def test_git_panel_branch_menu_shows_empty_state_without_current(qapp, workspace, monkeypatch):
+    import ui.widgets.git_panel as git_panel
+
+    panel = GitPanel(str(workspace), defer_refresh=True)
+    panel.apply_snapshot(_snapshot(workspace, branch=""))
+    monkeypatch.setattr(git_panel, "list_local_branches", lambda _repo: [])
+    seen_actions = []
+
+    def choose_none(menu, _pos):
+        for action in menu.actions():
+            seen_actions.append((action.text(), action.isEnabled()))
+        return None
+
+    monkeypatch.setattr(QMenu, "exec", choose_none)
+
+    panel._show_branch_menu()
+
+    assert seen_actions == [("No local branches", False)]
+
+
+def test_git_panel_switch_branch_ignores_empty_and_current(qapp, workspace):
+    panel = GitPanel(str(workspace), defer_refresh=True)
+    panel.apply_snapshot(_snapshot(workspace, branch="main"))
+    calls = []
+    panel._run_git_action = lambda label, cmd: calls.append((label, cmd))
+
+    panel._switch_branch("")
+    panel._switch_branch("main")
+
+    assert calls == []
+
+
+def test_git_panel_set_repo_path_resets_branch_button(qapp, workspace, tmp_path):
+    other = tmp_path / "other"
+    other.mkdir()
+    panel = GitPanel(str(workspace), defer_refresh=True)
+    panel.refresh = lambda: None
+    panel.apply_snapshot(_snapshot(workspace, branch="main"))
+
+    panel.set_repo_path(str(other))
+
+    assert panel.branch_button().text() == "branch"
+    assert not panel.branch_button().isEnabled()
+
+
+def test_branch_menu_choice_none_is_empty():
+    from ui.widgets.git_panel import _branch_menu_choice
+
+    assert _branch_menu_choice(None) == ""
+def test_git_panel_branch_menu_switches_selected_branch(qapp, workspace, monkeypatch):
+    import ui.widgets.git_panel as git_panel
+
+    panel = GitPanel(str(workspace), defer_refresh=True)
+    panel.apply_snapshot(_snapshot(workspace, branch="main"))
+    monkeypatch.setattr(git_panel, "list_local_branches", lambda _repo: ["main", "topic"])
+    calls = []
+    panel._run_git_action = lambda label, cmd: calls.append((label, cmd))
+    seen_actions = []
+
+    def choose_topic(menu, _pos):
+        for action in menu.actions():
+            seen_actions.append((action.text(), action.isChecked(), action.isEnabled()))
+            if action.data() == "topic":
+                return action
+        return None
+
+    monkeypatch.setattr(QMenu, "exec", choose_topic)
+
+    panel._show_branch_menu()
+
+    assert seen_actions == [("main", True, False), ("topic", False, True)]
+    assert calls == [("Switch", ["git", "switch", "topic"])]
+
+def test_left_panel_adds_branch_button_before_git_sync(qapp, workspace):
+    from storage.repository import ConversationStore
+    from ui.widgets.left_panel import LeftPanel
+
+    panel = LeftPanel(ConversationStore(str(workspace)), str(workspace), defer_refresh=True)
+    try:
+        assert panel._git_header_branch is panel._git.branch_button()
+        trailing = panel._git_header._trailing
+        assert trailing.itemAt(0).widget() is panel._git_header_branch
+        assert trailing.itemAt(1).widget() is panel._git_header_sync
+    finally:
+        panel.shutdown()
 def test_git_action_buttons_start_at_empty_state_size(qapp, workspace):
     panel = GitPanel(str(workspace), defer_refresh=True)
 
@@ -585,3 +730,5 @@ def test_git_action_thread_runs_command(qapp, workspace, monkeypatch):
 
     assert calls == [(["git", "pull"], str(workspace), 120)]
     assert emitted == [("Pull", result)]
+
+

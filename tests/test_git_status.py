@@ -13,6 +13,7 @@ from services.git_status import (
     discard_files,
     is_git_repo,
     list_file_changes,
+    list_local_branches,
     parse_status_branch_line,
     parse_status_line,
     parse_status_snapshot,
@@ -103,6 +104,26 @@ class TestGitRepo:
         assert ch.label in ("M", "·", " M")
         assert ch.unstaged is True
         assert ch.staged is False
+
+    def test_list_local_branches_skips_non_git_workspace(self, workspace, monkeypatch):
+        calls = []
+        monkeypatch.setattr("services.git_status.is_git_repo", lambda repo_path: False)
+        monkeypatch.setattr("services.git_status.run_git", lambda *args: calls.append(args) or "main")
+
+        assert list_local_branches(str(workspace)) == []
+        assert calls == []
+    def test_list_local_branches_filters_empty_and_duplicates(self, workspace, monkeypatch):
+        calls = []
+
+        def fake_run_git(cmd, repo_path):
+            calls.append((cmd, repo_path))
+            return "main\nfeature/demo\n\nmain\n"
+
+        monkeypatch.setattr("services.git_status.is_git_repo", lambda repo_path: True)
+        monkeypatch.setattr("services.git_status.run_git", fake_run_git)
+
+        assert list_local_branches(str(workspace)) == ["main", "feature/demo"]
+        assert calls == [(["git", "branch", "--format=%(refname:short)"], str(workspace))]
 
     def test_read_git_status_snapshot_collects_branch_counts_and_changes(self, workspace, monkeypatch):
         calls = []
@@ -398,3 +419,4 @@ class TestGitRepo:
 
         assert gs._change_from_status_line(str(workspace), "?? generated/") is None
         assert gs._change_from_status_line(str(workspace), "?? generated") is None
+

@@ -30,7 +30,7 @@ from services.chat_drag import AICHS_COMMIT_DROP_MIME, commit_drop_payload, comm
 from services.diff_html import diff_to_html
 from services.git_diff import commit_diff, split_diff_by_file
 from services.git_snapshot import GitSnapshot, build_git_snapshot, clear_git_snapshot_cache
-from services.git_status import GitCommandResult, run_git_command
+from services.git_status import GitCommandResult, list_local_branches, run_git_command
 from services.performance import time_operation
 from storage.settings import (
     DEFAULT_GIT_FIX_PROMPT_TEMPLATE,
@@ -394,6 +394,7 @@ class GitPanel(QWidget):
         self._mode_manual = bool(self._settings.load().get(GIT_PANEL_MODE_KEY))
         self._sync_sets: list[GitSyncButtons] = []
         self._header_sync = GitSyncButtons(compact=True, parent=self)
+        self._header_branch_btn = self._create_branch_button()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -480,6 +481,19 @@ class GitPanel(QWidget):
     def _push_btn(self) -> QPushButton:
         return self._header_sync.push_btn
 
+    def branch_button(self) -> QPushButton:
+        return self._header_branch_btn
+
+    def _create_branch_button(self) -> QPushButton:
+        button = QPushButton("branch")
+        button.setObjectName("gitBranchButton")
+        button.setAccessibleName("Branch")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.clicked.connect(self._show_branch_menu)
+        button.setEnabled(False)
+        _fit_git_branch_button(button)
+        return button
+
     def header_sync(self) -> GitSyncButtons:
         return self._header_sync
 
@@ -552,6 +566,8 @@ class GitPanel(QWidget):
         palette()
         for widget in self._sync_sets:
             widget.apply_appearance()
+        self._header_branch_btn.setStyleSheet(_git_branch_button_style())
+        _fit_git_branch_button(self._header_branch_btn)
         self.log.setFont(font)
         self.log.setStyleSheet(git_log_list_style())
         self._changes.apply_appearance()
@@ -603,6 +619,51 @@ class GitPanel(QWidget):
             self._loaded = True
             if self._auto_refresh_enabled:
                 self.start_auto_refresh()
+
+    def _update_branch_button(self, snapshot: GitSnapshot):
+        if not snapshot.is_repo:
+            self._header_branch_btn.setText("branch")
+            self._header_branch_btn.setToolTip("No git repository found")
+            self._header_branch_btn.setEnabled(False)
+            _fit_git_branch_button(self._header_branch_btn)
+            return
+        branch = snapshot.branch or "HEAD"
+        self._header_branch_btn.setText(_branch_button_text(branch))
+        self._header_branch_btn.setToolTip(f"Current branch: {branch}\nClick to switch branches")
+        self._header_branch_btn.setEnabled(True)
+        _fit_git_branch_button(self._header_branch_btn)
+
+    def _show_branch_menu(self):
+        if not self._last_snapshot.is_repo:
+            return
+        current = self._last_snapshot.branch or ""
+        branches = list_local_branches(self.repo_path)
+        if current and current not in branches:
+            branches.insert(0, current)
+
+        menu = QMenu(self)
+        if not branches:
+            empty = QAction("No local branches", self)
+            empty.setEnabled(False)
+            menu.addAction(empty)
+        for branch in branches:
+            action = QAction(branch, self)
+            action.setCheckable(True)
+            action.setChecked(branch == current)
+            action.setEnabled(branch != current and bool(branch))
+            action.setData(branch)
+            menu.addAction(action)
+
+        chosen = menu.exec(self._header_branch_btn.mapToGlobal(self._header_branch_btn.rect().bottomLeft()))
+        branch = _branch_menu_choice(chosen)
+        if branch and branch != current:
+            self._switch_branch(branch)
+
+    def _switch_branch(self, branch: str):
+        branch = str(branch or "").strip()
+        if not branch or branch == self._last_snapshot.branch:
+            return
+        self._run_git_action("Switch", ["git", "switch", branch])
 
     def _update_git_header(self, snapshot: GitSnapshot):
         if self._git_header is None:
@@ -734,6 +795,7 @@ class GitPanel(QWidget):
         is_repo = snapshot.is_repo
         ahead = snapshot.ahead
         behind = snapshot.behind
+        self._update_branch_button(snapshot)
         for sync in self._sync_sets:
             sync.pull_btn.setText(git_action_button_text("↓", behind))
             sync.push_btn.setText(git_action_button_text("↑", ahead))
@@ -758,6 +820,7 @@ class GitPanel(QWidget):
     def _set_git_action_buttons_enabled(self, enabled: bool):
         ahead = self._last_snapshot.ahead if enabled else 0
         is_repo = self._last_snapshot.is_repo
+        self._header_branch_btn.setEnabled(enabled and is_repo)
         for sync in self._sync_sets:
             sync.pull_btn.setEnabled(enabled and is_repo)
             sync.push_btn.setText(git_action_button_text("↑", ahead))
@@ -830,6 +893,7 @@ class GitPanel(QWidget):
         clear_git_snapshot_cache(self.repo_path)
         self._changes.set_repo_path(path)
         self._last_snapshot = GitSnapshot(repo_path=path, is_repo=False)
+        self._update_branch_button(self._last_snapshot)
         self.refresh()
 
     def _git_fix_prompt_template(self) -> str:
@@ -942,6 +1006,33 @@ def _fit_git_action_button(button: QPushButton, *, compact: bool = True) -> None
     fit_git_action_button(button, compact=compact)
 
 
+def _git_branch_button_style() -> str:
+    p = palette()
+    fs = max(10, mono_font_pt() - 2)
+    return (
+        f"QPushButton#gitBranchButton {{ background:{p['BG3']}; color:{p['TEXT']};"
+        f"border:1px solid {p['BORDER']}; border-radius:12px; padding:0 8px;"
+        f"font-size:{fs}px; font-weight:600; }}"
+        f"QPushButton#gitBranchButton:hover {{ background:{p['BORDER']}; border-color:{p['TEXT_DIM']}; }}"
+        f"QPushButton#gitBranchButton:pressed {{ background:{p['BG2']}; }}"
+        f"QPushButton#gitBranchButton:disabled {{ background:{p['BG2']}; color:{p['TEXT_DIM']};"
+        f"border-color:{p['BORDER_SUBTLE']}; }}"
+    )
+
+
+def _branch_button_text(branch: str) -> str:
+    branch = str(branch or "").strip() or "HEAD"
+    if len(branch) <= 22:
+        return branch
+    return f"{branch[:10]}...{branch[-9:]}"
+
+
+def _fit_git_branch_button(button: QPushButton) -> None:
+    metrics = QFontMetrics(button.font())
+    width = max(58, min(142, metrics.horizontalAdvance(button.text()) + 24))
+    button.setFixedWidth(width)
+    button.setFixedHeight(24)
+
 def _git_action_button_style(accent_color: str = ACCENT, theme: str | None = None) -> str:
     return git_action_button_style(accent_color, theme)
 
@@ -1022,6 +1113,11 @@ def _format_git_fix_prompt_template(template: str, values: dict[str, str]) -> st
         text = render(DEFAULT_GIT_FIX_PROMPT_TEMPLATE)
     return text or render(DEFAULT_GIT_FIX_PROMPT_TEMPLATE)
 
+
+def _branch_menu_choice(action: QAction | None) -> str:
+    if action is None:
+        return ""
+    return str(action.data() or "").strip()
 
 def _git_action_status_menu_choice(action: QAction | None) -> str:
     if action is None:
