@@ -5,8 +5,8 @@
       <stop offset="1" stop-color="#1e1e1e"/>
     </linearGradient>
     <linearGradient id="glow" x1="256" y1="120" x2="256" y2="392" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#007AFF" stop-opacity="0.35"/>
-      <stop offset="1" stop-color="#007AFF" stop-opacity="0"/>
+      <stop stop-color="#7c5cff" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#7c5cff" stop-opacity="0"/>
     </linearGradient>
   </defs>
 
@@ -32,7 +32,7 @@
   <!-- AI companion bubble -->
   <path
     d="M192 248c0-26.5 21.5-48 48-48h112c26.5 0 48 21.5 48 48v88c0 26.5-21.5 48-48 48h-56l-36 36v-36h-20c-26.5 0-48-21.5-48-48v-88z"
-    fill="#007AFF"
+    fill="#7c5cff"
   />
 
   <!-- Spark / AI mark -->

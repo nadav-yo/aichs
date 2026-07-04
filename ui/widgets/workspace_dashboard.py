@@ -2,16 +2,13 @@ import os
 from pathlib import Path
 
 from PyQt6.QtCore import QSize, Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
-    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMenu,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -23,10 +20,8 @@ from services.workspace_snapshot import (
     WorkspaceSnapshot,
     build_workspace_snapshot,
     display_chat_time,
-    display_updated_at,
 )
 from services.performance import time_operation
-from storage.repository import remove_workspace
 from ui.theme import (
     chat_font_pt,
     contained_list_style,
@@ -34,7 +29,6 @@ from ui.theme import (
     hint_label_style,
     meta_font_pt,
     palette,
-    primary_button_style,
     section_label_style,
     secondary_button_style,
     status_pill_style,
@@ -154,20 +148,14 @@ class WorkspaceDashboard(QWidget):
         title_col.addWidget(self._title)
         title_col.addWidget(self._path)
         header.addLayout(title_col, 1)
-
-        self._open_btn = QPushButton("Open Folder")
-        self._open_btn.setObjectName("workspaceOpenFolder")
-        self._open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._open_btn.clicked.connect(self._open_folder)
-        header.addWidget(self._open_btn, 0, Qt.AlignmentFlag.AlignTop)
         root.addLayout(header)
 
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(14)
         grid.setVerticalSpacing(14)
-        grid.setColumnStretch(0, 3)
-        grid.setColumnStretch(1, 2)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
         root.addLayout(grid, 1)
 
         self._overview_card = _card()
@@ -218,7 +206,7 @@ class WorkspaceDashboard(QWidget):
             actions.addWidget(button)
         actions.addStretch(1)
         overview_layout.addLayout(actions)
-        grid.addWidget(self._overview_card, 0, 0)
+        grid.addWidget(self._overview_card, 0, 0, 1, 2)
 
         self._readme_card = _card()
         readme_layout = QVBoxLayout(self._readme_card)
@@ -258,7 +246,7 @@ class WorkspaceDashboard(QWidget):
             Qt.TextInteractionFlag.LinksAccessibleByMouse
         )
         instructions_layout.addWidget(self._instructions_preview, 1)
-        grid.addWidget(self._instructions_card, 2, 0)
+        grid.addWidget(self._instructions_card, 1, 1)
 
         self._chats_card = _card()
         chats_layout = QVBoxLayout(self._chats_card)
@@ -270,21 +258,7 @@ class WorkspaceDashboard(QWidget):
         self._recent_chats.itemActivated.connect(self._activate_chat)
         self._recent_chats.itemClicked.connect(self._activate_chat)
         chats_layout.addWidget(self._recent_chats, 1)
-        grid.addWidget(self._chats_card, 0, 1, 2, 1)
-
-        self._workspaces_card = _card()
-        workspaces_layout = QVBoxLayout(self._workspaces_card)
-        workspaces_layout.setContentsMargins(16, 14, 16, 14)
-        workspaces_layout.setSpacing(8)
-        workspaces_layout.addWidget(_section_label("Recent Workspaces"))
-        self._recent = QListWidget()
-        self._recent.setObjectName("workspaceRecentList")
-        self._recent.itemActivated.connect(self._activate_item)
-        self._recent.itemClicked.connect(self._activate_item)
-        self._recent.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._recent.customContextMenuRequested.connect(self._show_recent_menu)
-        workspaces_layout.addWidget(self._recent, 1)
-        grid.addWidget(self._workspaces_card, 2, 1)
+        grid.addWidget(self._chats_card, 2, 0, 1, 2)
 
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         if defer_refresh:
@@ -326,11 +300,6 @@ class WorkspaceDashboard(QWidget):
         p = palette()
         fs = chat_font_pt()
         meta = meta_font_pt()
-        primary = primary_button_style(
-            selector="QPushButton#workspaceOpenFolder",
-            border_radius=7,
-            padding="9px 14px",
-        )
         secondary = secondary_button_style(
             padding="6px 10px",
             font_size=meta,
@@ -339,7 +308,7 @@ class WorkspaceDashboard(QWidget):
             border_color=p["BORDER_SUBTLE"],
         )
         recent_list_style = contained_list_style(
-            selector="QListWidget#workspaceRecentList, QListWidget#workspaceRecentChats",
+            selector="QListWidget#workspaceRecentChats",
             item_padding="10px 12px",
             item_radius=6,
             item_margin="0px",
@@ -374,7 +343,6 @@ class WorkspaceDashboard(QWidget):
             f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:7px;"
             f"padding:8px; font-size:{meta}px; }}"
             f"{secondary}"
-            f"{primary}"
             f"{recent_list_style}"
         )
         if self._snapshot_applied:
@@ -401,68 +369,10 @@ class WorkspaceDashboard(QWidget):
         for widget in self.findChildren(_DashboardListRow):
             widget.apply_appearance()
 
-    def _add_workspace_item(self, row):
-        path = str(row.path or "")
-        exists = bool(row.exists)
-        name = str(row.name or Path(path).name or path)
-        when = display_updated_at(str(row.updated_at or ""))
-        suffix = when if exists else "Missing folder"
-        item = QListWidgetItem()
-        item.setSizeHint(_dashboard_row_size(3))
-        item.setToolTip(path)
-        item.setData(_ROLE_PATH, path)
-        item.setData(_ROLE_EXISTS, exists)
-        if not exists:
-            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
-        self._recent.addItem(item)
-        self._recent.setItemWidget(item, _DashboardListRow(name, [path, suffix]))
-
-    def _activate_item(self, item: QListWidgetItem):
-        if not bool(item.data(_ROLE_EXISTS)):
-            return
-        path = str(item.data(_ROLE_PATH) or "")
-        if path:
-            self.switch_requested.emit(path)
-
     def _activate_chat(self, item: QListWidgetItem):
         path = str(item.data(_ROLE_CONVERSATION_PATH) or "")
         if path:
             self.conversation_requested.emit(path)
-
-    def _show_recent_menu(self, pos):
-        item = self._recent.itemAt(pos)
-        if item is None:
-            return
-        path = str(item.data(_ROLE_PATH) or "")
-        if not path:
-            return
-        menu = QMenu(self)
-        remove = QAction("Remove from Recent", self)
-        menu.addAction(remove)
-        chosen = menu.exec(self._recent.mapToGlobal(pos))
-        if chosen is remove:
-            self._remove_recent_workspace(path)
-
-    def _remove_recent_workspace(self, path: str):
-        if not remove_workspace(path):
-            return
-        target = _path_key(path)
-        for index in range(self._recent.count() - 1, -1, -1):
-            item = self._recent.item(index)
-            if _path_key(str(item.data(_ROLE_PATH) or "")) == target:
-                self._recent.takeItem(index)
-        if self._recent.count() == 0:
-            self._add_empty_workspace_item()
-
-    def _open_folder(self):
-        path = QFileDialog.getExistingDirectory(
-            self,
-            "Open workspace",
-            self._current_workspace,
-            QFileDialog.Option.ShowDirsOnly,
-        )
-        if path:
-            self.switch_requested.emit(path)
 
     def _open_readme(self):
         path = _first_existing(self._current_workspace, README_NAMES)
@@ -488,7 +398,6 @@ class WorkspaceDashboard(QWidget):
         self._readme_preview.setHtml(_empty_html("Workspace preview pending."))
         self._instructions_preview.setHtml(_empty_html("Project instructions pending."))
         self._recent_chats.clear()
-        self._recent.clear()
 
     def _apply_snapshot(self, generation: int, snapshot: WorkspaceSnapshot):
         if generation != self._refresh_generation:
@@ -497,10 +406,7 @@ class WorkspaceDashboard(QWidget):
             return
         with time_operation(
             "workspace.apply",
-            detail=(
-                f"chats={len(snapshot.recent_chats)} "
-                f"workspaces={len(snapshot.recent_workspaces)}"
-            ),
+            detail=f"chats={len(snapshot.recent_chats)}",
             slow_ms=50,
         ):
             self._snapshot_applied = True
@@ -511,7 +417,6 @@ class WorkspaceDashboard(QWidget):
             self._apply_readme(snapshot)
             self._apply_agents(snapshot)
             self._apply_chats(snapshot)
-            self._apply_recent_workspaces(snapshot)
 
     def _release_refresh_thread(self, thread: _WorkspaceRefreshThread):
         if thread in self._refresh_threads:
@@ -603,23 +508,6 @@ class WorkspaceDashboard(QWidget):
                 _DashboardListRow("No chats in this workspace yet", empty=True),
             )
 
-    def _apply_recent_workspaces(self, snapshot: WorkspaceSnapshot):
-        self._recent.clear()
-        for row in snapshot.recent_workspaces:
-            self._add_workspace_item(row)
-        if not snapshot.recent_workspaces:
-            self._add_empty_workspace_item()
-
-    def _add_empty_workspace_item(self):
-        item = QListWidgetItem()
-        item.setSizeHint(_dashboard_row_size(1))
-        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-        self._recent.addItem(item)
-        self._recent.setItemWidget(
-            item,
-            _DashboardListRow("No recent workspaces yet", empty=True),
-        )
-
 
 def _card() -> QFrame:
     frame = QFrame()
@@ -654,11 +542,6 @@ def _first_existing(root: str, names: tuple[str, ...]) -> Path | None:
     return None
 
 
-def _path_key(path: str) -> str:
-    if not path:
-        return ""
-    return os.path.normcase(os.path.abspath(path))
-
 
 def _preview_html(text: str) -> str:
     return _markdown_panel_html(text, empty_text="README is empty.")
@@ -683,4 +566,3 @@ def _empty_html(text: str) -> str:
         "margin:0; padding:6px 8px; }}</style>"
         f"<p>{text}</p>"
     )
-

@@ -21,7 +21,7 @@ state, and recent workspaces, to another directory.
 | `archivist_prompt` | Replaces instructions for the built-in `/archivist` slash command; command name and tools stay fixed |
 | `commit_message_prompt_addition` | Optional additive guidance appended to generated commit-message requests |
 | `default_models` | Default model per provider |
-| `theme` | `"dark"`, `"modern"`, or `"light"` |
+| `theme` | `"dark"` or `"light"` |
 | `font_size` | Chat font size (pt) |
 | `trash_retention_days` | Days to keep deleted chats in Trash before permanent removal (default 14) |
 | `compaction.reserve_tokens` | Optional. Tokens held back for the next reply before auto-compaction (omit to scale from each model's context window) |

@@ -57,9 +57,9 @@ _CHATML_CONTROL_TOKEN_RE = re.compile(
 # This is a comment
 class ChatThread(QThread):
     chunk       = pyqtSignal(str)
-    tool_called = pyqtSignal(str, dict)
+    tool_called = pyqtSignal(str, str, dict)
     bash_line   = pyqtSignal(str)
-    tool_result = pyqtSignal(str, str)
+    tool_result = pyqtSignal(str, str, str)
     crew_started = pyqtSignal(dict)
     crew_chunk   = pyqtSignal(dict, str)
     crew_done    = pyqtSignal(dict, str)
@@ -591,28 +591,29 @@ class ChatThread(QThread):
         )
         run_extension_hooks(self.cwd, "before_tool_call", hook_ctx)
         inputs = hook_ctx.inputs
+        self.tool_called.emit(tool_id, name, inputs)
         if hook_ctx.status == "error":
             blocked = hook_ctx.output or hook_ctx.error or "[tool error] Tool blocked by extension hook."
-            self.tool_result.emit(name, blocked)
+            self.tool_result.emit(tool_id, name, blocked)
             return tool_id, name, blocked
         if name == ASK_CREW_TOOL_NAME:
-            return tool_id, name, self._execute_ask_crew(inputs)
+            output = self._execute_ask_crew(inputs)
+            self.tool_result.emit(tool_id, name, output)
+            return tool_id, name, output
         if self._extra_tool_executor is not None and any(
             isinstance(tool, dict) and tool.get("name") == name for tool in self._extra_tools
         ):
-            self.tool_called.emit(name, inputs)
             output = self._execute_extra_tool(name, inputs)
-            self.tool_result.emit(name, output)
+            self.tool_result.emit(tool_id, name, output)
             return tool_id, name, output
         scoped = self._check_tool_scope(name, inputs)
         if scoped:
-            self.tool_result.emit(name, scoped)
+            self.tool_result.emit(tool_id, name, scoped)
             return tool_id, name, scoped
         blocked = self._check_tool_gate(name, inputs)
         if blocked:
-            self.tool_result.emit(name, blocked)
+            self.tool_result.emit(tool_id, name, blocked)
             return tool_id, name, blocked
-        self.tool_called.emit(name, inputs)
         on_line = (lambda line: self.bash_line.emit(line)) if is_shell_tool(name) else None
         output = execute(name, inputs, self.cwd, on_line=on_line, cancel=self._cancel)
         result_ctx = HookContext(
@@ -627,7 +628,7 @@ class ChatThread(QThread):
         )
         run_extension_hooks(self.cwd, "after_tool_result", result_ctx)
         output = result_ctx.output
-        self.tool_result.emit(name, output)
+        self.tool_result.emit(tool_id, name, output)
         return tool_id, name, output
 
     def _execute_parallel_batch(
@@ -649,6 +650,7 @@ class ChatThread(QThread):
             )
             run_extension_hooks(self.cwd, "before_tool_call", hook_ctx)
             inputs = hook_ctx.inputs
+            self.tool_called.emit(tool_id, name, inputs)
             if hook_ctx.status == "error":
                 blocked = hook_ctx.output or hook_ctx.error or "[tool error] Tool blocked by extension hook."
                 return idx, tool_id, name, blocked
@@ -657,7 +659,6 @@ class ChatThread(QThread):
             if self._extra_tool_executor is not None and any(
                 isinstance(tool, dict) and tool.get("name") == name for tool in self._extra_tools
             ):
-                self.tool_called.emit(name, inputs)
                 return idx, tool_id, name, self._execute_extra_tool(name, inputs)
             scoped = self._check_tool_scope(name, inputs)
             if scoped:
@@ -665,7 +666,6 @@ class ChatThread(QThread):
             blocked = self._check_tool_gate(name, inputs)
             if blocked:
                 return idx, tool_id, name, blocked
-            self.tool_called.emit(name, inputs)
             output = execute(name, inputs, self.cwd, cancel=self._cancel)
             result_ctx = HookContext(
                 event="after_tool_result",
@@ -691,8 +691,8 @@ class ChatThread(QThread):
 
         indexed.sort(key=lambda x: x[0])
         results = [(tid, name, output) for _, tid, name, output in indexed]
-        for _, name, output in results:
-            self.tool_result.emit(name, output)
+        for tid, name, output in results:
+            self.tool_result.emit(tid, name, output)
         return results
 
     def _execute_extra_tool(self, name: str, inputs: dict) -> str:
@@ -805,22 +805,24 @@ class ChatThread(QThread):
             return message
 
     def _execute_archivist_lookup(self, member, meta: dict, task: str) -> str:
-        self.tool_called.emit("read_project_memory", {"query": task})
+        memory_tool_id = f"crew-memory-{uuid4().hex}"
+        chat_tool_id = f"crew-chats-{uuid4().hex}"
+        self.tool_called.emit(memory_tool_id, "read_project_memory", {"query": task})
         memory_text = execute(
             "read_project_memory",
             {"query": task, "limit": 10},
             self.cwd,
             cancel=self._cancel,
         )
-        self.tool_result.emit("read_project_memory", memory_text)
-        self.tool_called.emit("search_project_chats", {"query": task})
+        self.tool_result.emit(memory_tool_id, "read_project_memory", memory_text)
+        self.tool_called.emit(chat_tool_id, "search_project_chats", {"query": task})
         chat_text = execute(
             "search_project_chats",
             {"query": task, "limit": 5},
             self.cwd,
             cancel=self._cancel,
         )
-        self.tool_result.emit("search_project_chats", chat_text)
+        self.tool_result.emit(chat_tool_id, "search_project_chats", chat_text)
         if self._cancel.is_set():
             text = "[cancelled]"
         else:

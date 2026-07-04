@@ -209,8 +209,8 @@ class AgentCanvasPanel(QWidget):
     conversation_created = pyqtSignal(str)
     conversation_updated = pyqtSignal(str)
     conversation_chunk = pyqtSignal(str, str)
-    conversation_tool_called = pyqtSignal(str, str, dict)
-    conversation_tool_result = pyqtSignal(str, str, str)
+    conversation_tool_called = pyqtSignal(str, str, str, dict)
+    conversation_tool_result = pyqtSignal(str, str, str, str)
     conversation_run_finished = pyqtSignal(str)
     graph_changed = pyqtSignal()
     attention_changed = pyqtSignal(bool)
@@ -390,9 +390,10 @@ class AgentCanvasPanel(QWidget):
         self._conversation_run_manager.set_workspace(self._conversation_store, repo_root)
         self._inspector.set_repo_root(repo_root)
 
-    def apply_appearance(self):
+    def apply_appearance(self, *, refresh_models: bool = True):
         self.setStyleSheet(agent_canvas_style())
-        self.refresh_models()
+        if refresh_models:
+            self.refresh_models()
         for button in (
             self._add_goal_btn,
             self._autoformat_btn,
@@ -414,13 +415,17 @@ class AgentCanvasPanel(QWidget):
         header_combo_style = (
             compact_combo_box_style(
                 selector="QComboBox#canvasProviderCombo",
-                padding="3px 8px",
-                drop_down_width=18,
+                padding="0px 8px",
+                drop_down_width=12,
+                min_height=24,
+                popup_item_padding="2px 10px",
             )
             + compact_combo_box_style(
                 selector="QComboBox#canvasModelCombo",
-                padding="3px 8px",
-                drop_down_width=18,
+                padding="0px 8px",
+                drop_down_width=12,
+                min_height=24,
+                popup_item_padding="2px 10px",
             )
         )
         self._provider_combo.setStyleSheet(header_combo_style)
@@ -2645,7 +2650,7 @@ class AgentCanvasPanel(QWidget):
         if normalized in {"error", "graph agent error"}:
             return ("#ff8a8a", p["TEXT"], "#b23b3b", "#211111")
         if normalized in {"you", "user"}:
-            return ("#8ab4ff", p["TEXT"], "#315fbd", "#101826")
+            return ("#c7bdff", p["TEXT"], "#7c5cff", "#1a1530")
         if normalized in {"graph agent", "agent"}:
             return ("#67e8f9", p["TEXT"], "#1f9aaa", "#0e1b20")
         return (p["TEXT_DIM"], p["TEXT"], p["BORDER"], p["BG2"])
@@ -3016,11 +3021,21 @@ class AgentCanvasPanel(QWidget):
         self._graph_agent_stream_text += chunk
         self._set_graph_agent_stream_text(self._graph_agent_stream_text or self._graph_agent_thinking_text())
 
-    def _on_graph_agent_tool_called(self, name: str, inputs: dict):
+    def _on_graph_agent_tool_called(self, tool_id_or_name: str, name_or_inputs, inputs: dict | None = None):
+        if inputs is None:
+            name = str(tool_id_or_name or "tool")
+            inputs = name_or_inputs
+        else:
+            name = str(name_or_inputs or "tool")
         self._set_mode(f"graph agent using {name}")
         self._record_graph_tool_call(name, inputs)
 
-    def _on_graph_agent_tool_result(self, name: str, output: str):
+    def _on_graph_agent_tool_result(self, tool_id_or_name: str, name_or_output, output: str | None = None):
+        if output is None:
+            name = str(tool_id_or_name or "tool")
+            output = name_or_output
+        else:
+            name = str(name_or_output or "tool")
         if str(output or "").startswith("[tool error]"):
             self._record_graph_tool_result(name, output, failed=True)
             return
@@ -5430,19 +5445,19 @@ class AgentCanvasPanel(QWidget):
         node_id, attempt_id = mapped
         self._on_run_agent_chunk(node_id, attempt_id, text)
 
-    def _on_conversation_run_tool_called(self, _conv_id: str, run_id: str, name: str, inputs: dict):
+    def _on_conversation_run_tool_called(self, _conv_id: str, run_id: str, tool_id: str, name: str, inputs: dict):
         mapped = self._conversation_run_attempt(run_id)
         if mapped is None:
             return
-        self.conversation_tool_called.emit(str(_conv_id or ""), str(name or "tool"), dict(inputs or {}))
+        self.conversation_tool_called.emit(str(_conv_id or ""), str(tool_id or ""), str(name or "tool"), dict(inputs or {}))
         node_id, attempt_id = mapped
         self._on_run_agent_tool_called(node_id, attempt_id, name, inputs)
 
-    def _on_conversation_run_tool_result(self, _conv_id: str, run_id: str, name: str, output: str):
+    def _on_conversation_run_tool_result(self, _conv_id: str, run_id: str, tool_id: str, name: str, output: str):
         mapped = self._conversation_run_attempt(run_id)
         if mapped is None:
             return
-        self.conversation_tool_result.emit(str(_conv_id or ""), str(name or "tool"), str(output or ""))
+        self.conversation_tool_result.emit(str(_conv_id or ""), str(tool_id or ""), str(name or "tool"), str(output or ""))
         node_id, attempt_id = mapped
         self._on_run_agent_tool_result(node_id, attempt_id, name, output)
 
@@ -7971,7 +7986,7 @@ class AgentCanvasPanel(QWidget):
         width = 2.4 if kind == "split" else 1.9
         if self._active_node_id in (source.node_id, target.node_id):
             width += 1.2
-            color = QColor("#8ab4ff")
+            color = QColor("#a99bff")
         edge.setPen(QPen(color, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
 
     def _fit_graph(self, node_ids: set[int] | None = None):

@@ -2,27 +2,35 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 _DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 _DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY = 19
+_DWMWA_WINDOW_CORNER_PREFERENCE = 33
+_DWMWCP_ROUNDSMALL = 3
 
 _filter_installed = False
 
 
 def caption_prefers_dark(theme: str) -> bool:
-    return theme in ("dark", "modern")
+    return theme == "dark"
 
 
 def apply_windows_caption(widget, theme: str | None = None) -> None:
     if sys.platform != "win32":
         return
 
+    from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QDialog, QMainWindow, QWidget
 
     if not isinstance(widget, QWidget) or not widget.isWindow():
         return
     if not isinstance(widget, (QDialog, QMainWindow)):
+        return
+    if bool(widget.property("_aichsCustomChrome")):
+        return
+    if widget.windowFlags() & Qt.WindowType.FramelessWindowHint:
         return
 
     from ui.theme import current_theme
@@ -48,6 +56,38 @@ def apply_windows_caption(widget, theme: str | None = None) -> None:
             ctypes.sizeof(value),
         ) == 0:
             break
+
+
+def apply_windows_corner_preference(widget) -> None:
+    if sys.platform != "win32":
+        return
+    if os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen":
+        return
+
+    from PyQt6.QtWidgets import QDialog, QMainWindow, QWidget
+
+    if not isinstance(widget, QWidget) or not widget.isWindow():
+        return
+    if not isinstance(widget, (QDialog, QMainWindow)):
+        return
+    if not bool(widget.property("_aichsCustomChrome")):
+        return
+    try:
+        hwnd = int(widget.winId())
+    except (AttributeError, TypeError, ValueError):
+        return
+    if hwnd == 0:
+        return
+
+    import ctypes
+
+    value = ctypes.c_int(_DWMWCP_ROUNDSMALL)
+    ctypes.windll.dwmapi.DwmSetWindowAttribute(
+        hwnd,
+        _DWMWA_WINDOW_CORNER_PREFERENCE,
+        ctypes.byref(value),
+        ctypes.sizeof(value),
+    )
 
 
 def sync_all_windows_captions(app, theme: str | None = None) -> None:

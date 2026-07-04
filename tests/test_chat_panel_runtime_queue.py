@@ -550,7 +550,7 @@ def test_edit_file_result_emits_completion_signal():
         _active_terminal=None,
     )
 
-    ChatPanel._on_tool_result(panel, "run-1", "edit_file", "Edited src/main.py")
+    ChatPanel._on_tool_result(panel, "run-1", "tool-1", "edit_file", "Edited src/main.py")
 
     assert completed == ["src/main.py"]
     assert cards == ["src/main.py"]
@@ -567,6 +567,7 @@ def test_tool_error_updates_existing_notice_without_second_error_row():
         last_tool_name="mcp__docs__lookup",
         last_tool_inputs={},
         last_tool_notice=object(),
+        tool_notices={"tool-1": (object(), {}, "mcp__docs__lookup")},
     )
     panel = SimpleNamespace(
         conv_id="c1",
@@ -578,12 +579,74 @@ def test_tool_error_updates_existing_notice_without_second_error_row():
         _active_terminal=None,
     )
 
-    ChatPanel._on_tool_result(panel, "run-1", "mcp__docs__lookup", "[tool error] HTTP 400")
+    ChatPanel._on_tool_result(panel, "run-1", "tool-1", "mcp__docs__lookup", "[tool error] HTTP 400")
 
     assert added == []
     assert updates
-    assert updates[0][0] is run.last_tool_notice
+    assert updates[0][0] is not None
     assert "HTTP 400" in updates[0][1]
+
+
+def test_same_name_tool_results_update_matching_notices():
+    notice_a = object()
+    notice_b = object()
+    updates = []
+    run = SimpleNamespace(
+        conv_id="c1",
+        active_terminal=None,
+        last_edit_path="",
+        tool_notices={
+            "call-a": (notice_a, {"path": "a.txt"}, "read_file"),
+            "call-b": (notice_b, {"path": "b.txt"}, "read_file"),
+        },
+    )
+    panel = SimpleNamespace(
+        conv_id="c1",
+        cwd="C:\\repo",
+        _find_run=lambda _run_id: run,
+        _add_tool_notice=lambda *args, **kwargs: None,
+        _update_tool_notice_debug=lambda wrapper, text: updates.append((wrapper, text)),
+        _show_post_tool_thinking=lambda _run: None,
+        _active_terminal=None,
+    )
+
+    ChatPanel._on_tool_result(panel, "run-1", "call-b", "read_file", "contents b")
+    ChatPanel._on_tool_result(panel, "run-1", "call-a", "read_file", "contents a")
+
+    assert updates[0][0] is notice_b
+    assert "b.txt" in updates[0][1]
+    assert "contents b" in updates[0][1]
+    assert updates[1][0] is notice_a
+    assert "a.txt" in updates[1][1]
+    assert "contents a" in updates[1][1]
+    assert run.tool_notices == {}
+
+
+def test_unknown_tool_result_adds_completed_notice():
+    added = []
+    updates = []
+    run = SimpleNamespace(
+        conv_id="c1",
+        active_terminal=None,
+        last_edit_path="",
+        tool_notices={},
+    )
+    panel = SimpleNamespace(
+        conv_id="c1",
+        cwd="C:\\repo",
+        _find_run=lambda _run_id: run,
+        _add_tool_notice=lambda *args, **kwargs: added.append((args, kwargs)) or object(),
+        _update_tool_notice_debug=lambda wrapper, text: updates.append((wrapper, text)),
+        _show_post_tool_thinking=lambda _run: None,
+        _active_terminal=None,
+    )
+
+    ChatPanel._on_tool_result(panel, "run-1", "missing", "read_file", "contents")
+
+    assert updates == []
+    assert added
+    assert "read_file" in added[0][1]["debug_text"]
+    assert "contents" in added[0][1]["debug_text"]
 
 
 def test_mcp_notice_uses_mcp_tool_label():

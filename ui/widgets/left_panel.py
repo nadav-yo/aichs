@@ -8,9 +8,9 @@ from typing import Callable
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QStackedWidget, QTreeWidget, QTreeWidgetItem,
     QPushButton, QHBoxLayout, QLabel, QMenu, QSizePolicy, QStyleFactory,
-    QAbstractItemView, QInputDialog, QMessageBox, QFrame, QLineEdit,
+    QAbstractItemView, QInputDialog, QMessageBox, QFrame, QLineEdit, QFileDialog,
 )
-from PyQt6.QtCore import pyqtSignal, Qt, QFileSystemWatcher, QThread, QTimer, QMimeData, QSize, QRectF
+from PyQt6.QtCore import pyqtSignal, Qt, QFileSystemWatcher, QThread, QTimer, QMimeData, QSize, QRectF, QLineF
 from PyQt6.QtGui import (
     QColor, QAction, QBrush, QFont, QGuiApplication, QIcon, QKeySequence,
     QPainter, QPen, QPixmap, QShortcut,
@@ -27,7 +27,7 @@ from services.file_search import clear_workspace_file_cache
 from services.git_snapshot import GitSnapshot
 from services.git_status import discard_files, list_file_changes
 from services.performance import time_operation
-from storage.repository import ConversationStore
+from storage.repository import ConversationStore, list_workspaces
 from storage.settings import SettingsStore
 from ui.theme import (
     palette, ACCENT, git_status_color, icon_button_style, files_header_style,
@@ -302,15 +302,24 @@ def _tree_item_icon(
     return icon
 
 
+def _draw_icon_line(painter: QPainter, x1: float, y1: float, x2: float, y2: float) -> None:
+    painter.drawLine(QLineF(float(x1), float(y1), float(x2), float(y2)))
+
+
 def _paint_folder_icon(painter: QPainter, color: str, dirty_descendant: bool):
-    base = QColor(color)
-    shade = QColor("#b9852c") if current_theme() == "light" else QColor("#8f682c")
-    painter.setPen(QPen(shade, 1))
-    painter.setBrush(QBrush(base))
-    painter.drawRoundedRect(QRectF(2, 5, 14, 10), 2, 2)
-    painter.drawRoundedRect(QRectF(3, 3, 6, 4), 1.5, 1.5)
+    p = palette()
+    line = QColor(p["TEXT_DIM"])
+    fill = QColor(p["BG2"])
+    if current_theme() != "light":
+        fill.setAlpha(80)
+    painter.setPen(QPen(line, 1.35, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    painter.setBrush(QBrush(fill))
+    painter.drawRoundedRect(QRectF(2.5, 5.5, 13, 9.5), 2.2, 2.2)
+    _draw_icon_line(painter, 3.5, 6, 6.5, 3.8)
+    _draw_icon_line(painter, 6.5, 3.8, 10.2, 3.8)
+    _draw_icon_line(painter, 10.2, 3.8, 12, 5.5)
     if dirty_descendant:
-        painter.setPen(QPen(QColor("#10213f"), 1))
+        painter.setPen(QPen(QColor(p["BG"]), 1))
         painter.setBrush(QBrush(QColor(ACCENT)))
         painter.drawEllipse(QRectF(12, 1.5, 5, 5))
 
@@ -324,27 +333,20 @@ def _paint_file_icon(
     git_label: str = "",
 ):
     p = palette()
-    painter.setPen(QPen(QColor(p["BORDER"]), 1))
-    painter.setBrush(QBrush(QColor(p["BG3"])))
-    painter.drawRoundedRect(QRectF(3, 2, 12, 14), 2, 2)
-    painter.setPen(QPen(QColor(color), 1))
-    painter.drawLine(6, 5, 12, 5)
-    painter.drawLine(6, 8, 12, 8)
-    badge = QColor(color)
+    line = QColor(p["TEXT_DIM"])
+    fill = QColor(p["BG2"])
     if current_theme() != "light":
-        badge.setAlpha(220)
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QBrush(badge))
-    painter.drawRoundedRect(QRectF(2, 9, 14, 7), 2, 2)
-    if label:
-        font = QFont()
-        font.setBold(True)
-        font.setPixelSize(5 if len(label) > 3 else 6)
-        painter.setFont(font)
-        painter.setPen(QColor("#111827") if label == "JS" else QColor("#ffffff"))
-        painter.drawText(QRectF(2, 9, 14, 7), Qt.AlignmentFlag.AlignCenter, label[:5])
+        fill.setAlpha(60)
+    painter.setPen(QPen(line, 1.3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    painter.setBrush(QBrush(fill))
+    painter.drawRoundedRect(QRectF(4, 2.5, 10, 13), 2, 2)
+    _draw_icon_line(painter, 10.5, 2.8, 13.8, 6.1)
+    _draw_icon_line(painter, 10.5, 2.8, 10.5, 6.1)
+    _draw_icon_line(painter, 10.5, 6.1, 13.8, 6.1)
+    _draw_icon_line(painter, 6.5, 9, 11.5, 9)
+    _draw_icon_line(painter, 6.5, 11.5, 10.5, 11.5)
     if dirty:
-        painter.setPen(QPen(QColor("#10213f"), 1))
+        painter.setPen(QPen(QColor(p["BG"]), 1))
         painter.setBrush(QBrush(QColor(ACCENT)))
         painter.drawEllipse(QRectF(12, 1.5, 5, 5))
     if git_code or git_label:
@@ -1936,6 +1938,244 @@ class FileTree(QTreeWidget):
         self._dirty_dir_paths = dirs
 
 
+def _rail_button_icon(key: str, *, active: bool = False) -> QIcon:
+    p = palette()
+    color = QColor(p["SELECTION_TEXT"] if active else p["TEXT_DIM"])
+    pixmap = QPixmap(18, 18)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(QPen(color, 1.55, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    if key == "workspace":
+        _draw_icon_line(painter, 3.5, 8.5, 9, 4)
+        _draw_icon_line(painter, 9, 4, 14.5, 8.5)
+        painter.drawRoundedRect(QRectF(5, 8, 8, 6.5), 1.5, 1.5)
+    elif key == "canvas":
+        painter.drawRoundedRect(QRectF(3.2, 3.2, 4.8, 4.8), 1.4, 1.4)
+        painter.drawRoundedRect(QRectF(10, 10, 4.8, 4.8), 1.4, 1.4)
+        painter.drawLine(8, 6, 10, 12)
+    elif key == "chats":
+        painter.drawRoundedRect(QRectF(3, 4, 12, 9), 2.2, 2.2)
+        _draw_icon_line(painter, 6.5, 13, 5, 15)
+    elif key == "files":
+        painter.drawRoundedRect(QRectF(2.8, 6, 12.4, 8.5), 2, 2)
+        _draw_icon_line(painter, 4, 6.2, 6.2, 4.2)
+        _draw_icon_line(painter, 6.2, 4.2, 10, 4.2)
+        _draw_icon_line(painter, 10, 4.2, 11.5, 6)
+    elif key == "git":
+        painter.drawEllipse(QRectF(4, 3, 3.4, 3.4))
+        painter.drawEllipse(QRectF(10.6, 11, 3.4, 3.4))
+        _draw_icon_line(painter, 5.7, 6.4, 5.7, 10)
+        _draw_icon_line(painter, 5.7, 10, 10.6, 12.7)
+    elif key == "search":
+        painter.drawEllipse(QRectF(3.5, 3.5, 8.5, 8.5))
+        _draw_icon_line(painter, 10.5, 10.5, 14.5, 14.5)
+    elif key == "extensions":
+        painter.drawRoundedRect(QRectF(4, 3.5, 4.8, 4.8), 1.2, 1.2)
+        painter.drawRoundedRect(QRectF(9.2, 3.5, 4.8, 4.8), 1.2, 1.2)
+        painter.drawRoundedRect(QRectF(4, 9.2, 4.8, 4.8), 1.2, 1.2)
+        painter.drawRoundedRect(QRectF(9.2, 9.2, 4.8, 4.8), 1.2, 1.2)
+    elif key == "mcp":
+        painter.drawLine(9, 3, 14, 6)
+        painter.drawLine(14, 6, 14, 12)
+        painter.drawLine(14, 12, 9, 15)
+        painter.drawLine(9, 15, 4, 12)
+        painter.drawLine(4, 12, 4, 6)
+        painter.drawLine(4, 6, 9, 3)
+        painter.drawLine(4, 6, 9, 9)
+        painter.drawLine(14, 6, 9, 9)
+        painter.drawLine(9, 9, 9, 15)
+    elif key == "settings":
+        painter.drawEllipse(QRectF(5, 5, 8, 8))
+        painter.drawEllipse(QRectF(8, 8, 2, 2))
+        _draw_icon_line(painter, 9, 2.8, 9, 5)
+        _draw_icon_line(painter, 9, 13, 9, 15.2)
+        _draw_icon_line(painter, 2.8, 9, 5, 9)
+        _draw_icon_line(painter, 13, 9, 15.2, 9)
+    else:
+        painter.drawRoundedRect(QRectF(5, 3, 8, 12), 1.8, 1.8)
+        painter.drawLine(7, 7, 11, 7)
+        _draw_icon_line(painter, 7, 10, 10.5, 10)
+
+    painter.end()
+    return QIcon(pixmap)
+
+
+def _set_rail_button_icon(button: QPushButton, key: str, *, active: bool = False) -> None:
+    button.setIcon(_rail_button_icon(key, active=active))
+    button.setIconSize(QSize(16, 16))
+
+
+def _rail_workspace_text(name: str) -> str:
+    text = str(name or "").strip() or "Workspace"
+    return text if len(text) <= 10 else f"{text[:9]}..."
+
+
+def _workspace_nav_title_style() -> str:
+    p = palette()
+    fs = max(10, chat_font_pt() - 3)
+    return (
+        "background: transparent; color: %s; font-size: %dpx; "
+        "font-weight: bold; padding: 0px 0px 2px 0px;"
+    ) % (p["TEXT_DIM"], fs)
+
+
+def _workspace_nav_empty_style() -> str:
+    p = palette()
+    fs = max(10, chat_font_pt() - 3)
+    return (
+        "background: transparent; color: %s; font-size: %dpx; padding: 4px 0px;"
+    ) % (p["TEXT_DIM"], fs)
+
+
+def _workspace_nav_button_style(*, active: bool = False) -> str:
+    p = palette()
+    fs = max(10, chat_font_pt() - 3)
+    fg = p["TEXT"] if active else p["TEXT_DIM"]
+    bg = p["BG3"] if active else "transparent"
+    return (
+        "QPushButton { background-color: %s; color: %s; border: none; "
+        "border-radius: 7px; padding: 5px 2px; font-size: %dpx; "
+        "font-weight: bold; text-align: left; }"
+        "QPushButton:hover { background-color: %s; color: %s; }"
+    ) % (bg, fg, fs, p["BG3"], p["TEXT"])
+
+
+def _workspace_nav_icon_button_style() -> str:
+    p = palette()
+    return (
+        "QPushButton { background-color: transparent; border: none; border-radius: 6px; "
+        "padding: 3px; }"
+        "QPushButton:hover { background-color: %s; }"
+    ) % p["BG3"]
+
+
+def _workspace_nav_separator_style() -> str:
+    p = palette()
+    return "background-color: %s; border: none;" % p["BORDER_SUBTLE"]
+
+class _WorkspaceNavPanel(QWidget):
+    switch_requested = pyqtSignal(str)
+    add_requested = pyqtSignal()
+
+    def __init__(self, current_workspace: str, parent=None):
+        super().__init__(parent)
+        self._current_workspace = os.path.abspath(current_workspace)
+        self._buttons: list[QPushButton] = []
+        self._empty_label: QLabel | None = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 10, 0, 4)
+        layout.setSpacing(5)
+
+        separator = QFrame()
+        separator.setObjectName("railWorkspaceSeparator")
+        separator.setFixedHeight(1)
+        layout.addWidget(separator)
+        self._separator = separator
+
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 2, 0, 0)
+        header_layout.setSpacing(2)
+        layout.addWidget(header)
+        self._header = header
+
+        title = QLabel("Workspaces")
+        title.setObjectName("railWorkspaceTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        header_layout.addWidget(title, 1)
+        self._title = title
+
+        self._add_btn = QPushButton("")
+        self._add_btn.setObjectName("railWorkspaceOpen")
+        self._add_btn.setAccessibleName("Open workspace")
+        self._add_btn.setToolTip("Open workspace")
+        self._add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._add_btn.setFixedSize(22, 22)
+        self._add_btn.setIconSize(QSize(15, 15))
+        self._add_btn.setIcon(_rail_button_icon("workspace"))
+        self._add_btn.clicked.connect(self.add_requested.emit)
+        header_layout.addWidget(self._add_btn, 0, Qt.AlignmentFlag.AlignRight)
+
+        self._items = QWidget()
+        self._items_layout = QVBoxLayout(self._items)
+        self._items_layout.setContentsMargins(0, 0, 0, 0)
+        self._items_layout.setSpacing(4)
+        layout.addWidget(self._items)
+        self.refresh()
+
+    def set_current_workspace(self, path: str):
+        self._current_workspace = os.path.abspath(path)
+        self.refresh()
+
+    def refresh(self):
+        self._clear_items()
+        rows = [self._current_workspace_row()]
+        rows.extend(row for row in list_workspaces(limit=8) if self._show_workspace_row(row))
+        for row in rows[:5]:
+            self._add_workspace_row(row)
+        self.apply_appearance()
+
+    def _current_workspace_row(self) -> dict:
+        path = self._current_workspace
+        return {
+            "path": path,
+            "name": Path(path).name or path,
+            "exists": os.path.exists(path),
+            "current": True,
+        }
+
+    def _add_workspace_row(self, row: dict):
+        path = str(row.get("path") or "")
+        name = str(row.get("name") or Path(path).name or path)
+        is_current = bool(row.get("current"))
+        button = QPushButton(_rail_workspace_text(name))
+        button.setObjectName("railWorkspaceButton")
+        button.setToolTip(("Current workspace\n" if is_current else "") + path)
+        button.setCursor(Qt.CursorShape.ArrowCursor if is_current else Qt.CursorShape.PointingHandCursor)
+        button.setIcon(_rail_button_icon("workspace" if is_current else "files", active=is_current))
+        button.setProperty("currentWorkspace", is_current)
+        if is_current:
+            button.setCheckable(True)
+            button.setChecked(True)
+            button.clicked.connect(lambda _checked=False, b=button: b.setChecked(True))
+        else:
+            button.clicked.connect(lambda _checked=False, p=path: self.switch_requested.emit(p))
+        self._buttons.append(button)
+        self._items_layout.addWidget(button)
+
+    def apply_appearance(self):
+        self.setStyleSheet("")
+        self._header.setStyleSheet("")
+        self._items.setStyleSheet("")
+        self._separator.setStyleSheet(_workspace_nav_separator_style())
+        self._title.setStyleSheet(_workspace_nav_title_style())
+        self._add_btn.setStyleSheet(_workspace_nav_icon_button_style())
+        for button in self._buttons:
+            active = bool(button.property("currentWorkspace"))
+            button.setStyleSheet(_workspace_nav_button_style(active=active))
+            button.setIcon(_rail_button_icon("workspace" if active else "files", active=active))
+        if self._empty_label is not None:
+            self._empty_label.setStyleSheet(_workspace_nav_empty_style())
+
+    def _show_workspace_row(self, row: dict) -> bool:
+        path = str(row.get("path") or "")
+        if not path or not row.get("exists", False):
+            return False
+        return os.path.normcase(os.path.abspath(path)) != os.path.normcase(self._current_workspace)
+
+    def _clear_items(self):
+        self._buttons.clear()
+        self._empty_label = None
+        while self._items_layout.count():
+            item = self._items_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
 class LeftPanel(QWidget):
     selected         = pyqtSignal(str)
     new_chat         = pyqtSignal()
@@ -1951,10 +2191,11 @@ class LeftPanel(QWidget):
     extensions_requested  = pyqtSignal()
     mcp_requested         = pyqtSignal()
     workspace_requested   = pyqtSignal()
+    workspace_switch_requested = pyqtSignal(str)
     canvas_requested      = pyqtSignal()
     activity_selected     = pyqtSignal(str)
     activity_panel_collapsed_changed = pyqtSignal(bool)
-    settings_changed = pyqtSignal()
+    settings_changed = pyqtSignal(object)
 
     def __init__(
         self,
@@ -2043,11 +2284,16 @@ class LeftPanel(QWidget):
         git_layout.addWidget(self._git_header)
         git_layout.addWidget(self._git, 1)
 
-        self._add_activity_action("workspace", "Work", rail_layout, tooltip="Workspace")
+        self._add_activity_action("workspace", "Home", rail_layout, tooltip="Home")
         self._add_activity_action("canvas", "Canvas", rail_layout, tooltip="Agent Canvas")
         self._add_activity("chats", "Chats", self._conv, rail_layout)
         self._add_activity("files", "Files", files_wrap, rail_layout)
         self._add_activity("git", "Git", git_wrap, rail_layout)
+
+        self._workspace_nav = _WorkspaceNavPanel(root_path)
+        self._workspace_nav.switch_requested.connect(self.workspace_switch_requested.emit)
+        self._workspace_nav.add_requested.connect(self._open_workspace_from_rail)
+        rail_layout.addWidget(self._workspace_nav)
 
         rail_layout.addStretch()
 
@@ -2091,6 +2337,7 @@ class LeftPanel(QWidget):
         button = QPushButton(label)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setToolTip(label)
+        _set_rail_button_icon(button, key)
         button.clicked.connect(lambda _checked=False, k=key: self._on_activity_clicked(k))
         self._activity_buttons[key] = button
         self._activity_widgets[key] = widget
@@ -2108,6 +2355,7 @@ class LeftPanel(QWidget):
         button = QPushButton(label)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setToolTip(tooltip or label)
+        _set_rail_button_icon(button, key)
         button.clicked.connect(lambda _checked=False, k=key: self._on_activity_clicked(k))
         self._activity_buttons[key] = button
         rail_layout.addWidget(button)
@@ -2187,7 +2435,7 @@ class LeftPanel(QWidget):
         fs = max(11, chat_font_pt() - 2)
         for key, button in self._activity_buttons.items():
             has_attention = self._activity_attention.get(key, False)
-            button.setIcon(QIcon())
+            _set_rail_button_icon(button, key, active=(key == self._active_activity))
             button.setStyleSheet(
                 rail_button_style(
                     font_size=fs,
@@ -2199,7 +2447,7 @@ class LeftPanel(QWidget):
     def _apply_styles(self):
         p = palette()
         self._rail.setStyleSheet(
-            f"QFrame#activityRail {{ background:{p['BG']};"
+            f"QFrame#activityRail {{ background:{p['BG2']};"
             f"border-right:1px solid {p['BORDER_SUBTLE']}; }}"
         )
         self._stack.setStyleSheet(
@@ -2209,11 +2457,17 @@ class LeftPanel(QWidget):
         self._files_header.apply_appearance()
         self._git_header.apply_appearance()
         footer_style = sidebar_footer_button_style()
+        _set_rail_button_icon(self._search_btn, "search")
+        _set_rail_button_icon(self._extensions_btn, "extensions")
+        _set_rail_button_icon(self._mcp_btn, "mcp")
+        _set_rail_button_icon(self._docs_btn, "docs")
+        _set_rail_button_icon(self._settings_btn, "settings")
         self._extensions_btn.setStyleSheet(footer_style)
         self._mcp_btn.setStyleSheet(footer_style)
         self._search_btn.setStyleSheet(footer_style)
         self._docs_btn.setStyleSheet(footer_style)
         self._settings_btn.setStyleSheet(footer_style)
+        self._workspace_nav.apply_appearance()
         self._sync_activity_buttons()
 
     def apply_appearance(self):
@@ -2223,9 +2477,20 @@ class LeftPanel(QWidget):
         self._file_tree._apply_decorations()
         self._git.apply_appearance()
 
+    def _open_workspace_from_rail(self):
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Open workspace",
+            self._file_tree.root_path,
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if path:
+            self.workspace_switch_requested.emit(path)
+
     def open_settings(self):
-        if SettingsDialog(self._settings, self, cwd=self._file_tree.root_path).exec():
-            self.settings_changed.emit()
+        dialog = SettingsDialog(self._settings, self, cwd=self._file_tree.root_path)
+        if dialog.exec():
+            self.settings_changed.emit(set(getattr(dialog, "changed_keys", set())))
 
     def open_docs(self):
         DocsDialog(self, cwd=self._file_tree.root_path).exec()
@@ -2247,9 +2512,11 @@ class LeftPanel(QWidget):
         self._git.set_repo_path(path)
         self._files_header.set_path(path)
         self._git_header.set_path(path)
+        self._workspace_nav.set_current_workspace(path)
 
     def refresh(self):
         self._conv.refresh()
+        self._workspace_nav.refresh()
 
     def select_conversation(self, conv_id: str):
         self._conv.select_conversation(conv_id)

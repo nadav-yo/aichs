@@ -510,7 +510,7 @@ def test_git_change_delegate_keeps_status_color_when_selected(qapp):
 
 
 def test_git_changes_list_styles_use_each_theme_palette(qapp):
-    for theme in ("dark", "modern", "light"):
+    for theme in ("dark", "light"):
         p = palette(theme)
         button_style = _git_change_button_style(theme)
         field_style = _git_change_field_style(theme)

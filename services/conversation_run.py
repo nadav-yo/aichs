@@ -24,8 +24,8 @@ class ConversationRunManager(QObject):
     conversation_created = pyqtSignal(str)
     conversation_updated = pyqtSignal(str)
     chunk = pyqtSignal(str, str, str)
-    tool_called = pyqtSignal(str, str, str, dict)
-    tool_result = pyqtSignal(str, str, str, str)
+    tool_called = pyqtSignal(str, str, str, str, dict)
+    tool_result = pyqtSignal(str, str, str, str, str)
     approval_required = pyqtSignal(str, str, object, object)
     done = pyqtSignal(str, str, str)
     error = pyqtSignal(str, str, str)
@@ -122,8 +122,8 @@ class ConversationRunManager(QObject):
         run = ConversationRun(run_id=run_id, conv_id=conv_id, thread=thread, data=data)
         self._runs[run_id] = run
         thread.chunk.connect(lambda text, rid=run_id: self._on_chunk(rid, text))
-        thread.tool_called.connect(lambda name, inputs, rid=run_id: self._on_tool_called(rid, name, inputs))
-        thread.tool_result.connect(lambda name, output, rid=run_id: self._on_tool_result(rid, name, output))
+        thread.tool_called.connect(lambda tool_id, name, inputs, rid=run_id: self._on_tool_called(rid, tool_id, name, inputs))
+        thread.tool_result.connect(lambda tool_id, name, output, rid=run_id: self._on_tool_result(rid, tool_id, name, output))
         thread.history_updated.connect(lambda rid=run_id: self._on_history_updated(rid))
         thread.done.connect(lambda text, rid=run_id: self._on_done(rid, text))
         thread.error.connect(lambda text, rid=run_id: self._on_error(rid, text))
@@ -139,20 +139,20 @@ class ConversationRunManager(QObject):
         self.chunk.emit(run.conv_id, run_id, str(text or ""))
         self._schedule_save(run_id)
 
-    def _on_tool_called(self, run_id: str, name: str, inputs: dict):
+    def _on_tool_called(self, run_id: str, tool_id: str, name: str, inputs: dict):
         run = self._runs.get(run_id)
         if run is None:
             return
         run.partial_text = ""
         self._save_run_thread_history(run)
-        self.tool_called.emit(run.conv_id, run_id, str(name or "tool"), dict(inputs or {}))
+        self.tool_called.emit(run.conv_id, run_id, str(tool_id or ""), str(name or "tool"), dict(inputs or {}))
 
-    def _on_tool_result(self, run_id: str, name: str, output: str):
+    def _on_tool_result(self, run_id: str, tool_id: str, name: str, output: str):
         run = self._runs.get(run_id)
         if run is None:
             return
         self._save_run_thread_history(run)
-        self.tool_result.emit(run.conv_id, run_id, str(name or "tool"), str(output or ""))
+        self.tool_result.emit(run.conv_id, run_id, str(tool_id or ""), str(name or "tool"), str(output or ""))
 
     def _on_history_updated(self, run_id: str):
         run = self._runs.get(run_id)

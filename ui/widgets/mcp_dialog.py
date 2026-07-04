@@ -51,6 +51,7 @@ from services.mcp_tools import (
 )
 from services.mcp_oauth import BlockingOAuthInteraction, clear_oauth_state, has_oauth_tokens
 from ui.theme import ACCENT, dialog_button_box_style, hint_label_style, palette, secondary_button_style
+from ui.widgets.window_chrome import chromed_dialog_layout
 
 
 class _ProbeSignals(QObject):
@@ -107,7 +108,7 @@ class McpDialog(QDialog):
         self.setWindowTitle("MCP")
         self.resize(980, 680)
 
-        root = QVBoxLayout(self)
+        root = chromed_dialog_layout(self)
         header = QLabel("Model Context Protocol")
         root.addWidget(header)
         hint = QLabel(
@@ -583,7 +584,7 @@ class _McpAddDialog(QDialog):
         super().__init__(parent)
         self._server = server
         self.setWindowTitle("Edit MCP Server" if server is not None else "Add MCP Server")
-        layout = QVBoxLayout(self)
+        layout = chromed_dialog_layout(self)
         form = QFormLayout()
         self._scope = QComboBox()
         self._scope.addItems(["global", "project"])
@@ -858,7 +859,7 @@ class _McpImportDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Import MCP JSON")
-        layout = QVBoxLayout(self)
+        layout = chromed_dialog_layout(self)
         top = QHBoxLayout()
         top.addWidget(QLabel("Scope"))
         self._scope = QComboBox()
@@ -1004,7 +1005,7 @@ def _capability_usage_hint(label: str) -> str:
 
 def _style_capability_row(row: QTreeWidgetItem, label: str, *, enabled: bool):
     tones = {
-        "Model tool": "#8ab4ff",
+        "Model tool": "#a99bff",
         "Resource": "#64d6a2",
         "Resource template": "#facc15",
         "Prompt template": "#c4b5fd",

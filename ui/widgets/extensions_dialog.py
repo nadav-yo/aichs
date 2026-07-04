@@ -40,6 +40,7 @@ from services.tool_registry import (
     extension_overview,
     set_extension_enabled,
 )
+from ui.widgets.window_chrome import chromed_dialog_layout
 from ui.theme import (
     ACCENT,
     checkbox_style,
@@ -121,9 +122,7 @@ class ExtensionsDialog(QDialog):
         self.setStyleSheet(dialog_shell_style() + transparent_scroll_area_style())
         palette()
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 14)
-        root.setSpacing(10)
+        root = chromed_dialog_layout(self, contents_margins=(14, 14, 14, 14), spacing=10)
 
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
@@ -480,9 +479,7 @@ class ExtensionInstallDialog(QDialog):
             + transparent_scroll_area_style(border=f"1px solid {p['BORDER_SUBTLE']}")
         )
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 14)
-        root.setSpacing(10)
+        root = chromed_dialog_layout(self, contents_margins=(14, 14, 14, 14), spacing=10)
 
         source_row = QHBoxLayout()
         source_row.setContentsMargins(0, 0, 0, 0)

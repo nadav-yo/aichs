@@ -15,8 +15,12 @@ def git_action_button_text(symbol: str, count: int) -> str:
 
 
 def fit_git_action_button(button: QPushButton, *, compact: bool = True) -> None:
-    metrics = QFontMetrics(button.font())
-    width = max(28 if compact else 36, metrics.horizontalAdvance(button.text()) + (14 if compact else 20))
+    text = button.text().strip()
+    if compact and len(text) <= 1:
+        width = 28
+    else:
+        metrics = QFontMetrics(button.font())
+        width = max(28 if compact else 36, metrics.horizontalAdvance(text) + (14 if compact else 20))
     button.setFixedWidth(width)
     button.setFixedHeight(24 if compact else 32)
 

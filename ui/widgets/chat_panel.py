@@ -385,6 +385,7 @@ class _AssistantRun:
     last_tool_name: str = ""
     last_tool_inputs: dict = field(default_factory=dict)
     last_tool_notice: QWidget | None = None
+    tool_notices: dict[str, tuple[QWidget, dict, str]] = field(default_factory=dict)
     active_terminal: TerminalCard | None = None
     crew: dict | None = None
     crew_bubbles: dict[str, MessageBubble] = field(default_factory=dict)
@@ -1630,7 +1631,7 @@ class ChatPanel(QWidget):
         self._stream_flush_timer.timeout.connect(self._flush_stream_buffer)
         self._external_stream_conv_id = ""
         self._external_stream_bubble: MessageBubble | None = None
-        self._external_tool_notices: dict[tuple[str, str], tuple[QWidget, dict]] = {}
+        self._external_tool_notices: dict[tuple[str, str], tuple[QWidget, dict, str]] = {}
         self._scroll_layout_timer = QTimer(self)
         self._scroll_layout_timer.setSingleShot(True)
         self._scroll_layout_timer.setInterval(100)
@@ -2009,30 +2010,42 @@ class ChatPanel(QWidget):
         self._bottom()
         return True
 
-    def show_external_conversation_tool_called(self, conv_id: str, name: str, inputs: dict) -> bool:
+    def show_external_conversation_tool_called(self, conv_id: str, tool_id: str, name: str, inputs: dict) -> bool:
         if str(conv_id or "") != self.current_conversation_id():
             return False
         self._flush_stream_buffer()
         if self._external_stream_bubble is not None:
             self._external_stream_bubble = None
             self.active_bubble = None
+        tool_id = str(tool_id or "")
+        tool_name = str(name or "tool")
+        copied_inputs = copy.deepcopy(dict(inputs or {}))
         notice = self._add_tool_notice(
-            _tool_call_notice(str(name or "tool"), dict(inputs or {}), self.cwd),
-            debug_text=_tool_debug_text(str(name or "tool"), dict(inputs or {}), "", self.cwd),
+            _tool_call_notice(tool_name, copied_inputs, self.cwd),
+            debug_text=_tool_debug_text(tool_name, copied_inputs, "", self.cwd),
         )
-        self._external_tool_notices[(str(conv_id or ""), str(name or "tool"))] = (
+        self._external_tool_notices[(str(conv_id or ""), tool_id)] = (
             notice,
-            copy.deepcopy(dict(inputs or {})),
+            copied_inputs,
+            tool_name,
         )
         return True
 
-    def show_external_conversation_tool_result(self, conv_id: str, name: str, output: str) -> bool:
+    def show_external_conversation_tool_result(self, conv_id: str, tool_id: str, name: str, output: str) -> bool:
         if str(conv_id or "") != self.current_conversation_id():
             return False
         output = str(output or "")
+        tool_id = str(tool_id or "")
         tool_name = str(name or "tool")
-        notice, inputs = self._external_tool_notices.pop((str(conv_id or ""), tool_name), (None, {}))
-        self._update_tool_notice_debug(notice, _tool_debug_text(tool_name, inputs, output, self.cwd))
+        notice, inputs, stored_name = self._external_tool_notices.pop((str(conv_id or ""), tool_id), (None, {}, tool_name))
+        tool_name = stored_name or tool_name
+        if notice is None:
+            notice = self._add_tool_notice(
+                _tool_call_notice(tool_name, inputs, self.cwd),
+                debug_text=_tool_debug_text(tool_name, inputs, output, self.cwd),
+            )
+        else:
+            self._update_tool_notice_debug(notice, _tool_debug_text(tool_name, inputs, output, self.cwd))
         self._show_external_post_tool_thinking(conv_id)
         return True
 
@@ -2606,9 +2619,9 @@ class ChatPanel(QWidget):
         if visible:
             self._sync_visible_runtime_refs()
         thread.chunk.connect(lambda text, rid=run_id: self._on_chunk(rid, text))
-        thread.tool_called.connect(lambda name, inputs, rid=run_id: self._on_tool_called(rid, name, inputs))
+        thread.tool_called.connect(lambda tool_id, name, inputs, rid=run_id: self._on_tool_called(rid, tool_id, name, inputs))
         thread.bash_line.connect(lambda line, rid=run_id: self._on_bash_line(rid, line))
-        thread.tool_result.connect(lambda name, output, rid=run_id: self._on_tool_result(rid, name, output))
+        thread.tool_result.connect(lambda tool_id, name, output, rid=run_id: self._on_tool_result(rid, tool_id, name, output))
         thread.crew_started.connect(lambda meta, rid=run_id: self._on_crew_started(rid, meta))
         thread.crew_chunk.connect(lambda meta, text, rid=run_id: self._on_crew_chunk(rid, meta, text))
         thread.crew_done.connect(lambda meta, text, rid=run_id: self._on_crew_done(rid, meta, text))
@@ -3257,7 +3270,7 @@ class ChatPanel(QWidget):
     def _on_approval_needed(self, pending):
         handle_pending_approval(self, self._approval_bus, pending)
 
-    def _on_tool_called(self, run_id: str, name: str, inputs: dict):
+    def _on_tool_called(self, run_id: str, tool_id: str, name: str, inputs: dict):
         run = self._find_run(run_id)
         if not run:
             return
@@ -3270,18 +3283,22 @@ class ChatPanel(QWidget):
             bubble.finalize(bubble._copy_text)
         run.bubble = None
         self.active_bubble = None
+        tool_id = str(tool_id or "")
+        copied_inputs = copy.deepcopy(dict(inputs or {}))
         run.last_tool_name = name
-        run.last_tool_inputs = copy.deepcopy(inputs)
+        run.last_tool_inputs = copied_inputs
         if name == "edit_file":
-            path = inputs.get("path", "")
+            path = copied_inputs.get("path", "")
             run.last_edit_path = path
             self._last_edit_path = path
             if path:
                 self.file_written.emit(path)
-        run.last_tool_notice = self._add_tool_notice(
-            _tool_call_notice(name, inputs, self.cwd),
-            debug_text=_tool_debug_text(name, inputs, "", self.cwd),
+        notice = self._add_tool_notice(
+            _tool_call_notice(name, copied_inputs, self.cwd),
+            debug_text=_tool_debug_text(name, copied_inputs, "", self.cwd),
         )
+        run.last_tool_notice = notice
+        run.tool_notices[tool_id] = (notice, copied_inputs, str(name or "tool"))
         if is_shell_tool(name):
             run.active_terminal = self._add_terminal_card()
             self._active_terminal = run.active_terminal
@@ -3362,18 +3379,26 @@ class ChatPanel(QWidget):
             self._add_bubble(text, is_user=False, crew=meta)
         self._add_notice(_crew_notice_text(meta, "left"))
 
-    def _on_tool_result(self, run_id: str, name: str, output: str):
+    def _on_tool_result(self, run_id: str, tool_id: str, name: str, output: str):
         run = self._find_run(run_id)
         if not run:
             return
         if run.conv_id != self.conv_id:
             return
-        inputs = getattr(run, "last_tool_inputs", {}) if getattr(run, "last_tool_name", "") == name else {}
+        tool_id = str(tool_id or "")
+        tool_name = str(name or "tool")
+        notices = getattr(run, "tool_notices", {})
+        notice, inputs, stored_name = notices.pop(tool_id, (None, {}, tool_name))
+        tool_name = stored_name or tool_name
         if hasattr(self, "_update_tool_notice_debug"):
-            self._update_tool_notice_debug(
-                getattr(run, "last_tool_notice", None),
-                _tool_debug_text(name, inputs, output, self.cwd),
-            )
+            debug_text = _tool_debug_text(tool_name, inputs, output, self.cwd)
+            if notice is None and hasattr(self, "_add_tool_notice"):
+                notice = self._add_tool_notice(
+                    _tool_call_notice(tool_name, inputs, self.cwd),
+                    debug_text=debug_text,
+                )
+            else:
+                self._update_tool_notice_debug(notice, debug_text)
         if is_shell_tool(name) and run.active_terminal:
             import re
             m = re.search(r'\[exit (\d+)\]', output)
@@ -3381,7 +3406,7 @@ class ChatPanel(QWidget):
             run.active_terminal = None
             self._active_terminal = None
         elif name == "edit_file" and output.startswith("[tool error]"):
-            preview = output[:200].replace("\n", " ") + ("…" if len(output) > 200 else "")
+            preview = output[:200].replace("\n", " ") + ("..." if len(output) > 200 else "")
             run.last_edit_path = ""
             self._last_edit_path = ""
         elif name == "edit_file" and run.last_edit_path:
@@ -4209,13 +4234,17 @@ class ChatPanel(QWidget):
         header_combo_style = (
             compact_combo_box_style(
                 selector="QComboBox#chatProviderCombo",
-                padding="3px 8px",
-                drop_down_width=18,
+                padding="0px 8px",
+                drop_down_width=12,
+                min_height=24,
+                popup_item_padding="2px 10px",
             )
             + compact_combo_box_style(
                 selector="QComboBox#chatModelCombo",
-                padding="3px 8px",
-                drop_down_width=18,
+                padding="0px 8px",
+                drop_down_width=12,
+                min_height=24,
+                popup_item_padding="2px 10px",
             )
         )
         self._header.setStyleSheet(chat_header_style())

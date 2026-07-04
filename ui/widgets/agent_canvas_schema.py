@@ -285,7 +285,7 @@ def edge_color(kind: str, p: dict) -> str:
         "informs": "#d6a84f",
         "source": "#c4b5fd",
         "feedback": "#67e8f9",
-        "result": "#8ab4ff",
+        "result": "#a99bff",
         "defines_done": "#34d399",
         "satisfies": "#34d399",
         "accepts": "#64d6a2",

@@ -168,6 +168,31 @@ def test_settings_combo_fields_style_dropdown_popup_surface(qapp):
     assert "QComboBox::indicator" not in style
 
 
+def test_settings_general_only_save_skips_lazy_pages_and_model_reload(qapp, monkeypatch):
+    store = SettingsStore()
+    store.save({
+        "theme": "dark",
+        "font_size": "medium",
+        "enter_to_send": False,
+        "resume_session": "always",
+        "trash_retention_days": 14,
+        "avatar_human": "human",
+    })
+    dialog = SettingsDialog(store)
+    monkeypatch.setattr(dialog, "_ensure_all_pages", lambda: pytest.fail("general-only save built lazy pages"))
+    monkeypatch.setattr("ui.widgets.settings_dialog.model_registry.reload", lambda **_kwargs: pytest.fail("model registry reloaded"))
+    monkeypatch.setattr("ui.widgets.settings_dialog.model_registry.refresh_anthropic_context_async", lambda: pytest.fail("anthropic refresh started"))
+    monkeypatch.setattr("ui.widgets.settings_dialog.save_user_providers", lambda _providers: pytest.fail("providers saved"))
+
+    dialog.theme_combo.setCurrentText("light")
+    dialog._save()
+
+    saved = store.load()
+    assert saved["theme"] == "light"
+    assert dialog.changed_keys == {"theme"}
+    assert dialog.result() == dialog.DialogCode.Accepted
+
+
 def test_settings_save_writes_generation_params_to_models_json(qapp, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)

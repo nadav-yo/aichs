@@ -5,6 +5,8 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QSplitter,
+    QSplitterHandle,
+    QSizePolicy,
     QApplication,
     QPushButton,
     QStackedWidget,
@@ -16,7 +18,14 @@ from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap, QShortcut
 
 from storage.repository import ConversationStore
 from storage.agent_canvas import CanvasSaveRefused, load_agent_canvas, save_agent_canvas
-from storage.settings import SettingsStore, resume_session
+from storage.settings import (
+    DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY,
+    FILE_EDITOR_AUTO_SAVE_KEY,
+    FILE_EDITOR_TAB_SPACES_KEY,
+    FILE_REVIEW_PROMPT_TEMPLATE_KEY,
+    SettingsStore,
+    resume_session,
+)
 from storage.workspace_session import (
     load_workspace_session,
     save_workspace_session,
@@ -35,6 +44,8 @@ from ui.widgets.file_viewer import FileViewerPanel
 from ui.widgets.agent_canvas import AgentCanvasPanel
 from ui.widgets.workbench_context import WorkbenchContextPanel
 from ui.widgets.workspace_dashboard import WorkspaceDashboard
+from ui.widgets.context_ring import ContextRing
+from ui.widgets.window_chrome import set_chromed_central_widget
 import config
 from ui.widgets.command_palette import CommandPalette
 from ui.widgets.file_search_dialog import FileSearchDialog
@@ -45,6 +56,32 @@ DEFAULT_ACTIVITY_WIDTH = config.DEFAULT_ACTIVITY_WIDTH
 MIN_ACTIVITY_WIDTH = config.MIN_ACTIVITY_WIDTH
 MAX_ACTIVITY_WIDTH = config.MAX_ACTIVITY_WIDTH
 COLLAPSED_ACTIVITY_WIDTH = config.ACTIVITY_RAIL_WIDTH
+WORKBENCH_COLLAPSED_WIDTH = 64
+WORKBENCH_DEFAULT_CHAT_PERCENT = 40
+WORKBENCH_MIN_CHAT_WIDTH = 280
+WORKBENCH_MIN_VIEWER_WIDTH = 300
+
+
+class _WorkbenchSplitterHandle(QSplitterHandle):
+    def mouseDoubleClickEvent(self, event):
+        splitter = self.splitter()
+        if isinstance(splitter, _WorkbenchSplitter):
+            splitter.reset_requested.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
+class _WorkbenchSplitter(QSplitter):
+    reset_requested = pyqtSignal()
+    resized = pyqtSignal()
+
+    def createHandle(self):
+        return _WorkbenchSplitterHandle(self.orientation(), self)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.resized.emit()
 
 
 def _right_rail_icon(kind: str, *, active: bool = False) -> QIcon:
@@ -139,6 +176,8 @@ class MainWindow(QMainWindow):
         self._pending_workspace_session: dict | None = None
         self._workbench_preview_host_tab = None
         self._workbench_preview_pinned_chat = False
+        self._workbench_user_split = False
+        self._last_open_workbench_sizes: list[int] | None = None
         self._session_restore_started = False
         self._session_save_timer = QTimer(self)
         self._session_save_timer.setSingleShot(True)
@@ -277,12 +316,59 @@ class MainWindow(QMainWindow):
         self._agent_canvas.graph_changed.connect(self._schedule_canvas_save)
         self._agent_canvas.attention_changed.connect(self._set_canvas_attention)
         self._workbench_left.addWidget(self._agent_canvas)
+        self._workbench_chat_rail = QWidget()
+        self._workbench_chat_rail.setObjectName("workbenchChatRail")
+        chat_rail_layout = QVBoxLayout(self._workbench_chat_rail)
+        chat_rail_layout.setContentsMargins(0, 8, 0, 8)
+        chat_rail_layout.setSpacing(0)
+        chat_rail_layout.addStretch(1)
+        self._workbench_chat_rail_ring = ContextRing(self._workbench_chat_rail)
+        self._workbench_chat_rail_ring.setToolTip("Show chat")
+        self._workbench_chat_rail_ring.clicked.connect(
+            lambda: self._restore_workbench_side("chat")
+        )
+        chat_rail_layout.addWidget(
+            self._workbench_chat_rail_ring,
+            0,
+            Qt.AlignmentFlag.AlignHCenter,
+        )
+        chat_rail_layout.addStretch(1)
+        self._workbench_left.addWidget(self._workbench_chat_rail)
+        self._workbench_left.setMinimumWidth(0)
+        self._viewer.setMinimumWidth(0)
+        self._chat.setMinimumWidth(0)
+        self._agent_canvas.setMinimumWidth(0)
+        self._workbench_left.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+        self._viewer.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
 
-        self._workbench = QSplitter(Qt.Orientation.Horizontal)
+        self._workbench = _WorkbenchSplitter(Qt.Orientation.Horizontal)
         self._workbench.addWidget(self._workbench_left)
         self._workbench.addWidget(self._viewer)
-        self._workbench.setStretchFactor(0, 3)
-        self._workbench.setStretchFactor(1, 2)
+        self._workbench.setStretchFactor(0, 2)
+        self._workbench.setStretchFactor(1, 3)
+        self._workbench.setChildrenCollapsible(True)
+        self._workbench.setCollapsible(0, True)
+        self._workbench.setCollapsible(1, True)
+
+        self._workbench_restore_chat_btn = QPushButton("Chat", self._workbench_left)
+        self._workbench_restore_chat_btn.setObjectName("workbenchRestoreChat")
+        self._workbench_restore_chat_btn.setToolTip("Show chat")
+        self._workbench_restore_chat_btn.setAccessibleName("Show chat")
+        self._workbench_restore_chat_btn.setFixedSize(48, 64)
+        self._workbench_restore_chat_btn.hide()
+        self._workbench_restore_chat_btn.clicked.connect(
+            lambda _checked=False: self._restore_workbench_side("chat")
+        )
+
+        self._workbench_restore_files_btn = QPushButton("Files", self._viewer)
+        self._workbench_restore_files_btn.setObjectName("workbenchRestoreFiles")
+        self._workbench_restore_files_btn.setToolTip("Show file editor")
+        self._workbench_restore_files_btn.setAccessibleName("Show file editor")
+        self._workbench_restore_files_btn.setFixedSize(48, 64)
+        self._workbench_restore_files_btn.hide()
+        self._workbench_restore_files_btn.clicked.connect(
+            lambda _checked=False: self._restore_workbench_side("files")
+        )
 
         self._workspace_dashboard = WorkspaceDashboard(repo, defer_refresh=True)
         self._workspace_dashboard.switch_requested.connect(self._switch_workspace)
@@ -320,6 +406,7 @@ class MainWindow(QMainWindow):
         self._left.extensions_requested.connect(self._chat.show_extensions)
         self._left.mcp_requested.connect(self._chat.show_mcp)
         self._left.workspace_requested.connect(self._show_workspace_dashboard)
+        self._left.workspace_switch_requested.connect(self._switch_workspace)
         self._left.canvas_requested.connect(self._show_agent_canvas)
         self._left.activity_selected.connect(self._on_activity_selected)
         self._left.activity_panel_collapsed_changed.connect(self._on_activity_panel_collapsed)
@@ -333,15 +420,19 @@ class MainWindow(QMainWindow):
         self._chat.conversation_changed.connect(self._context.set_current_conversation)
         self._chat.conversation_changed.connect(lambda _conv_id: self._schedule_session_save())
         self._viewer.active_file_changed.connect(lambda _path: self._schedule_session_save())
-        self._workbench.splitterMoved.connect(lambda *_args: self._schedule_session_save())
+        self._workbench.splitterMoved.connect(self._on_workbench_splitter_moved)
+        self._workbench.reset_requested.connect(self._reset_workbench_split)
+        self._workbench.resized.connect(self._sync_workbench_restore_tabs)
         self._left.settings_changed.connect(self._apply_appearance)
 
         self._setup_shortcuts()
 
-        self.setCentralWidget(self._root_splitter)
+        set_chromed_central_widget(self, self._root_splitter)
+
         self._restore_layout(saved)
         self._apply_appearance()
         self._context.set_language_context(self._viewer.active_language_context())
+
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -541,17 +632,17 @@ class MainWindow(QMainWindow):
             return
         self._chat.append_external_conversation_chunk(conv_id, str(text or ""))
 
-    def _on_canvas_conversation_tool_called(self, conv_id: str, name: str, inputs: dict):
+    def _on_canvas_conversation_tool_called(self, conv_id: str, tool_id: str, name: str, inputs: dict):
         conv_id = str(conv_id or "").strip()
         if not conv_id:
             return
-        self._chat.show_external_conversation_tool_called(conv_id, str(name or "tool"), dict(inputs or {}))
+        self._chat.show_external_conversation_tool_called(conv_id, str(tool_id or ""), str(name or "tool"), dict(inputs or {}))
 
-    def _on_canvas_conversation_tool_result(self, conv_id: str, name: str, output: str):
+    def _on_canvas_conversation_tool_result(self, conv_id: str, tool_id: str, name: str, output: str):
         conv_id = str(conv_id or "").strip()
         if not conv_id:
             return
-        self._chat.show_external_conversation_tool_result(conv_id, str(name or "tool"), str(output or ""))
+        self._chat.show_external_conversation_tool_result(conv_id, str(tool_id or ""), str(name or "tool"), str(output or ""))
 
     def _on_canvas_conversation_run_finished(self, conv_id: str):
         conv_id = str(conv_id or "").strip()
@@ -589,7 +680,7 @@ class MainWindow(QMainWindow):
         self._show_workbench()
         self._left.reveal_file(path)
         self._viewer.show()
-        self._apply_default_workbench_split()
+        self._ensure_file_viewer_space()
 
     def _stop_streaming_if_active(self):
         if self._chat.is_streaming():
@@ -613,8 +704,10 @@ class MainWindow(QMainWindow):
         workbench = saved.get("workbench_sizes")
         if workbench and len(workbench) == 2:
             self._workbench.setSizes(self._normalized_workbench_sizes(list(workbench)))
+            self._remember_workbench_split()
+            self._workbench_user_split = True
         else:
-            self._workbench.setSizes([620, 500])
+            self._ensure_file_viewer_space()
 
         active_activity = str(saved.get("active_activity") or "chats")
         if active_activity == "canvas":
@@ -674,22 +767,55 @@ class MainWindow(QMainWindow):
             thread.wait(3000)
         super().closeEvent(event)
 
-    def _apply_appearance(self):
+    def _apply_appearance(self, changed_keys: object = None):
+        changed = set(changed_keys or []) if changed_keys is not None else None
+        if changed is not None and not changed:
+            return
+        model_keys = {
+            "anthropic_api_key",
+            "openai_api_key",
+            "provider_api_keys",
+            "provider_order",
+            "default_models",
+            "crew",
+            "crew_models",
+        }
+        editor_keys = {
+            FILE_EDITOR_AUTO_SAVE_KEY,
+            FILE_EDITOR_TAB_SPACES_KEY,
+            FILE_REVIEW_PROMPT_TEMPLATE_KEY,
+            DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY,
+        }
+        refresh_models = changed is None or bool(changed & model_keys)
+        reload_editor_settings = changed is None or bool(changed & editor_keys)
+
         app = QApplication.instance()
-        if app:
-            apply_app_theme(app, current_theme())
-        self._viewer.reload_settings()
-        self._left.apply_appearance()
-        self._chat.refresh_models()
-        self._chat.apply_appearance()
-        self._viewer.apply_appearance()
-        self._context.apply_appearance()
-        self._workspace_dashboard.apply_appearance()
-        self._agent_canvas.apply_appearance()
-        tab_style = toggle_tab_button_style()
-        self._context_tab.setStyleSheet(tab_style)
-        self._language_context_tab.setStyleSheet(tab_style)
-        self._sync_context_tab_icons()
+        previous_updates = self.updatesEnabled()
+        self.setUpdatesEnabled(False)
+        try:
+            if app:
+                apply_app_theme(app, current_theme())
+            if reload_editor_settings:
+                self._viewer.reload_settings()
+            self._left.apply_appearance()
+            if refresh_models:
+                self._chat.refresh_models()
+            self._chat.apply_appearance()
+            self._viewer.apply_appearance()
+            self._context.apply_appearance()
+            self._workspace_dashboard.apply_appearance()
+            self._agent_canvas.apply_appearance(refresh_models=refresh_models)
+            if self._window_chrome is not None:
+                self._window_chrome.apply_appearance()
+            tab_style = toggle_tab_button_style()
+            self._context_tab.setStyleSheet(tab_style)
+            self._language_context_tab.setStyleSheet(tab_style)
+            self._apply_workbench_restore_tab_style()
+            self._sync_context_tab_icons()
+            self._sync_workbench_restore_tabs()
+        finally:
+            self.setUpdatesEnabled(previous_updates)
+            self.update()
 
     def _open_file(
         self,
@@ -709,7 +835,7 @@ class MainWindow(QMainWindow):
         self._left.reveal_file(path, activate=activate_files)
         self._viewer.show()
         self._sync_chat_width_mode()
-        self._apply_default_workbench_split()
+        self._ensure_file_viewer_space()
         self._schedule_session_save()
 
     def _open_file_from_canvas(self, path: str):
@@ -717,25 +843,168 @@ class MainWindow(QMainWindow):
         self._open_file(path, activate_files=False)
         self._workbench_left.setCurrentWidget(self._agent_canvas)
 
+    def _workbench_total_width(self) -> int:
+        sizes = self._workbench.sizes()
+        total = sum(sizes)
+        if total > 0:
+            return total
+        return max(1, self._workbench.width())
+
+    def _default_workbench_sizes(self) -> list[int]:
+        total = max(1, self._workbench_total_width())
+        chat = total * WORKBENCH_DEFAULT_CHAT_PERCENT // 100
+        return [max(1, chat), max(1, total - chat)]
+
     def _apply_default_workbench_split(self):
-        total = max(1, self._workbench.width())
-        self._workbench.setSizes([total * 55 // 100, total * 45 // 100])
+        self._workbench.setSizes(self._default_workbench_sizes())
+        self._remember_workbench_split()
         self._sync_workbench_markdown_preview_pane()
+        self._sync_workbench_restore_tabs()
+
+    def _ensure_file_viewer_space(self):
+        sizes = self._workbench.sizes()
+        if (
+            self._workbench_user_split
+            and len(sizes) == 2
+            and sizes[0] > WORKBENCH_COLLAPSED_WIDTH
+            and sizes[1] >= WORKBENCH_MIN_VIEWER_WIDTH
+        ):
+            self._remember_workbench_split()
+            self._sync_workbench_markdown_preview_pane()
+            self._sync_workbench_restore_tabs()
+            return
+        self._apply_default_workbench_split()
 
     def _normalized_workbench_sizes(self, sizes: list[int]) -> list[int]:
         if len(sizes) != 2:
             return sizes
         left, right = max(0, int(sizes[0])), max(0, int(sizes[1]))
         total = max(1, left + right)
-        min_left = 320
-        min_viewer = 240
-        if left <= 1 and right > min_viewer:
-            left = total * 55 // 100
-            right = max(min_viewer, total - left)
-        elif right <= 1 and left > min_left:
-            right = total * 45 // 100
-            left = max(min_left, total - right)
+        if left <= WORKBENCH_COLLAPSED_WIDTH < right:
+            return [WORKBENCH_COLLAPSED_WIDTH, max(1, total - WORKBENCH_COLLAPSED_WIDTH)]
+        if right <= WORKBENCH_COLLAPSED_WIDTH < left:
+            return [max(1, total - WORKBENCH_COLLAPSED_WIDTH), WORKBENCH_COLLAPSED_WIDTH]
+        if left <= WORKBENCH_COLLAPSED_WIDTH and right <= WORKBENCH_COLLAPSED_WIDTH:
+            return self._default_workbench_sizes()
         return [max(1, left), max(1, right)]
+
+    def _remember_workbench_split(self):
+        sizes = self._workbench.sizes()
+        if (
+            len(sizes) == 2
+            and sizes[0] > WORKBENCH_COLLAPSED_WIDTH
+            and sizes[1] > WORKBENCH_COLLAPSED_WIDTH
+        ):
+            self._last_open_workbench_sizes = [int(sizes[0]), int(sizes[1])]
+
+    def _on_workbench_splitter_moved(self, *_args):
+        self._workbench_user_split = True
+        self._snap_workbench_collapsed_side()
+        self._remember_workbench_split()
+        self._sync_workbench_restore_tabs()
+        self._schedule_session_save()
+
+    def _snap_workbench_collapsed_side(self):
+        sizes = self._workbench.sizes()
+        if len(sizes) != 2:
+            return
+        left, right = sizes
+        total = max(1, left + right)
+        if left <= WORKBENCH_COLLAPSED_WIDTH < right:
+            self._workbench.setSizes([
+                WORKBENCH_COLLAPSED_WIDTH,
+                max(1, total - WORKBENCH_COLLAPSED_WIDTH),
+            ])
+        elif right <= WORKBENCH_COLLAPSED_WIDTH < left:
+            self._workbench.setSizes([
+                max(1, total - WORKBENCH_COLLAPSED_WIDTH),
+                WORKBENCH_COLLAPSED_WIDTH,
+            ])
+
+    def _reset_workbench_split(self):
+        self._workbench_user_split = False
+        self._apply_default_workbench_split()
+        self._schedule_session_save()
+
+    def _restore_workbench_side(self, side: str):
+        total = max(1, self._workbench_total_width())
+        base = list(self._last_open_workbench_sizes or self._default_workbench_sizes())
+        if len(base) != 2 or sum(base) <= 0:
+            base = self._default_workbench_sizes()
+        ratio = base[0] / max(1, sum(base))
+        left = int(total * ratio)
+        right = total - left
+        if side == "chat":
+            left = max(WORKBENCH_MIN_CHAT_WIDTH, left)
+            right = max(1, total - left)
+        elif side == "files":
+            right = max(WORKBENCH_MIN_VIEWER_WIDTH, right)
+            left = max(1, total - right)
+        self._workbench.setSizes([left, right])
+        self._workbench_user_split = True
+        self._remember_workbench_split()
+        self._sync_workbench_restore_tabs()
+        self._schedule_session_save()
+
+    def _sync_workbench_restore_tabs(self):
+        if not hasattr(self, "_workbench_restore_chat_btn"):
+            return
+        sizes = self._workbench.sizes()
+        left_collapsed = len(sizes) == 2 and sizes[0] <= WORKBENCH_COLLAPSED_WIDTH and sizes[1] > WORKBENCH_COLLAPSED_WIDTH
+        right_collapsed = (
+            len(sizes) == 2
+            and sizes[1] <= WORKBENCH_COLLAPSED_WIDTH
+            and sizes[0] > WORKBENCH_COLLAPSED_WIDTH
+            and self._viewer.isVisible()
+            and self._viewer.has_open_tabs()
+        )
+        height = max(1, self._workbench.height())
+        chat_btn = self._workbench_restore_chat_btn
+        files_btn = self._workbench_restore_files_btn
+        y_chat = max(6, (height - chat_btn.height()) // 2)
+        y_files = max(6, (height - files_btn.height()) // 2)
+        chat_btn.move(max(2, (self._workbench_left.width() - chat_btn.width()) // 2), y_chat)
+        files_btn.move(max(2, (self._viewer.width() - files_btn.width()) // 2), y_files)
+        if left_collapsed:
+            self._sync_workbench_chat_rail_context()
+            if self._workbench_left.currentWidget() is not self._workbench_chat_rail:
+                self._workbench_left.setCurrentWidget(self._workbench_chat_rail)
+        elif self._workbench_left.currentWidget() is self._workbench_chat_rail:
+            self._sync_workbench_markdown_preview_pane(force_chat=True)
+        chat_btn.setVisible(False)
+        files_btn.setVisible(right_collapsed)
+        chat_btn.setEnabled(False)
+        files_btn.setEnabled(right_collapsed)
+        if right_collapsed:
+            files_btn.raise_()
+
+    def _sync_workbench_chat_rail_context(self):
+        if not hasattr(self, "_workbench_chat_rail_ring"):
+            return
+        self._workbench_chat_rail_ring.set_budget(
+            getattr(self._chat.context_ring, "_budget", None)
+        )
+        self._workbench_chat_rail_ring.setToolTip("Show chat")
+
+    def _apply_workbench_restore_tab_style(self):
+        p = palette()
+        rail_style = (
+            f"QWidget#workbenchChatRail {{ background:{p['BG']};"
+            f"border-right:1px solid {p['BORDER_SUBTLE']}; }}"
+        )
+        self._workbench_chat_rail.setStyleSheet(rail_style)
+        style = (
+            "QPushButton {"
+            f"background:{p['BG2']}; color:{p['TEXT']};"
+            f"border:1px solid {p['BORDER']}; border-radius:6px;"
+            "font-weight:600; padding:0px;"
+            "}"
+            "QPushButton:hover {"
+            f"background:{p['BG3']}; border-color:{p['TEXT_DIM']};"
+            "}"
+        )
+        self._workbench_restore_chat_btn.setStyleSheet(style)
+        self._workbench_restore_files_btn.setStyleSheet(style)
 
     def _restore_preview_to_host_tab(self):
         tab = self._workbench_preview_host_tab
@@ -783,7 +1052,7 @@ class MainWindow(QMainWindow):
         self._viewer.open_content(content, title)
         self._viewer.show()
         self._sync_chat_width_mode()
-        self._apply_default_workbench_split()
+        self._ensure_file_viewer_space()
 
     def _refresh_open_file(self, path: str):
         self._viewer.refresh_file(path, repo_root=os.getcwd())

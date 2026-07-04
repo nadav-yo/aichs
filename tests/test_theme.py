@@ -89,18 +89,18 @@ def test_markdown_css_and_stylesheet(qapp):
 
 
 def test_combo_box_popup_style_paints_container_viewport_and_items():
-    p = palette("modern")
-    style = combo_box_popup_style("modern", bg=p["BG3"], border_radius=6, font_pt=12)
+    p = palette("dark")
+    style = combo_box_popup_style("dark", bg=p["BG3"], border_radius=6, font_pt=12)
 
     assert "QComboBoxPrivateContainer" in style
-    assert "padding:6px" in style
-    assert "padding:5px 10px" in style
+    assert "padding:0" in style
+    assert "padding:2px 10px" in style
     assert "QComboBox::indicator" not in style
     assert "QAbstractItemView::indicator" in style
     assert "QComboBoxPrivateContainer QWidget" in style
     assert "QComboBox QAbstractItemView::item" in style
     assert p["BG3"] in style
-    assert p["SELECTION"] in style
+    assert theme_module.combo_popup_item_selected_bg("dark") in style
     assert p["SELECTION_TEXT"] in style
 
 
@@ -124,18 +124,18 @@ def test_workbench_header_styles_share_frame_and_title_contract():
 
 
 def test_combo_box_popup_container_style_includes_item_padding():
-    style = theme_module.combo_box_popup_container_style("modern", border_radius=6, font_pt=12)
+    style = theme_module.combo_box_popup_container_style("dark", border_radius=6, font_pt=12)
 
-    assert "padding:6px" in style
-    assert "padding:5px 10px" in style
+    assert "padding:0" in style
+    assert "padding:2px 10px" in style
     assert "QListView::item" in style
     assert "border-radius:6px" in style
 
 
 def test_combo_popup_hover_uses_lifted_surface():
-    modern = palette("modern")
-    modern_style = theme_module.combo_box_popup_container_style("modern")
-    assert f"background:{modern['BORDER']}" in modern_style
+    dark_style = theme_module.combo_box_popup_container_style("dark")
+    assert "background:#5b45d6" in dark_style
+    assert "background:#6046d9" in dark_style
 
     light = palette("light")
     light_style = theme_module.combo_box_popup_container_style("light")
@@ -154,7 +154,7 @@ def test_combo_popup_visible_row_count():
 def test_combo_popup_container_resizes_for_multiple_rows(qapp):
     from PyQt6.QtWidgets import QComboBox, QListView
 
-    apply_app_theme(qapp, "modern")
+    apply_app_theme(qapp, "dark")
     combo = QComboBox()
     for i in range(8):
         combo.addItem(f"provider-{i}")
@@ -169,11 +169,11 @@ def test_combo_popup_container_resizes_for_multiple_rows(qapp):
     )
     view = container.findChild(QListView)
     assert view is not None
-    row_h = max(view.sizeHintForRow(0), theme_module.COMBO_POPUP_MIN_ROW_HEIGHT)
+    row_h = view.sizeHintForRow(0)
     visible = theme_module.combo_popup_visible_row_count(8)
     assert visible == 8
-    assert view.minimumHeight() >= visible * (row_h - 2)
-    assert container.height() >= 4 * (row_h - 2)
+    assert view.minimumHeight() >= visible * row_h
+    assert container.height() >= visible * row_h
 
     combo.hidePopup()
     combo.deleteLater()
@@ -183,7 +183,7 @@ def test_combo_popup_container_resizes_for_multiple_rows(qapp):
 def test_combo_popup_container_fits_short_lists(qapp):
     from PyQt6.QtWidgets import QComboBox, QListView
 
-    apply_app_theme(qapp, "modern")
+    apply_app_theme(qapp, "dark")
     combo = QComboBox()
     combo.addItems(["one", "two"])
     combo.show()
@@ -196,11 +196,122 @@ def test_combo_popup_container_fits_short_lists(qapp):
         if w.metaObject().className() == "QComboBoxPrivateContainer" and w.isVisible()
     )
     view = container.findChild(QListView)
-    row_h = max(view.sizeHintForRow(0), theme_module.COMBO_POPUP_MIN_ROW_HEIGHT)
+    assert view.geometry().top() == 0
+    assert view.geometry().left() == 0
+    row_h = view.sizeHintForRow(0)
     pad = theme_module.COMBO_POPUP_VIEW_PADDING * 2
     assert container.height() <= 2 * row_h + pad + 4
     assert container.height() >= 2 * row_h + pad - 4
-    assert view.minimumHeight() >= 2 * theme_module.COMBO_POPUP_MIN_ROW_HEIGHT
+    assert view.minimumHeight() == 2 * row_h + pad + 2
+
+    combo.hidePopup()
+    combo.deleteLater()
+    qapp.processEvents()
+
+
+def test_configure_combo_box_popup_installs_explicit_list_view(qapp):
+    from PyQt6.QtWidgets import QComboBox, QListView
+
+    combo = QComboBox()
+    theme_module.configure_combo_box_popup(combo, "dark")
+
+    assert combo.property("aichsComboPopupViewInstalled") is True
+    assert isinstance(combo.view(), QListView)
+    assert combo.view().property("aichsThemeName") == "dark"
+    assert combo.view().hasMouseTracking()
+    assert combo.view().viewport().hasMouseTracking()
+    assert combo.view().property("aichsComboPopupDelegateInstalled") is True
+    assert combo.view().itemDelegate().objectName() == "aichsComboPopupDelegate"
+
+    combo.deleteLater()
+    qapp.processEvents()
+
+
+def test_combo_popup_delegate_paints_mouseover_row(qapp):
+    from PyQt6.QtCore import QRect, QStringListModel
+    from PyQt6.QtGui import QImage, QPainter
+    from PyQt6.QtWidgets import QListView, QStyle, QStyleOptionViewItem
+
+    view = QListView()
+    view.setProperty("aichsThemeName", "dark")
+    model = QStringListModel(["tabbiapi", "groq"])
+    view.setModel(model)
+    delegate = theme_module.ComboPopupItemDelegate.create(view)
+    image = QImage(96, theme_module.COMBO_POPUP_MIN_ROW_HEIGHT, QImage.Format.Format_ARGB32)
+    image.fill(0)
+    option = QStyleOptionViewItem()
+    option.rect = QRect(0, 0, image.width(), image.height())
+    option.state = QStyle.StateFlag.State_Enabled | QStyle.StateFlag.State_MouseOver
+    option.widget = view
+
+    painter = QPainter(image)
+    delegate.paint(painter, option, model.index(1, 0))
+    painter.end()
+
+    assert image.pixelColor(2, image.height() // 2).name() == theme_module.combo_popup_item_hover_bg("dark")
+
+    view.deleteLater()
+    qapp.processEvents()
+
+
+def test_combo_popup_installs_delegate_without_hover_selection_filter(qapp):
+    from PyQt6.QtWidgets import QComboBox, QListView
+
+    apply_app_theme(qapp, "dark")
+    combo = QComboBox()
+    combo.addItems(["tabbiapi", "Telnyx", "Open Router", "groq"])
+    combo.show()
+    combo.showPopup()
+    for _ in range(3):
+        qapp.processEvents()
+
+    container = next(
+        w for w in qapp.allWidgets()
+        if w.metaObject().className() == "QComboBoxPrivateContainer" and w.isVisible()
+    )
+    view = container.findChild(QListView)
+    assert view is not None
+    assert view.property("aichsComboPopupDelegateInstalled") is True
+    assert view.itemDelegate().objectName() == "aichsComboPopupDelegate"
+    assert view.hasMouseTracking()
+    assert view.viewport().hasMouseTracking()
+    assert not hasattr(view.viewport(), "_aichs_combo_hover_filter")
+
+    combo.hidePopup()
+    combo.deleteLater()
+    qapp.processEvents()
+
+
+def test_combo_popup_uses_light_palette_on_light_theme(qapp):
+    from PyQt6.QtWidgets import QComboBox, QListView, QWidget
+
+    apply_app_theme(qapp, "light")
+    combo = QComboBox()
+    combo.addItems(["tabbiapi", "Telnyx", "Open Router", "groq"])
+    combo.show()
+    combo.showPopup()
+    for _ in range(3):
+        qapp.processEvents()
+
+    container = next(
+        w for w in qapp.allWidgets()
+        if w.metaObject().className() == "QComboBoxPrivateContainer" and w.isVisible()
+    )
+    view = container.findChild(QListView)
+    assert view is not None
+    assert view.geometry().top() == 0
+    assert view.viewportMargins().top() == theme_module.COMBO_POPUP_VIEW_PADDING
+    assert view.viewportMargins().bottom() == theme_module.COMBO_POPUP_VIEW_PADDING
+    assert view.verticalScrollBar().maximum() == 0
+    scrollers = [
+        w for w in container.findChildren(QWidget)
+        if w.metaObject().className() == "QComboBoxPrivateScroller"
+    ]
+    assert scrollers
+    assert all(not w.isVisible() for w in scrollers)
+    assert palette("light")["BG3"] in view.styleSheet()
+    assert palette("light")["SELECTION"] in view.styleSheet()
+    assert view.palette().color(view.palette().ColorRole.Base).name() == palette("light")["BG3"]
 
     combo.hidePopup()
     combo.deleteLater()
@@ -236,8 +347,8 @@ def test_hint_and_field_label_styles_use_meta_scale():
 
 
 def test_design_tokens_align_form_and_global_fields():
-    sheet = build_stylesheet("modern")
-    form = theme_module.form_field_style(theme="modern")
+    sheet = build_stylesheet("dark")
+    form = theme_module.form_field_style(theme="dark")
 
     assert f"border-radius:{theme_module.FIELD_BORDER_RADIUS}px" in sheet
     assert f"border-radius:{theme_module.FIELD_BORDER_RADIUS}px" in form
@@ -282,7 +393,7 @@ def test_flat_list_variants_share_shell_and_differ_on_selection():
 
 
 def test_new_chat_button_style_uses_theme_soft_accent(qapp):
-    for theme_name in ("dark", "modern", "light"):
+    for theme_name in ("dark", "light"):
         style = theme_module.new_chat_button_style(theme_name)
         assert theme_module.ACCENT in style
         assert "QPushButton:hover" in style
@@ -435,7 +546,8 @@ def test_form_field_style_defines_dialog_field_contract():
     assert "subcontrol-position: top right" in style
     assert f"border:1px solid {theme_module.ACCENT};" in style
     assert "QComboBoxPrivateContainer" in style
-    assert "QComboBox::down-arrow" not in style
+    assert "QComboBox::down-arrow" in style
+    assert "width:0px; height:0px" in style
     assert "QComboBox::indicator" not in style
 
 
@@ -484,7 +596,7 @@ def test_file_tab_style_defines_closable_editor_tab_contract():
 
     assert "QTabWidget#fileViewerTabs" in style
     assert "QTabWidget#fileViewerTabs QTabBar::tab" in style
-    assert "padding:6px 10px" in style
+    assert "padding:2px 10px" in style
     assert "min-width:88px" in style
     assert "max-width:220px" in style
     assert "QTabWidget#fileViewerTabs QTabBar::close-button" in style
@@ -642,7 +754,7 @@ def test_checkbox_style_defaults_to_standard_checkmark():
     assert 'image: url("' not in no_mark_style
 
 
-@pytest.mark.parametrize("theme_name", ["dark", "modern", "light"])
+@pytest.mark.parametrize("theme_name", ["dark", "light"])
 def test_markdown_css_code_blocks_do_not_repaint_inline_code_background(theme_name):
     css = markdown_css(14, theme_name)
     pre_rule = re.search(r"pre \{([^}]+)\}", css).group(1)
@@ -661,7 +773,7 @@ def test_markdown_css_code_blocks_do_not_repaint_inline_code_background(theme_na
     assert "border-radius:0;" in pre_code
 
 
-@pytest.mark.parametrize("theme_name", ["dark", "modern", "light"])
+@pytest.mark.parametrize("theme_name", ["dark", "light"])
 def test_markdown_css_components_have_distinct_surfaces(theme_name):
     css = markdown_css(14, theme_name)
     code_bg = re.search(r"(^|})code \{[^}]*background-color:([^;]+);", css).group(2)
@@ -678,7 +790,7 @@ def test_markdown_css_components_have_distinct_surfaces(theme_name):
     assert f"background:{code_bg};" not in file_style
 
 
-@pytest.mark.parametrize("theme_name", ["dark", "modern", "light"])
+@pytest.mark.parametrize("theme_name", ["dark", "light"])
 def test_reference_and_code_helpers_use_distinct_surfaces(theme_name):
     tokens = _markdown_tokens(theme_name)
     code_surface = theme_module.code_surface_colors(theme_name)
@@ -700,7 +812,7 @@ def test_reference_and_code_helpers_use_distinct_surfaces(theme_name):
     assert palette(theme_name)["SELECTION"] in search_match
 
 
-@pytest.mark.parametrize("theme_name", ["dark", "modern", "light"])
+@pytest.mark.parametrize("theme_name", ["dark", "light"])
 def test_markdown_tokens_keep_text_contrast_above_wcag_aa(theme_name):
     p = palette(theme_name)
     tokens = _markdown_tokens(theme_name)
@@ -717,9 +829,9 @@ def test_markdown_tokens_keep_text_contrast_above_wcag_aa(theme_name):
         assert _contrast_ratio(fg, bg) >= 4.5
 
 
-def test_modern_markdown_code_block_is_neutral_inset_surface():
-    p = palette("modern")
-    tokens = _markdown_tokens("modern")
+def test_dark_markdown_code_block_is_neutral_inset_surface():
+    p = palette("dark")
+    tokens = _markdown_tokens("dark")
 
     assert tokens["pre_bg"] != tokens["code_bg"]
     assert _relative_luminance(tokens["pre_bg"]) < _relative_luminance(p["BG3"])
@@ -740,14 +852,14 @@ def test_apply_app_theme_skips_reapplying_same_theme(monkeypatch):
     monkeypatch.setattr("ui.win_caption.install_caption_sync", lambda _app: None)
     monkeypatch.setattr("ui.win_caption.sync_all_windows_captions", lambda *_args: None)
 
-    apply_app_theme(app, "modern")
-    apply_app_theme(app, "modern")
+    apply_app_theme(app, "dark")
+    apply_app_theme(app, "dark")
     app.setStyleSheet("")
-    apply_app_theme(app, "modern")
+    apply_app_theme(app, "dark")
     SettingsStore().update({"font_size": "large"})
-    apply_app_theme(app, "modern")
+    apply_app_theme(app, "dark")
 
-    assert builds == ["modern", "modern", "modern"]
+    assert builds == ["dark", "dark", "dark"]
 
 
 def test_crew_styles_are_distinct():

@@ -37,8 +37,8 @@ from PyQt6.QtWidgets import (
 )
 
 StyleCase = tuple[str, Callable[[], QWidget], str]
-THEMES = ("dark", "modern", "light")
-DEFAULT_THEME = "modern"
+THEMES = ("dark", "light")
+DEFAULT_THEME = "dark"
 
 _QSS_MARKERS = (
     "QPushButton",
@@ -500,6 +500,10 @@ def collect_theme_stylesheet_cases(theme_name: str = DEFAULT_THEME) -> list[Styl
         ("git change button", QPushButton, theme.git_change_button_style()),
         ("context title button", QPushButton, theme.context_panel_title_button_style()),
         ("toggle tab button", QPushButton, theme.toggle_tab_button_style()),
+        ("window chrome frame", QWidget, theme.window_chrome_frame_style()),
+        ("window chrome", QWidget, theme.window_chrome_style()),
+        ("window chrome button", QPushButton, theme.window_chrome_button_style()),
+        ("window chrome close", QPushButton, theme.window_chrome_button_style(role="close")),
         ("skill chip", QPushButton, theme.skill_chip_style()),
         ("attachment thumbnail", QLabel, theme.attachment_thumbnail_style()),
         ("attachment remove", QPushButton, theme.attachment_remove_button_style()),

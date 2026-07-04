@@ -3,12 +3,11 @@ import time
 from contextlib import contextmanager
 
 import pytest
-from PyQt6.QtCore import QThreadPool, Qt
-from PyQt6.QtWidgets import QMessageBox, QMenu
+from PyQt6.QtCore import QPoint, QRect, QThreadPool, Qt
+from PyQt6.QtWidgets import QDialog, QLabel, QMessageBox, QMenu
 
 from services.workspace_snapshot import RecentChat, RecentWorkspace, WorkspaceSnapshot
 from storage.repository import ConversationStore, register_workspace
-from storage.repository import list_workspaces
 from ui.main_window import (
     DEFAULT_ACTIVITY_WIDTH,
     MAX_ACTIVITY_WIDTH,
@@ -17,6 +16,8 @@ from ui.main_window import (
     _ExtensionReviewThread,
 )
 from ui.theme import palette
+from ui.widgets.left_panel import _WorkspaceNavPanel
+from ui.widgets.window_chrome import _resize_edges_for_pos, chromed_dialog_layout
 from ui.widgets.workspace_dashboard import WorkspaceDashboard
 
 
@@ -54,6 +55,88 @@ def quiet_file_language(monkeypatch):
 def fast_app_theme(monkeypatch):
     monkeypatch.setattr("ui.main_window.apply_app_theme", lambda *_args, **_kwargs: None)
 
+
+def test_theme_only_settings_change_skips_model_and_editor_refresh(qapp, workspace, monkeypatch):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    window = MainWindow(startup_workspace=str(workspace))
+    calls = {"chat_models": 0, "viewer_reload": 0, "canvas_refresh": None}
+    try:
+        monkeypatch.setattr(window._chat, "refresh_models", lambda: calls.__setitem__("chat_models", calls["chat_models"] + 1))
+        monkeypatch.setattr(window._viewer, "reload_settings", lambda: calls.__setitem__("viewer_reload", calls["viewer_reload"] + 1))
+
+        def _canvas_apply(*, refresh_models=True):
+            calls["canvas_refresh"] = refresh_models
+
+        monkeypatch.setattr(window._agent_canvas, "apply_appearance", _canvas_apply)
+
+        window._apply_appearance({"theme"})
+
+        assert calls == {"chat_models": 0, "viewer_reload": 0, "canvas_refresh": False}
+    finally:
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
+def test_main_window_uses_custom_frameless_chrome(qapp, workspace):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    window = MainWindow(startup_workspace=str(workspace))
+    try:
+        assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
+        assert window.centralWidget() is window._window_shell
+        assert window._window_shell_layout.itemAt(0).widget() is window._window_chrome
+        assert window._window_shell_layout.itemAt(1).widget() is window._root_splitter
+        assert window._window_chrome._minimize_btn.toolTip() == "Minimize"
+        assert window._window_chrome._maximize_btn.toolTip() == "Maximize"
+        assert window._window_chrome._close_btn.toolTip() == "Close"
+    finally:
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
+
+def test_chromed_dialog_layout_installs_shared_close_only_chrome(qapp):
+    dialog = QDialog()
+    dialog.setWindowTitle("Documentation")
+    body = chromed_dialog_layout(dialog)
+    body.addWidget(QLabel("Body"))
+
+    try:
+        assert dialog.windowFlags() & Qt.WindowType.FramelessWindowHint
+        assert dialog.property("_aichsCustomChrome") is True
+        assert dialog.layout().itemAt(0).widget() is dialog._window_chrome_frame
+        assert dialog._window_chrome_frame.layout().itemAt(0).widget() is dialog._window_chrome
+        assert dialog._window_chrome_frame.layout().itemAt(1).widget() is dialog._window_chrome_content
+        assert not dialog._window_chrome._minimize_btn.isVisible()
+        assert not dialog._window_chrome._maximize_btn.isVisible()
+        assert dialog._window_chrome._close_btn.toolTip() == "Close"
+    finally:
+        dialog.close()
+
+
+def test_window_chrome_resize_edges_preserve_edge_resize_contract():
+    frame = QRect(100, 200, 800, 600)
+
+    assert _resize_edges_for_pos(frame, QPoint(100, 200)) == (Qt.Edge.LeftEdge | Qt.Edge.TopEdge)
+    assert _resize_edges_for_pos(frame, QPoint(899, 799)) == (Qt.Edge.RightEdge | Qt.Edge.BottomEdge)
+    assert _resize_edges_for_pos(frame, QPoint(100, 450)) == Qt.Edge.LeftEdge
+    assert _resize_edges_for_pos(frame, QPoint(899, 450)) == Qt.Edge.RightEdge
+    assert _resize_edges_for_pos(frame, QPoint(450, 200)) == Qt.Edge.TopEdge
+    assert _resize_edges_for_pos(frame, QPoint(450, 799)) == Qt.Edge.BottomEdge
+    assert not _resize_edges_for_pos(frame, QPoint(450, 450))
+
+
+def test_window_chrome_resize_edges_ignore_maximized_window():
+    frame = QRect(100, 200, 800, 600)
+
+    assert not _resize_edges_for_pos(frame, QPoint(100, 200), maximized=True)
 
 def test_main_window_wires_current_chat_model_to_git_changes(qapp, workspace):
     cwd = os.getcwd()
@@ -238,6 +321,144 @@ def test_main_window_close_last_file_hides_viewer_not_chat(
         qapp.setStyleSheet(app_style)
 
 
+def test_main_window_open_file_defaults_to_editor_favored_split(
+    qapp, workspace, quiet_file_language
+):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    window = MainWindow(startup_workspace=str(workspace))
+    opened = workspace / "src" / "main.py"
+    try:
+        window.resize(1400, 860)
+        window.show()
+        qapp.processEvents()
+
+        window._open_file(str(opened))
+        qapp.processEvents()
+
+        sizes = window._workbench.sizes()
+        assert len(sizes) == 2
+        assert sizes[1] > sizes[0]
+        assert sizes[1] / max(1, sum(sizes)) >= 0.55
+    finally:
+        _settle_file_viewer_workers(qapp)
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
+def test_main_window_open_file_preserves_user_workbench_split(
+    qapp, workspace, quiet_file_language
+):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    window = MainWindow(startup_workspace=str(workspace))
+    first = workspace / "src" / "main.py"
+    second = workspace / "notes.txt"
+    second.write_text("notes\n", encoding="utf-8")
+    try:
+        window.resize(1400, 860)
+        window.show()
+        qapp.processEvents()
+        window._open_file(str(first))
+
+        window._workbench.setSizes([700, 300])
+        qapp.processEvents()
+        window._on_workbench_splitter_moved(700, 1)
+        expected_ratio = window._workbench.sizes()[0] / sum(window._workbench.sizes())
+
+        window._open_file(str(second))
+        qapp.processEvents()
+
+        sizes = window._workbench.sizes()
+        actual_ratio = sizes[0] / sum(sizes)
+        assert abs(actual_ratio - expected_ratio) < 0.05
+        assert sizes[0] > sizes[1]
+    finally:
+        _settle_file_viewer_workers(qapp)
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
+def test_main_window_workbench_splitter_allows_extreme_editor_and_chat_sizes(
+    qapp, workspace, quiet_file_language
+):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    window = MainWindow(startup_workspace=str(workspace))
+    opened = workspace / "src" / "main.py"
+    try:
+        window.resize(1400, 860)
+        window.show()
+        qapp.processEvents()
+        window._open_file(str(opened))
+        qapp.processEvents()
+        total = sum(window._workbench.sizes())
+
+        window._workbench.setSizes([100, total - 100])
+        qapp.processEvents()
+        sizes = window._workbench.sizes()
+        assert sizes[1] / max(1, sum(sizes)) > 0.85
+
+        window._workbench.setSizes([total - 100, 100])
+        qapp.processEvents()
+        sizes = window._workbench.sizes()
+        assert sizes[0] / max(1, sum(sizes)) > 0.85
+    finally:
+        _settle_file_viewer_workers(qapp)
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
+def test_main_window_collapsed_workbench_sides_have_restore_tabs(
+    qapp, workspace, quiet_file_language
+):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    window = MainWindow(startup_workspace=str(workspace))
+    opened = workspace / "src" / "main.py"
+    try:
+        window.resize(1400, 860)
+        window.show()
+        qapp.processEvents()
+        window._open_file(str(opened))
+        total = sum(window._workbench.sizes())
+
+        window._workbench.setSizes([0, total])
+        window._sync_workbench_restore_tabs()
+        assert window._workbench_left.currentWidget() is window._workbench_chat_rail
+        assert window._workbench_chat_rail_ring.isVisibleTo(window._workbench_chat_rail)
+        assert window._workbench_restore_chat_btn.isHidden()
+        window._workbench_chat_rail_ring.clicked.emit()
+        qapp.processEvents()
+        assert window._workbench.sizes()[0] > 0
+        assert window._workbench_left.currentWidget() is window._chat
+
+        total = sum(window._workbench.sizes())
+        window._workbench.setSizes([total, 0])
+        window._sync_workbench_restore_tabs()
+        assert not window._workbench_restore_files_btn.isHidden()
+        window._workbench_restore_files_btn.click()
+        qapp.processEvents()
+        assert window._workbench.sizes()[1] > 0
+        assert window._workbench_restore_files_btn.isHidden()
+    finally:
+        _settle_file_viewer_workers(qapp)
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
 def test_main_window_close_canvas_opened_file_keeps_canvas(
     qapp, workspace, quiet_file_language
 ):
@@ -395,7 +616,7 @@ def test_main_window_left_rail_clicks_toggle_activity_drawer(qapp, workspace):
 
         assert window._left.active_activity() == "chats"
         assert window._left.is_activity_panel_collapsed()
-        assert window._root_splitter.sizes()[0] <= 80
+        assert window._root_splitter.sizes()[0] <= window._left._collapsed_width
 
         window._left._activity_buttons["files"].click()
 
@@ -406,7 +627,7 @@ def test_main_window_left_rail_clicks_toggle_activity_drawer(qapp, workspace):
         window._left._activity_buttons["files"].click()
 
         assert window._left.is_activity_panel_collapsed()
-        assert window._root_splitter.sizes()[0] <= 80
+        assert window._root_splitter.sizes()[0] <= window._left._collapsed_width
 
         window._left.reveal_file(str(opened), activate=True)
 
@@ -431,15 +652,16 @@ def test_main_window_workspace_rail_shows_dashboard(qapp, workspace):
         window._left._activity_buttons["workspace"].click()
 
         assert window._left.active_activity() == "workspace"
-        assert window._left._activity_buttons["workspace"].text() == "Work"
-        assert window._left._activity_buttons["workspace"].toolTip() == "Workspace"
+        assert window._left._activity_buttons["workspace"].text() == "Home"
+        assert window._left._activity_buttons["workspace"].toolTip() == "Home"
+        assert not window._left._activity_buttons["workspace"].icon().isNull()
         assert window._left.is_activity_panel_collapsed()
         assert window._center_stack.currentWidget() is window._workspace_dashboard
         dashboard_style = window._workspace_dashboard.styleSheet()
         assert "}}" not in dashboard_style
         assert "QWidget {" not in dashboard_style
         assert "QLabel { background:transparent; }" in dashboard_style
-        assert "QPushButton#workspaceOpenFolder:hover" in dashboard_style
+        assert "QPushButton#workspaceOpenFolder" not in dashboard_style
         assert window._is_context_collapsed()
         assert window._context_shell.isHidden()
         assert window._context_shell.maximumWidth() == 0
@@ -569,10 +791,13 @@ def test_main_window_recent_workspace_switch_retargets_panels(qapp, workspace, t
     window = MainWindow(startup_workspace=str(workspace))
     try:
         window._left._activity_buttons["workspace"].click()
-        _wait_until(qapp, lambda: window._workspace_dashboard._recent.count() > 0)
-        item = window._workspace_dashboard._recent.item(0)
+        window._left._workspace_nav.refresh()
+        target = next(
+            button for button in window._left._workspace_nav._buttons
+            if button.toolTip() == str(other.resolve())
+        )
 
-        window._workspace_dashboard._recent.itemClicked.emit(item)
+        target.click()
         qapp.processEvents()
 
         assert os.getcwd() == str(other.resolve())
@@ -596,14 +821,16 @@ def test_main_window_workspace_open_folder_switches(qapp, workspace, tmp_path, m
     other = tmp_path / "folder-choice"
     other.mkdir()
     monkeypatch.setattr(
-        "ui.widgets.workspace_dashboard.QFileDialog.getExistingDirectory",
+        "ui.widgets.left_panel.QFileDialog.getExistingDirectory",
         lambda *_args, **_kwargs: str(other),
     )
     window = MainWindow(startup_workspace=str(workspace))
     try:
         window._left._activity_buttons["workspace"].click()
+        assert window._left._workspace_nav._add_btn.text() == ""
+        assert window._left._workspace_nav._add_btn.width() <= 24
 
-        window._workspace_dashboard._open_btn.click()
+        window._left._workspace_nav._add_btn.click()
         qapp.processEvents()
 
         assert os.getcwd() == str(other.resolve())
@@ -616,64 +843,50 @@ def test_main_window_workspace_open_folder_switches(qapp, workspace, tmp_path, m
         qapp.setStyleSheet(app_style)
 
 
-def test_workspace_dashboard_missing_recent_workspace_is_disabled(qapp, workspace, tmp_path):
-    cwd = os.getcwd()
+def test_workspace_nav_keeps_current_workspace_first_and_selected(qapp, workspace, tmp_path):
     missing = tmp_path / "missing"
     register_workspace(missing)
-    dashboard = WorkspaceDashboard(str(workspace))
-    calls = []
+    register_workspace(workspace)
+    panel = _WorkspaceNavPanel(str(workspace))
     try:
-        _wait_until(qapp, lambda: dashboard._recent.count() > 0)
-        dashboard.switch_requested.connect(calls.append)
-        item = dashboard._recent.item(0)
+        panel.refresh()
 
-        row = dashboard._recent.itemWidget(item)
-        assert "Missing folder" in row.details.text()
-        assert not item.flags() & Qt.ItemFlag.ItemIsEnabled
-        dashboard._recent.itemClicked.emit(item)
-
-        assert calls == []
-        assert os.getcwd() == cwd
+        assert len(panel._buttons) == 1
+        current = panel._buttons[0]
+        assert current.toolTip() == f"Current workspace\n{str(workspace.resolve())}"
+        assert current.property("currentWorkspace") is True
+        assert current.isCheckable() is True
+        assert current.isChecked() is True
+        assert panel._empty_label is None
     finally:
-        dashboard.close()
-        os.chdir(cwd)
+        panel.close()
 
 
-def test_workspace_dashboard_context_menu_removes_recent_workspace(qapp, workspace, tmp_path, monkeypatch):
+def test_workspace_nav_switches_existing_recent_workspace(qapp, workspace, tmp_path):
     other = tmp_path / "old-work"
     other.mkdir()
-    registered = register_workspace(other)
-    dashboard = WorkspaceDashboard(str(workspace), defer_refresh=True)
-    dashboard._recent.clear()
-    dashboard._add_workspace_item(
-        RecentWorkspace(
-            path=registered["path"],
-            name=registered["name"],
-            updated_at=registered["updated_at"],
-            exists=True,
-        )
-    )
-    item = dashboard._recent.item(0)
-    action_texts = []
-
-    def choose_remove(menu, _pos):
-        action_texts.extend(action.text() for action in menu.actions())
-        return menu.actions()[0]
-
+    register_workspace(other)
+    panel = _WorkspaceNavPanel(str(workspace))
+    calls = []
     try:
-        monkeypatch.setattr(QMenu, "exec", choose_remove)
-        monkeypatch.setattr(dashboard._recent, "itemAt", lambda _pos: item)
+        panel.switch_requested.connect(calls.append)
+        panel.refresh()
 
-        dashboard._show_recent_menu(dashboard._recent.visualItemRect(item).center())
+        current = panel._buttons[0]
+        assert current.property("currentWorkspace") is True
+        current.click()
+        assert current.isChecked() is True
+        assert calls == []
 
-        assert action_texts == ["Remove from Recent"]
-        assert list_workspaces() == []
-        assert dashboard._recent.count() == 1
-        row = dashboard._recent.itemWidget(dashboard._recent.item(0))
-        assert row.title.text() == "No recent workspaces yet"
+        button = next(button for button in panel._buttons if button.toolTip() == str(other.resolve()))
+
+        assert panel._buttons.index(button) == 1
+        assert not button.icon().isNull()
+        button.click()
+
+        assert calls == [str(other.resolve())]
     finally:
-        dashboard.close()
-
+        panel.close()
 
 def test_workspace_dashboard_apply_snapshot_is_timed(qapp, workspace, monkeypatch):
     import ui.widgets.workspace_dashboard as workspace_dashboard
@@ -723,7 +936,7 @@ def test_workspace_dashboard_apply_snapshot_is_timed(qapp, workspace, monkeypatc
     finally:
         dashboard.close()
 
-    assert operations == [("workspace.apply", "chats=1 workspaces=1", 50)]
+    assert operations == [("workspace.apply", "chats=1", 50)]
 
 
 def test_workspace_dashboard_shutdown_clears_refresh_threads(qapp, workspace):

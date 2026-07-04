@@ -1309,7 +1309,7 @@ def test_commit_diff_dialog_uses_file_list_and_single_diff_viewer(qapp):
     assert "hello" in viewers[0].toPlainText()
 
 
-@pytest.mark.parametrize("theme_name", ["dark", "light", "modern"])
+@pytest.mark.parametrize("theme_name", ["dark", "light"])
 def test_commit_diff_dialog_uses_active_theme(qapp, theme_name):
     SettingsStore().update({"theme": theme_name})
     dlg = _CommitDiffDialog(

@@ -91,6 +91,7 @@ from storage.settings import (
     trash_retention_days,
 )
 from ui.avatars import avatar_pixmap, clear_cache, persist_portrait
+from ui.widgets.window_chrome import chromed_dialog_layout
 from ui.theme import (
     palette, DEFAULT_FONT_SIZE, DEFAULT_THEME,
     avatar_preview_style,
@@ -447,7 +448,7 @@ class _PortraitPicker(QWidget):
 class _ColorSwatchButton(QPushButton):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._color = "#528bff"
+        self._color = "#7c5cff"
         self._fg = "#ffffff"
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(36)
@@ -455,7 +456,7 @@ class _ColorSwatchButton(QPushButton):
         self.setToolTip("Choose crew color")
 
     def set_color(self, color: str):
-        self._color = _clean_color(color) or "#528bff"
+        self._color = _clean_color(color) or "#7c5cff"
         self._fg = _contrast_text(self._color)
         self.setText(self._color)
         self.update()
@@ -484,7 +485,7 @@ class _ColorPicker(QWidget):
     def __init__(self, saved: str, fallback: str, styles: dict, parent=None):
         super().__init__(parent)
         self._value = _clean_color(saved)
-        self._fallback = _clean_color(fallback) or "#528bff"
+        self._fallback = _clean_color(fallback) or "#7c5cff"
         self._styles = styles
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
@@ -1362,6 +1363,7 @@ class SettingsDialog(QDialog):
         self._providers: list[dict] = []
         self._model_order_provider_row = -1
         self._crew_widgets: dict[str, dict] = {}
+        self.changed_keys: set[str] = set()
 
         saved = store.load()
         self._saved = saved
@@ -1381,9 +1383,7 @@ class SettingsDialog(QDialog):
         self._yuk_import_btn = None
         self._yuk_export_status = None
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
+        outer = chromed_dialog_layout(self, contents_margins=(0, 0, 0, 0), spacing=0)
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -1558,7 +1558,7 @@ class SettingsDialog(QDialog):
             "Look, feel, and composer behavior.",
         )
         self.theme_combo = QComboBox()
-        self.theme_combo.addItems(["dark", "modern", "light"])
+        self.theme_combo.addItems(["dark", "light"])
         self.theme_combo.setStyleSheet(self._field_style)
         self._field(layout, "Theme", self.theme_combo)
 
@@ -2369,7 +2369,9 @@ class SettingsDialog(QDialog):
 
     def _load_general_values(self, saved: dict):
         theme = saved.get("theme", DEFAULT_THEME)
-        if theme in ("dark", "modern", "light"):
+        if theme == "modern":
+            theme = DEFAULT_THEME
+        if theme in ("dark", "light"):
             self.theme_combo.setCurrentText(theme)
 
         font = saved.get("font_size", DEFAULT_FONT_SIZE)
@@ -2684,9 +2686,36 @@ class SettingsDialog(QDialog):
             f"(~{examples} tokens for your models). Use /compact to summarize manually."
         )
 
+    def _changed_keys(self, before: dict, after: dict) -> set[str]:
+        keys = set(before) | set(after)
+        return {key for key in keys if before.get(key) != after.get(key)}
+
+    def _save_general_page_only(self) -> bool:
+        if self._built_pages != {"general"}:
+            return False
+        before = self.store.load()
+        data = dict(before)
+        data.update({
+            "theme": self.theme_combo.currentText(),
+            "font_size": self.font_combo.currentText(),
+            "enter_to_send": self.enter_to_send_check.isChecked(),
+            RESUME_SESSION_KEY: str(self.resume_session_combo.currentData() or DEFAULT_RESUME_SESSION),
+            TRASH_RETENTION_DAYS_KEY: self.trash_retention_spin.value(),
+            "avatar_human": persist_portrait(self.human_portrait.value(), "human"),
+        })
+        self.changed_keys = self._changed_keys(before, data)
+        if self.changed_keys:
+            self.store.save(data)
+            self.store.apply_saved(data)
+        self.accept()
+        return True
+
     def _save(self):
+        if self._save_general_page_only():
+            return
         self._ensure_all_pages()
-        data = self.store.load()
+        before = self.store.load()
+        data = dict(before)
         configured_ids = {provider["id"] for provider in self._providers}
         provider_keys = {
             provider["id"]: provider.get("api_key", "").strip()
@@ -2837,6 +2866,7 @@ class SettingsDialog(QDialog):
         save_user_providers(user_providers)
         model_registry.reload(refresh_anthropic=False)
         model_registry.refresh_anthropic_context_async()
+        self.changed_keys = self._changed_keys(before, data)
         self.store.save(data)
         self.store.apply_saved(data)
         clear_cache()

@@ -14,6 +14,7 @@ from services.tool_registry import extension_docs
 from ui.theme import contained_list_style, markdown_css, palette
 from ui.markdown_html import markdown_body
 from ui.widgets.markdown_browser import RemoteImageTextBrowser, copy_code_url_to_clipboard
+from ui.widgets.window_chrome import chromed_dialog_layout
 
 
 _DOC_ORDER = [
@@ -196,9 +197,12 @@ class DocsDialog(QDialog):
         self.setMinimumSize(620, 420)
 
         p = palette()
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(12)
+        layout = chromed_dialog_layout(
+            self,
+            QHBoxLayout,
+            contents_margins=(14, 14, 14, 14),
+            spacing=12,
+        )
 
         self.nav = QListWidget()
         self.nav.setFixedWidth(210)

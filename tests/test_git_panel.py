@@ -78,7 +78,7 @@ def test_git_action_button_styles_can_use_distinct_accents(qapp):
 
 
 def test_git_action_button_style_uses_each_theme_palette(qapp):
-    for theme in ("dark", "modern", "light"):
+    for theme in ("dark", "light"):
         p = palette(theme)
         style = _git_action_button_style(p["SUCCESS"], theme=theme)
         assert p["BG2"] in style

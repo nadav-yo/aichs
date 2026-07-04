@@ -227,7 +227,7 @@ class _GraphNode(QGraphicsItem):
         bg, border, accent = self._colors(p)
         collapsed_goal = self.token.kind == "goal" and self._collapsed
         if self.isSelected():
-            border = QColor("#8ab4ff")
+            border = QColor("#a99bff")
         painter.setPen(QPen(border, 1.4))
         painter.setBrush(bg)
         painter.drawRoundedRect(rect, 10, 10)
@@ -953,7 +953,7 @@ class _GraphNode(QGraphicsItem):
         if self.token.kind == "goal" and (self.is_root_goal or self._collapsed):
             return QColor("#10291f"), QColor("#2fa66f"), QColor("#64d6a2")
         colors = {
-            "goal": ("#181f2c", "#32425c", "#8ab4ff"),
+            "goal": ("#181f2c", "#32425c", "#a99bff"),
             "operation": ("#132832", "#2b697c", "#67e8f9"),
             "context": ("#241f13", "#6d5420", "#fbbf24"),
             "decision": ("#251728", "#6a315f", "#f472b6"),

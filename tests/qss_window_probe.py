@@ -61,7 +61,7 @@ def main(workspace: str | None = None) -> int:
                 window.close()
             app.processEvents()
 
-    for theme_name in ("dark", "modern", "light"):
+    for theme_name in ("dark", "light"):
         assert_app_stylesheets_parse(
             app,
             [(f"window app {theme_name}", theme.build_stylesheet(theme_name))],

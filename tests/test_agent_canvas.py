@@ -1217,7 +1217,7 @@ def test_agent_canvas_ask_user_choice_dialog_shows_choices_and_other(qapp, works
         assert ok is True
         assert answer == "Ask design first"
         assert seen["radio_texts"] == ["Architect", "Product Manager", "Other (specify)"]
-        assert "border-left-color: #67e8f9" in seen["style"]
+        assert "border-left-color:#8f7aff" in seen["style"]
         assert "QRadioButton#graphQuestionChoice:checked" in seen["style"]
     finally:
         panel.close()
@@ -1939,7 +1939,7 @@ def test_agent_canvas_graph_chat_colors_internal_messages(qapp, workspace):
         assert "Tools: Read 1/1 | Apply 1/1" in transcript
         assert "Graph Agent: Done." in transcript
         assert "#f6c744" in html
-        assert "#8ab4ff" in html
+        assert "#c7bdff" in html
         assert "#67e8f9" in html
     finally:
         panel.close()

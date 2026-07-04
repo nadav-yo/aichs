@@ -3,70 +3,47 @@ import sys
 
 from storage.settings import SettingsStore
 
-ACCENT = "#528bff"
-ACCENT_HOVER = "#6b9dff"
-ACCENT_DIM = "#3a6fd4"
-ACCENT_SOFT_DARK = "#1a2744"
-ACCENT_SOFT_LIGHT = "#e8f0ff"
+ACCENT = "#7c5cff"
+ACCENT_HOVER = "#8f7aff"
+ACCENT_DIM = "#6046d9"
+ACCENT_SOFT_DARK = "#20173c"
+ACCENT_SOFT_LIGHT = "#ede9ff"
 
 _CREW_TONES = {
     "scout": {
-        "dark": ("#132332", "#275f87", "#7dd3fc"),
-        "modern": ("#132832", "#2b697c", "#67e8f9"),
+        "dark": ("#121e2d", "#284c6e", "#7dd3fc"),
         "light": ("#e8f6ff", "#9ed8f4", "#0369a1"),
     },
     "archivist": {
         "dark": ("#282415", "#806c27", "#facc15"),
-        "modern": ("#292514", "#8b762b", "#fde047"),
         "light": ("#fff9db", "#fde68a", "#a16207"),
     },
     "architect": {
-        "dark": ("#1f2433", "#5f6f9a", "#a5b4fc"),
-        "modern": ("#1d2634", "#536878", "#93c5fd"),
+        "dark": ("#1d1734", "#5b45ad", "#b6a7ff"),
         "light": ("#eef2ff", "#c7d2fe", "#4f46e5"),
     },
 }
 
 _PALETTES = {
     "dark": {
-        "BG": "#0f0f11",
-        "BG2": "#16161a",
-        "BG3": "#1e1e24",
-        "BORDER": "#2a2a32",
-        "BORDER_SUBTLE": "#222228",
-        "TEXT": "#ececf1",
-        "TEXT_DIM": "#8b8b9a",
-        "BUBBLE_AI": "#232329",
-        "BUBBLE_AI_TEXT": "#ececf1",
-        "INPUT_BG": "#1a1a20",
-        "INPUT_TEXT": "#ececf1",
-        "SELECTION": "#1e2a42",
-        "SELECTION_TEXT": "#ececf1",
+        "BG": "#0b0f16",
+        "BG2": "#111720",
+        "BG3": "#181f2a",
+        "BORDER": "#30384a",
+        "BORDER_SUBTLE": "#202838",
+        "TEXT": "#f4f2ff",
+        "TEXT_DIM": "#a19ab8",
+        "BUBBLE_AI": "#181f2a",
+        "BUBBLE_AI_TEXT": "#f4f2ff",
+        "INPUT_BG": "#151b25",
+        "INPUT_TEXT": "#f4f2ff",
+        "SELECTION": "#251f4a",
+        "SELECTION_TEXT": "#fbf9ff",
         "SUCCESS": "#34d399",
         "SUCCESS_BG": "#142820",
         "SUCCESS_BORDER": "#1f4034",
-        "LINK": "#8ab4ff",
-        "FILE_LINK": "#9cc9ff",
-    },
-    "modern": {
-        "BG": "#111417",
-        "BG2": "#171b1f",
-        "BG3": "#20262b",
-        "BORDER": "#313941",
-        "BORDER_SUBTLE": "#252b31",
-        "TEXT": "#eef2f1",
-        "TEXT_DIM": "#9ea9b2",
-        "BUBBLE_AI": "#1b2126",
-        "BUBBLE_AI_TEXT": "#eef2f1",
-        "INPUT_BG": "#181e23",
-        "INPUT_TEXT": "#eef2f1",
-        "SELECTION": "#263f3d",
-        "SELECTION_TEXT": "#f5fffb",
-        "SUCCESS": "#64d6a2",
-        "SUCCESS_BG": "#14342a",
-        "SUCCESS_BORDER": "#245646",
-        "LINK": "#8ac7ff",
-        "FILE_LINK": "#92ead4",
+        "LINK": "#a99bff",
+        "FILE_LINK": "#b7aaff",
     },
     "light": {
         "BG": "#f5f5f7",
@@ -80,13 +57,13 @@ _PALETTES = {
         "BUBBLE_AI_TEXT": "#18181b",
         "INPUT_BG": "#ffffff",
         "INPUT_TEXT": "#18181b",
-        "SELECTION": "#e8f0ff",
+        "SELECTION": "#ede9ff",
         "SELECTION_TEXT": "#18181b",
         "SUCCESS": "#16a34a",
         "SUCCESS_BG": "#ecfdf3",
         "SUCCESS_BORDER": "#bbf7d0",
         "LINK": ACCENT,
-        "FILE_LINK": "#0969da",
+        "FILE_LINK": "#6d28d9",
     },
 }
 
@@ -125,7 +102,9 @@ TEXT_DIM = _p0["TEXT_DIM"]
 
 
 def current_theme() -> str:
-    theme = SettingsStore().load().get("theme", DEFAULT_THEME)
+    theme = str(SettingsStore().load().get("theme", DEFAULT_THEME) or DEFAULT_THEME).strip().lower()
+    if theme == "modern":
+        return DEFAULT_THEME
     return theme if theme in _PALETTES else DEFAULT_THEME
 
 
@@ -219,34 +198,19 @@ def _markdown_tokens(theme: str | None = None) -> dict[str, str]:
             "file_border": "#b7e2d8",
             "file_fg": "#096053",
         }
-    if theme_name == "modern":
-        return {
-            "code_bg": "#1b2f34",
-            "code_border": "#2d5057",
-            "code_fg": "#dbfbff",
-            "pre_bg": "#151b1f",
-            "quote_bg": "#192123",
-            "quote_border": "#506462",
-            "table_bg": p["BG2"],
-            "table_header_bg": "#1b2226",
-            "table_border": "#303a40",
-            "file_bg": "#14322f",
-            "file_border": "#276a60",
-            "file_fg": "#c5f5ee",
-        }
     return {
-        "code_bg": "#20283a",
-        "code_border": "#33415f",
-        "code_fg": "#eef4ff",
-        "pre_bg": "#141820",
-        "quote_bg": "#181d24",
-        "quote_border": "#4b5a6b",
+        "code_bg": "#1a1630",
+        "code_border": "#3a2f6a",
+        "code_fg": "#f2efff",
+        "pre_bg": "#0d1118",
+        "quote_bg": "#151b25",
+        "quote_border": "#56459f",
         "table_bg": p["BG2"],
-        "table_header_bg": "#1c2129",
-        "table_border": "#303844",
-        "file_bg": "#162b3d",
-        "file_border": "#294a68",
-        "file_fg": "#b9ddff",
+        "table_header_bg": "#151b25",
+        "table_border": "#30384a",
+        "file_bg": "#1e1838",
+        "file_border": "#4f3f95",
+        "file_fg": "#d9d1ff",
     }
 
 
@@ -355,12 +319,13 @@ def code_text_edit_style(
     theme_name = theme or current_theme()
     p = palette(theme_name)
     t = _markdown_tokens(theme_name)
+    selected = p["SELECTION"]
     fs = font_pt or mono_font_pt()
     return (
         f"{selector} {{ background:{t['pre_bg']}; color:{t['code_fg']};"
         f"border:1px solid {t['code_border']}; border-radius:6px;"
         f"font-family:{MONO_FONT_CSS}; font-size:{fs}px; padding:{padding};"
-        f"selection-background-color:{p['SELECTION']};"
+        f"selection-background-color:{selected};"
         f"selection-color:{p['SELECTION_TEXT']}; }}"
     )
 
@@ -383,16 +348,20 @@ def combo_box_field_style(
     fs = font_pt or 13
     bg = background or p["BG3"]
     border = border_color or p["BORDER"]
+    hover_border = "#3b465a" if theme_name == "dark" else "#c8c8d4"
+    active_bg = "#18142a" if theme_name == "dark" else p["BG2"]
     row_height = min_height or max(30, fs + 14)
     return (
         f"{selector} {{ background:{bg}; color:{p['TEXT']};"
         f"border:1px solid {border}; border-radius:{border_radius}px;"
         f"padding:{padding_v} {padding_h}; padding-right:{drop_down_width}px;"
         f"font-size:{fs}px; min-height:{row_height}px; }}"
-        f"{selector}:hover {{ border:1px solid {p['TEXT_DIM']}; }}"
-        f"{_state_selector(selector, 'focus')} {{ border:1px solid {ACCENT}; }}"
+        f"{selector}:hover {{ border:1px solid {hover_border}; }}"
+        f"{_state_selector(selector, 'focus')} {{ border:1px solid {ACCENT}; background:{active_bg}; }}"
+        f"{_state_selector(selector, 'on')} {{ border:1px solid {ACCENT}; background:{active_bg}; }}"
         f"{selector}::drop-down {{ border:none; width:{drop_down_width}px;"
         f"subcontrol-origin: padding; subcontrol-position: top right; }}"
+        f"{selector}::down-arrow {{ width:0px; height:0px; border:none; }}"
     )
 
 
@@ -470,7 +439,7 @@ def editor_text_area_style(
         f"{selector} {{ background:{surface}; color:{fg}; border:{border};"
         f"border-radius:{border_radius}px; padding:{padding};"
         f"font-family:{MONO_FONT_CSS}; font-size:{fs}px;"
-        f"selection-background-color:{ACCENT}; selection-color:{p['SELECTION_TEXT']}; }}"
+        f"selection-background-color:#7c5cff; selection-color:{p['SELECTION_TEXT']}; }}"
     )
 
 
@@ -484,7 +453,8 @@ def compact_combo_box_style(
     background: str | None = None,
     border_color: str | None = None,
     popup_background: str | None = None,
-    popup_item_padding: str = "6px 10px",
+    popup_item_padding: str = "2px 10px",
+    min_height: int | None = None,
     theme: str | None = None,
 ) -> str:
     theme_name = theme or current_theme()
@@ -504,6 +474,7 @@ def compact_combo_box_style(
             drop_down_width=drop_down_width,
             background=background,
             border_color=border_color,
+            min_height=min_height,
             theme=theme_name,
         )
         + combo_box_popup_style(
@@ -538,10 +509,8 @@ def user_reference_style(theme: str | None = None) -> str:
     theme_name = theme or current_theme()
     if theme_name == "light":
         fg, bg, border = "#0f3f94", "#e8f0ff", "#bfd2ff"
-    elif theme_name == "modern":
-        fg, bg, border = "#b9e4ff", "#172b3a", "#2f607d"
     else:
-        fg, bg, border = "#dbeafe", "#182847", "#2c4e86"
+        fg, bg, border = "#ded7ff", "#1e1838", "#4f3f95"
     return (
         f"color:{fg}; background:{bg}; border:1px solid {border};"
         "text-decoration:none; border-radius:5px; padding:1px 5px;"
@@ -552,7 +521,7 @@ def user_reference_style(theme: str | None = None) -> str:
 def composer_reference_colors() -> dict:
     if current_theme() == "light":
         return {"fg": "#0f3f94", "bg": "#e8f0ff"}
-    return {"fg": "#dbeafe", "bg": "#1c3154"}
+    return {"fg": "#ded7ff", "bg": "#21183d"}
 
 
 def surface_frame_style(
@@ -574,14 +543,8 @@ def surface_frame_style(
 
 def card_frame_style() -> str:
     p = palette()
-    bg = {
-        "dark": "#121720",
-        "modern": "#131a22",
-    }.get(current_theme(), p["BG3"])
-    border = {
-        "dark": "#202a34",
-        "modern": "#26313b",
-    }.get(current_theme(), p["BORDER"])
+    bg = "#141b25" if current_theme() == "dark" else p["BG3"]
+    border = "#293244" if current_theme() == "dark" else p["BORDER"]
     return surface_frame_style(bg=bg, border=border, border_radius=8)
 
 
@@ -711,10 +674,7 @@ def tool_notice_style() -> str:
 
 def separator_color() -> str:
     p = palette()
-    return {
-        "dark": "#1a1d23",
-        "modern": "#202832",
-    }.get(current_theme(), p["BORDER_SUBTLE"])
+    return "#1b2432" if current_theme() == "dark" else p["BORDER_SUBTLE"]
 
 
 def separator_frame_style(
@@ -808,7 +768,7 @@ def secondary_button_style(
 
 
 def send_button_style() -> str:
-    return _composer_action_button_style(ACCENT_DIM, ACCENT, "#2f5fb8", ACCENT_SOFT_DARK, "#8daee8")
+    return _composer_action_button_style(ACCENT_DIM, ACCENT, "#4c35b8", ACCENT_SOFT_DARK, "#b9aeff")
 
 
 def stop_button_style() -> str:
@@ -838,7 +798,7 @@ def _composer_action_button_style(
 
 def floating_button_style() -> str:
     meta = meta_font_pt()
-    return _pill_button_style(ACCENT, ACCENT_HOVER, ACCENT_DIM, ACCENT_DIM, "#9bb8e8").replace(
+    return _pill_button_style(ACCENT, ACCENT_HOVER, ACCENT_DIM, ACCENT_DIM, "#b9aeff").replace(
         f"font-size:{max(12, chat_font_pt())}px;",
         f"font-size:{max(14, meta + 2)}px;",
     )
@@ -850,7 +810,7 @@ def new_chat_button_style(theme: str | None = None) -> str:
     fs = conversation_caption_pt()
     soft = ACCENT_SOFT_LIGHT if theme_name == "light" else ACCENT_SOFT_DARK
     hover_bg = p["SELECTION"]
-    hover_fg = ACCENT_DIM if theme_name == "light" else "#dbeafe"
+    hover_fg = ACCENT_DIM if theme_name == "light" else "#f1edff"
     return (
         f"QPushButton {{ background:{soft}; color:{ACCENT}; border:none;"
         f"border-radius:7px; margin:6px 10px 4px 10px; padding:5px 10px;"
@@ -1337,8 +1297,8 @@ def git_panel_section_label_style(theme: str | None = None) -> str:
 def conversation_list_style() -> str:
     """Conversation sidebar — compact rounded rows."""
     p = palette()
-    sel = "#1d2d4d" if current_theme() != "light" else list_selection_bg()
-    hover = "#171b24" if current_theme() != "light" else p["BG3"]
+    sel = p["SELECTION"]
+    hover = "#17202d" if current_theme() != "light" else p["BG3"]
     return _flat_list_style(
         item_padding="0px 0px",
         item_radius=5,
@@ -1597,8 +1557,8 @@ def files_header_style() -> str:
 def search_field_style() -> str:
     p = palette()
     fs = max(12, chat_font_pt() - 1)
-    bg = "#151922" if current_theme() != "light" else p["INPUT_BG"]
-    border = "#202a34" if current_theme() != "light" else p["BORDER_SUBTLE"]
+    bg = "#171f2b" if current_theme() != "light" else p["INPUT_BG"]
+    border = "#283244" if current_theme() != "light" else p["BORDER_SUBTLE"]
     return (
         f"QLineEdit {{ background:{bg}; color:{p['TEXT']};"
         f"border:1px solid {border}; border-radius:{SEARCH_FIELD_BORDER_RADIUS}px;"
@@ -1738,7 +1698,7 @@ def tone_badge_button_style(
         "success": (p["SUCCESS_BG"], p["SUCCESS"], p["SUCCESS_BORDER"]),
         "danger": ("#35191d", "#f87171", "#5f252d"),
         "warning": ("#32260f", "#fbbf24", "#5a4319"),
-        "accent": ("#172341", ACCENT, "#2d477c"),
+        "accent": (ACCENT_SOFT_DARK, ACCENT, "#4f3f95"),
     }
     bg, fg, border = colors.get(tone, (p["BG3"], p["TEXT_DIM"], p["BORDER"]))
     return (
@@ -1761,7 +1721,7 @@ def canvas_pill_style(
         "ready": (p["SUCCESS_BG"], p["SUCCESS"], p["SUCCESS_BORDER"]),
         "blocked": ("#35191d", "#f87171", "#5f252d"),
         "verify": ("#32260f", "#fbbf24", "#5a4319"),
-        "accent": ("#172341", ACCENT, "#2d477c"),
+        "accent": (ACCENT_SOFT_DARK, ACCENT, "#4f3f95"),
     }
     bg, fg, border = colors.get(tone, (p["BG3"], p["TEXT_DIM"], p["BORDER"]))
     return (
@@ -1825,7 +1785,7 @@ def agent_canvas_style(theme: str | None = None) -> str:
         f" font-size:{meta_font_pt()}px; background:transparent; }}"
         f"QTextEdit#canvasGraphChatTranscript {{ background:{p['BG']}; color:{p['TEXT']};"
         f" border:1px solid {p['BORDER_SUBTLE']}; border-radius:6px;"
-        " padding:8px 10px; selection-background-color:#3a6fd4; }"
+        " padding:8px 10px; selection-background-color:#7c5cff; }"
         f"QPushButton#canvasGraphChatBottom {{ background:{p['BG2']}; color:{p['TEXT']};"
         f" border:1px solid {p['BORDER']}; border-radius:15px;"
         " font-weight:700; padding:0; }"
@@ -1833,7 +1793,7 @@ def agent_canvas_style(theme: str | None = None) -> str:
         f" background:{p['BG3']}; }}"
         f"QLineEdit#canvasGraphChatInput {{ background:{p['BG']}; color:{p['TEXT']};"
         f" border:1px solid {p['BORDER']}; border-radius:6px;"
-        " padding:8px 10px; selection-background-color:#3a6fd4; }"
+        " padding:8px 10px; selection-background-color:#7c5cff; }"
         f"QLineEdit#canvasGraphChatInput:focus {{ border:1px solid {ACCENT}; }}"
         f"QLabel#canvasPanelTitle {{ color:{p['TEXT']}; font-size:{chat_font_pt()}px;"
         " font-weight:650; background:transparent; }"
@@ -1853,7 +1813,7 @@ def agent_canvas_style(theme: str | None = None) -> str:
         f"QLineEdit#canvasInspectorField, QTextEdit#canvasInspectorText,"
         f" QComboBox#canvasInspectorCombo {{ background:{p['BG']}; color:{p['TEXT']};"
         f" border:1px solid {p['BORDER']}; border-radius:6px;"
-        " padding:7px 8px; selection-background-color:#3a6fd4; }"
+        " padding:7px 8px; selection-background-color:#7c5cff; }"
         f"QTextEdit#canvasInspectorText {{ min-height:112px; }}"
         f"QComboBox#canvasInspectorCombo::drop-down {{ border:0; width:22px; }}"
     )
@@ -1920,7 +1880,7 @@ def graph_question_dialog_style(theme: str | None = None) -> str:
         f"QRadioButton#graphQuestionChoice:hover, QCheckBox#graphQuestionChoice:hover {{"
         f" background:{p['BG3']}; border-color:{p['BORDER']}; }} "
         f"QRadioButton#graphQuestionChoice:checked, QCheckBox#graphQuestionChoice:checked {{"
-        " background:#102033; border-color:#315fbd; border-left-color: #67e8f9; color:#f8fbff; } "
+        f" background:{ACCENT_SOFT_DARK}; border-color:{ACCENT}; border-left-color:{ACCENT_HOVER}; color:#f8fbff; }} "
         "QRadioButton#graphQuestionChoice::indicator,"
         " QCheckBox#graphQuestionChoice::indicator { width:14px; height:14px; }"
         f"QRadioButton#graphQuestionChoice::indicator:unchecked,"
@@ -1931,7 +1891,7 @@ def graph_question_dialog_style(theme: str | None = None) -> str:
         f" border:1px solid {ACCENT}; background:{ACCENT}; border-radius:7px; }} "
         f"QTextEdit#graphQuestionOther {{ background:{p['BG']}; color:{p['TEXT']};"
         f" border:1px solid {p['BORDER']}; border-radius:7px; padding:8px;"
-        " selection-background-color:#315fbd; } "
+        " selection-background-color:#7c5cff; } "
         f"QTextEdit#graphQuestionOther:disabled {{ background:transparent;"
         f" color:{p['TEXT_DIM']}; border-color:transparent; }} "
         "QDialog#graphQuestionDialog QDialogButtonBox QPushButton {"
@@ -2010,16 +1970,23 @@ def extension_panel_heading_style(*, tone: str = "") -> str:
 
 COMBO_POPUP_MIN_VISIBLE_ROWS = 4
 COMBO_POPUP_MAX_VISIBLE_ROWS = 10
-COMBO_POPUP_VIEW_PADDING = 6
-COMBO_POPUP_MIN_ROW_HEIGHT = 36
+COMBO_POPUP_VIEW_PADDING = 4
+COMBO_POPUP_MIN_ROW_HEIGHT = 24
 
 
 def combo_popup_item_hover_bg(theme: str | None = None) -> str:
-    """Lift hover rows above the popup surface (BG3), not darken them."""
+    """Clearly mark the row under the pointer in combo popups."""
     p = palette(theme)
     if (theme or current_theme()) == "light":
         return p["BG2"]
-    return p["BORDER"]
+    return "#5b45d6"
+
+
+def combo_popup_item_selected_bg(theme: str | None = None) -> str:
+    p = palette(theme)
+    if (theme or current_theme()) == "light":
+        return p["SELECTION"]
+    return "#6046d9"
 
 
 def combo_popup_visible_row_count(
@@ -2039,14 +2006,114 @@ def _combo_popup_item_row_height(view, *, font_pt: int | None = None) -> int:
     from PyQt6.QtWidgets import QAbstractItemView
 
     fs = font_pt or chat_font_pt()
-    fallback = max(COMBO_POPUP_MIN_ROW_HEIGHT, fs + 22)
+    fallback = max(22, fs + 10)
     if not isinstance(view, QAbstractItemView):
         return fallback
     hinted = view.sizeHintForRow(0)
     if hinted > 0:
-        return max(hinted, fallback)
+        return hinted
     metrics = view.fontMetrics()
-    return max(fallback, metrics.height() + 18)
+    return max(fallback, metrics.height() + 6)
+
+
+class ComboPopupItemDelegate:
+    """Paint combo popup rows directly; QSS hover is unreliable for combo views."""
+
+    _delegate_cls = None
+
+    @classmethod
+    def create(cls, parent=None):
+        if cls._delegate_cls is None:
+            from PyQt6.QtCore import QSize
+            from PyQt6.QtGui import QColor, QPalette
+            from PyQt6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem, QStyledItemDelegate
+
+            class _Delegate(QStyledItemDelegate):
+                def _theme_name(self) -> str:
+                    parent_obj = self.parent()
+                    if parent_obj is not None:
+                        theme_name = parent_obj.property("aichsThemeName")
+                        if theme_name:
+                            return str(theme_name)
+                    app = QApplication.instance()
+                    if app is not None:
+                        theme_name = app.property("aichsThemeName")
+                        if theme_name:
+                            return str(theme_name)
+                    return current_theme()
+
+                def paint(self, painter, option, index):
+                    opt = QStyleOptionViewItem(option)
+                    self.initStyleOption(opt, index)
+                    theme_name = self._theme_name()
+                    p = palette(theme_name)
+                    hovered = bool(opt.state & QStyle.StateFlag.State_MouseOver)
+                    selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+                    active = hovered or selected
+                    if active:
+                        fill = combo_popup_item_hover_bg(theme_name) if hovered else combo_popup_item_selected_bg(theme_name)
+                        painter.save()
+                        painter.fillRect(opt.rect, QColor(fill))
+                        painter.restore()
+                    opt.state &= ~QStyle.StateFlag.State_MouseOver
+                    opt.state &= ~QStyle.StateFlag.State_Selected
+                    text_color = QColor(p["SELECTION_TEXT"] if active else p["TEXT"])
+                    surface = QColor(p["BG3"])
+                    opt.palette.setColor(QPalette.ColorRole.Text, text_color)
+                    opt.palette.setColor(QPalette.ColorRole.WindowText, text_color)
+                    opt.palette.setColor(QPalette.ColorRole.HighlightedText, text_color)
+                    opt.palette.setColor(QPalette.ColorRole.Base, surface)
+                    opt.palette.setColor(QPalette.ColorRole.Window, surface)
+                    super().paint(painter, opt, index)
+
+                def sizeHint(self, option, index):
+                    size = super().sizeHint(option, index)
+                    return QSize(size.width(), max(size.height(), COMBO_POPUP_MIN_ROW_HEIGHT))
+
+            cls._delegate_cls = _Delegate
+        return cls._delegate_cls(parent)
+
+
+def install_combo_popup_delegate(view, theme: str | None = None) -> None:
+    from PyQt6.QtWidgets import QAbstractItemView
+
+    if not isinstance(view, QAbstractItemView):
+        return
+    view.setProperty("aichsThemeName", theme or current_theme())
+    delegate = view.itemDelegate()
+    if delegate is None or delegate.objectName() != "aichsComboPopupDelegate":
+        delegate = ComboPopupItemDelegate.create(view)
+        delegate.setObjectName("aichsComboPopupDelegate")
+        view.setItemDelegate(delegate)
+    view.setProperty("aichsComboPopupDelegateInstalled", True)
+    view.setMouseTracking(True)
+    if view.viewport() is not None:
+        view.viewport().setMouseTracking(True)
+        view.viewport().update()
+
+
+def configure_combo_box_popup(combo, theme: str | None = None) -> None:
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QComboBox, QFrame, QListView
+
+    if not isinstance(combo, QComboBox):
+        return
+    theme_name = theme or current_theme()
+    if not combo.property("aichsComboPopupViewInstalled"):
+        combo.setView(QListView(combo))
+        combo.setProperty("aichsComboPopupViewInstalled", True)
+    view = combo.view()
+    if view is None:
+        return
+    view.setObjectName("comboPopupView")
+    view.setFrameShape(QFrame.Shape.NoFrame)
+    view.setLineWidth(0)
+    view.setMidLineWidth(0)
+    view.setContentsMargins(0, 0, 0, 0)
+    view.setViewportMargins(0, COMBO_POPUP_VIEW_PADDING, 0, COMBO_POPUP_VIEW_PADDING)
+    view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    view.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
+    install_combo_popup_delegate(view, theme_name)
 
 
 def resize_combo_popup_container(
@@ -2068,49 +2135,59 @@ def resize_combo_popup_container(
     if visible <= 0:
         return
 
+    view.setMouseTracking(True)
+    if view.viewport() is not None:
+        view.viewport().setMouseTracking(True)
+
     row_h = _combo_popup_item_row_height(view, font_pt=font_pt)
     list_h = visible * row_h
-    chrome = view_padding * 2
+    chrome = view_padding * 2 + 2
     height = list_h + chrome
 
-    view.setMinimumHeight(list_h)
-    view.setMaximumHeight(list_h if count > visible else 16777215)
+    view.setViewportMargins(0, view_padding, 0, view_padding)
+    view.setMinimumHeight(height)
+    view.setMaximumHeight(height)
     container.setMinimumHeight(height)
+    container.setMaximumHeight(height)
     container.resize(container.width(), height)
+    view.setGeometry(0, 0, container.width(), height)
 
 
 def combo_box_popup_style(
     theme: str | None = None,
     *,
     bg: str | None = None,
-    border_radius: int = 8,
+    border_radius: int = 10,
     font_pt: int | None = None,
-    view_padding: int = 6,
-    item_padding: str = "5px 10px",
+    view_padding: int = COMBO_POPUP_VIEW_PADDING,
+    item_padding: str = "2px 10px",
 ) -> str:
     p = palette(theme)
     surface = bg or p["BG3"]
     fs = font_pt or chat_font_pt()
-    min_height = max(24, fs + 8)
+    min_height = max(20, fs + 4)
     hover = combo_popup_item_hover_bg(theme)
+    selected = combo_popup_item_selected_bg(theme)
     return (
-        f"QComboBoxPrivateContainer {{ background:{surface}; border:none;"
-        f"margin:0; padding:{view_padding}px; outline:none; }}"
-        f"QComboBoxPrivateContainer QWidget {{ background:{surface}; border:none; }}"
+        "QComboBoxPrivateContainer { background:transparent; border:none;"
+        "margin:0; padding:0; outline:none; }"
+        "QComboBoxPrivateContainer QWidget { background:transparent; border:none; margin:0; padding:0; }"
         f"QComboBox QAbstractItemView, QComboBox QListView {{ "
         f"background:{surface}; alternate-background-color:{surface};"
         f"color:{p['TEXT']}; border:1px solid {p['BORDER']};"
         f"border-radius:{border_radius}px; outline:none; margin:0;"
-        f"padding:{view_padding}px;"
+        "padding:0;"
         f"selection-background-color:{p['SELECTION']};"
         f"selection-color:{p['SELECTION_TEXT']}; font-size:{fs}px; }}"
         f"QComboBox QAbstractItemView::item, QComboBox QListView::item {{ "
-        f"background:{surface}; color:{p['TEXT']}; padding:{item_padding};"
-        f"min-height:{min_height}px; border:none; border-radius:4px; }}"
+        f"background:transparent; color:{p['TEXT']}; padding:{item_padding};"
+        f"min-height:{min_height}px; border:none; border-radius:0; }}"
+        f"QComboBoxPrivateContainer QListView::item:hover, "
         f"QComboBox QAbstractItemView::item:hover, QComboBox QListView::item:hover {{ "
         f"background:{hover}; color:{p['TEXT']}; }}"
+        f"QComboBoxPrivateContainer QListView::item:selected, "
         f"QComboBox QAbstractItemView::item:selected, QComboBox QListView::item:selected {{ "
-        f"background:{p['SELECTION']}; color:{p['SELECTION_TEXT']}; }}"
+        f"background:{selected}; color:{p['SELECTION_TEXT']}; }}"
         f"QComboBoxPrivateContainer QListView::indicator, "
         f"QComboBox QAbstractItemView::indicator {{ width:0; height:0; border:none;"
         f"background:transparent; margin:0; padding:0; }}"
@@ -2121,36 +2198,68 @@ def combo_box_popup_container_style(
     theme: str | None = None,
     *,
     bg: str | None = None,
-    border_radius: int = 8,
+    border_radius: int = 10,
     font_pt: int | None = None,
-    view_padding: int = 6,
-    item_padding: str = "5px 10px",
+    view_padding: int = COMBO_POPUP_VIEW_PADDING,
+    item_padding: str = "2px 10px",
 ) -> str:
     """Stylesheet applied directly to QComboBoxPrivateContainer when the popup opens."""
     p = palette(theme)
     surface = bg or p["BG3"]
     fs = font_pt or chat_font_pt()
-    min_height = max(24, fs + 8)
+    min_height = max(20, fs + 4)
     hover = combo_popup_item_hover_bg(theme)
+    selected = combo_popup_item_selected_bg(theme)
     return (
-        f"background:{surface}; color:{p['TEXT']};"
-        f"border:1px solid {p['BORDER']}; border-radius:{border_radius}px;"
-        f"margin:0; padding:{view_padding}px; outline:none;"
-        f"QWidget {{ background:transparent; border:none; }}"
+        f"background:transparent; color:{p['TEXT']}; border:none; margin:0; padding:0; outline:none;"
+        "QFrame, QWidget { background:transparent; border:none; margin:0; padding:0; }"
         f"QListView, QAbstractItemView {{ "
-        f"background:{surface}; color:{p['TEXT']}; border:none; outline:none;"
-        f"margin:0; padding:0; font-size:{fs}px;"
-        f"selection-background-color:{p['SELECTION']};"
+        f"background:{surface}; color:{p['TEXT']}; border:1px solid {p['BORDER']};"
+        f"border-radius:{border_radius}px; outline:none; margin:0; padding:0; font-size:{fs}px;"
+        f"selection-background-color:{selected};"
         f"selection-color:{p['SELECTION_TEXT']}; }}"
         f"QListView::item, QAbstractItemView::item {{ "
         f"background:transparent; color:{p['TEXT']}; padding:{item_padding};"
-        f"min-height:{min_height}px; border:none; border-radius:4px; }}"
+        f"min-height:{min_height}px; border:none; border-radius:0; }}"
+        f"QComboBoxPrivateContainer QListView::item:hover, "
         f"QListView::item:hover, QAbstractItemView::item:hover {{ "
         f"background:{hover}; color:{p['TEXT']}; }}"
+        f"QComboBoxPrivateContainer QListView::item:selected, "
         f"QListView::item:selected, QAbstractItemView::item:selected {{ "
-        f"background:{p['SELECTION']}; color:{p['SELECTION_TEXT']}; }}"
+        f"background:{selected}; color:{p['SELECTION_TEXT']}; }}"
         f"QListView::indicator, QAbstractItemView::indicator {{ width:0; height:0;"
         f"border:none; background:transparent; margin:0; padding:0; }}"
+    )
+
+
+def combo_box_popup_view_style(
+    theme: str | None = None,
+    *,
+    bg: str | None = None,
+    border_radius: int = 10,
+    font_pt: int | None = None,
+    view_padding: int = COMBO_POPUP_VIEW_PADDING,
+    item_padding: str = "2px 10px",
+) -> str:
+    """Stylesheet applied directly to the popup QListView to avoid native fallback painting."""
+    p = palette(theme)
+    surface = bg or p["BG3"]
+    fs = font_pt or chat_font_pt()
+    min_height = max(20, fs + 4)
+    hover = combo_popup_item_hover_bg(theme)
+    selected = combo_popup_item_selected_bg(theme)
+    return (
+        f"QListView, QAbstractItemView {{ background:{surface}; color:{p['TEXT']};"
+        f"border:1px solid {p['BORDER']}; border-radius:{border_radius}px;"
+        f"outline:none; margin:0; padding:0; font-size:{fs}px;"
+        f"selection-background-color:{selected}; selection-color:{p['SELECTION_TEXT']}; }} "
+        f"QListView::item, QAbstractItemView::item {{ background:transparent;"
+        f"color:{p['TEXT']}; padding:{item_padding}; min-height:{min_height}px;"
+        "border:none; border-radius:0; } "
+        f"QListView::item:hover, QAbstractItemView::item:hover {{ background:{hover}; color:{p['TEXT']}; }} "
+        f"QListView::item:selected, QAbstractItemView::item:selected {{ background:{selected}; color:{p['SELECTION_TEXT']}; }} "
+        "QListView::indicator, QAbstractItemView::indicator { width:0; height:0;"
+        "border:none; background:transparent; margin:0; padding:0; }"
     )
 
 
@@ -2203,6 +2312,40 @@ def compaction_threshold_pct() -> int:
         pct = DEFAULT_COMPACTION_THRESHOLD_PCT
     return max(60, min(95, pct))
 
+
+
+
+
+def window_chrome_frame_style(theme: str | None = None) -> str:
+    p = palette(theme)
+    return (
+        "QWidget#windowChromeFrame { background:%s; border:1px solid %s; "
+        "border-radius:8px; }"
+        "QWidget#windowChromeContent { background:%s; border:none; "
+        "border-bottom-left-radius:8px; border-bottom-right-radius:8px; }"
+    ) % (p["BG"], p["BORDER_SUBTLE"], p["BG"])
+
+def window_chrome_style(theme: str | None = None) -> str:
+    p = palette(theme)
+    fs = max(11, chat_font_pt() - 2)
+    return (
+        "QWidget#windowChrome { background: %s; border-bottom: 1px solid %s; }"
+        "QWidget#windowChromeIcon { background: transparent; }"
+        "QLabel#windowChromeTitle { background: transparent; color: %s; "
+        "font-size: %dpx; font-weight: 500; }"
+    ) % (p["BG"], p["BORDER"], p["TEXT_DIM"], fs)
+
+
+def window_chrome_button_style(*, role: str = "", theme: str | None = None) -> str:
+    p = palette(theme)
+    hover_bg = "#c42b1c" if role == "close" else p["BG3"]
+    hover_fg = "#ffffff" if role == "close" else p["TEXT"]
+    return (
+        "QPushButton { background: transparent; color: %s; border: none; "
+        "border-radius: 0px; padding: 0px; }"
+        "QPushButton:hover { background: %s; color: %s; }"
+        "QPushButton:pressed { background: %s; color: %s; }"
+    ) % (p["TEXT_DIM"], hover_bg, hover_fg, p["BG2"], hover_fg)
 
 def build_stylesheet(theme: str | None = None) -> str:
     p = palette(theme)
@@ -2292,7 +2435,7 @@ def bubble_label_style(
     p = palette()
     fs = font_pt or chat_font_pt()
     if is_user:
-        user_bg = "#3f73d8" if current_theme() != "light" else ACCENT_DIM
+        user_bg = ACCENT if current_theme() != "light" else ACCENT_DIM
         return (
             f"background:{user_bg}; color:white; padding:8px 14px;"
             f"border-radius:16px; font-size:{fs}px; line-height:1.45;"
@@ -2319,7 +2462,7 @@ def composer_style(font_pt: int | None = None) -> str:
     return (
         f"QTextEdit {{ background:transparent; color:{p['INPUT_TEXT']}; border:none;"
         f"padding:4px 0; font-size:{fs}px; font-family:{FONT_FAMILY};"
-        f"selection-background-color:{ACCENT}; placeholder-text-color:{p['TEXT_DIM']}; }}"
+        f"selection-background-color:#7c5cff; placeholder-text-color:{p['TEXT_DIM']}; }}"
         f"QTextEdit:focus {{ border:none; }}"
     )
 
@@ -2327,18 +2470,9 @@ def composer_style(font_pt: int | None = None) -> str:
 def composer_shell_style() -> str:
     p = palette()
     theme = current_theme()
-    shell_bg = {
-        "dark": "#12161d",
-        "modern": "#121820",
-    }.get(theme, p["INPUT_BG"])
-    shell_border = {
-        "dark": "#27313b",
-        "modern": "#2c3742",
-    }.get(theme, p["BORDER"])
-    shell_focus = {
-        "dark": "#385fba",
-        "modern": "#3b6cc5",
-    }.get(theme, ACCENT_DIM)
+    shell_bg = "#141b25" if theme == "dark" else p["INPUT_BG"]
+    shell_border = "#2b3547" if theme == "dark" else p["BORDER"]
+    shell_focus = ACCENT_DIM
     return (
         f"QFrame#composerShell {{ background:{shell_bg};"
         f"border:1px solid {shell_border}; border-radius:9px; }}"
@@ -2356,7 +2490,9 @@ def edit_bubble_style(font_pt: int | None = None) -> str:
 
 
 def _install_combo_popup_filter(app) -> None:
-    from PyQt6.QtCore import QEvent, QObject, QTimer
+    from PyQt6.QtCore import QEvent, QObject, QRectF, QTimer, Qt
+    from PyQt6.QtGui import QColor, QPainterPath, QPalette, QRegion
+    from PyQt6.QtWidgets import QAbstractItemView, QFrame, QListView, QWidget
 
     if not hasattr(app, "installEventFilter"):
         return
@@ -2369,11 +2505,66 @@ def _install_combo_popup_filter(app) -> None:
                 return False
             if obj.metaObject().className() != "QComboBoxPrivateContainer":
                 return False
-            obj.setStyleSheet(combo_box_popup_container_style(current_theme()))
+            obj.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            obj.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+            obj.setAutoFillBackground(False)
+            obj.setContentsMargins(0, 0, 0, 0)
+            theme_name = app.property("aichsThemeName") or current_theme()
+            p = palette(theme_name)
+            surface = p["BG3"]
+            pal = obj.palette()
+            color = QColor(surface)
+            pal.setColor(QPalette.ColorRole.Window, color)
+            pal.setColor(QPalette.ColorRole.Base, color)
+            obj.setPalette(pal)
+            obj.setStyleSheet(combo_box_popup_container_style(theme_name))
 
-            def _fit(container=obj):
+            def _fit(container=obj, popup_theme=theme_name, repeat=True):
+                for child in container.findChildren(QWidget):
+                    if child.metaObject().className() == "QComboBoxPrivateScroller":
+                        child.hide()
+                        child.setFixedSize(0, 0)
+                        child.setStyleSheet("background:transparent; border:none; margin:0; padding:0;")
+                if container.layout() is not None:
+                    container.layout().setEnabled(False)
+                    container.layout().setContentsMargins(0, 0, 0, 0)
+                    container.layout().setSpacing(0)
+                view = container.findChild(QListView) or container.findChild(QAbstractItemView)
+                if view is not None:
+                    p = palette(popup_theme)
+                    surface = p["BG3"]
+                    color = QColor(surface)
+                    view.setFrameShape(QFrame.Shape.NoFrame)
+                    view.setLineWidth(0)
+                    view.setMidLineWidth(0)
+                    view.setContentsMargins(0, 0, 0, 0)
+                    view.setViewportMargins(0, COMBO_POPUP_VIEW_PADDING, 0, COMBO_POPUP_VIEW_PADDING)
+                    view.setAutoFillBackground(True)
+                    view_pal = view.palette()
+                    view_pal.setColor(QPalette.ColorRole.Window, color)
+                    view_pal.setColor(QPalette.ColorRole.Base, color)
+                    view_pal.setColor(QPalette.ColorRole.Highlight, QColor(combo_popup_item_selected_bg(popup_theme)))
+                    view_pal.setColor(QPalette.ColorRole.HighlightedText, QColor(p["SELECTION_TEXT"]))
+                    view.setPalette(view_pal)
+                    view.setStyleSheet(combo_box_popup_view_style(popup_theme))
+                    install_combo_popup_delegate(view, str(popup_theme))
+                    if view.viewport() is not None:
+                        view.viewport().setAutoFillBackground(True)
+                        view.viewport().setContentsMargins(0, 0, 0, 0)
+                        viewport_pal = view.viewport().palette()
+                        viewport_pal.setColor(QPalette.ColorRole.Window, color)
+                        viewport_pal.setColor(QPalette.ColorRole.Base, color)
+                        viewport_pal.setColor(QPalette.ColorRole.Highlight, QColor(combo_popup_item_selected_bg(popup_theme)))
+                        viewport_pal.setColor(QPalette.ColorRole.HighlightedText, QColor(p["SELECTION_TEXT"]))
+                        view.viewport().setPalette(viewport_pal)
+                        view.viewport().setStyleSheet(f"background:{surface}; border:none;")
                 resize_combo_popup_container(container)
+                path = QPainterPath()
+                path.addRoundedRect(QRectF(container.rect()), 10, 10)
+                container.setMask(QRegion(path.toFillPolygon().toPolygon()))
                 container.updateGeometry()
+                if repeat:
+                    QTimer.singleShot(0, lambda: _fit(container, popup_theme, False))
 
             QTimer.singleShot(0, _fit)
             return False
@@ -2388,6 +2579,7 @@ def apply_app_theme(app, theme: str | None = None) -> None:
     _install_combo_popup_filter(app)
 
     theme_name = theme or current_theme()
+    app.setProperty("aichsThemeName", theme_name)
     font = app_font()
     theme_key = f"{theme_name}:{font.family()}:{font.pointSize()}"
     cached_sheet = app.property("aichsThemeStyleSheet")
@@ -2396,17 +2588,27 @@ def apply_app_theme(app, theme: str | None = None) -> None:
         current_font.family() == font.family()
         and current_font.pointSize() == font.pointSize()
     )
-    if (
+    stylesheet_changed = (
         app.property("aichsThemeKey") != theme_key
         or not font_matches
         or not cached_sheet
         or app.styleSheet() != cached_sheet
-    ):
+    )
+    if stylesheet_changed:
         sheet = build_stylesheet(theme_name)
         app.setFont(font)
         app.setStyleSheet(sheet)
         app.setProperty("aichsThemeKey", theme_key)
         app.setProperty("aichsThemeStyleSheet", sheet)
+        if hasattr(app, "allWidgets"):
+            try:
+                from PyQt6.QtWidgets import QComboBox
+
+                for widget in app.allWidgets():
+                    if isinstance(widget, QComboBox):
+                        configure_combo_box_popup(widget, theme_name)
+            except RuntimeError:
+                pass
     install_caption_sync(app)
     sync_all_windows_captions(app, theme_name)
 

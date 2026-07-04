@@ -85,11 +85,11 @@ def test_chat_thread_exposes_allowed_extra_tools(workspace, qapp):
         tool["function"]["name"] for tool in thread._tools_openai()
     } == {"read_graph"}
     calls = []
-    thread.tool_called.connect(lambda name, inputs: calls.append((name, inputs)))
+    thread.tool_called.connect(lambda tool_id, name, inputs: calls.append((tool_id, name, inputs)))
     _tool_id, name, output = thread._execute_one("tool-1", "read_graph", {"x": 1})
     assert name == "read_graph"
     assert '"name": "read_graph"' in output
-    assert calls == [("read_graph", {"x": 1})]
+    assert calls == [("tool-1", "read_graph", {"x": 1})]
 
 
 def test_chat_thread_filters_extension_tools_by_surface(workspace, qapp):
@@ -373,17 +373,19 @@ def test_execute_ask_crew_archivist_uses_memory_lookup_without_model(workspace, 
     thread = ChatThread("claude-sonnet-4-6", [], "sys", str(workspace))
     tool_calls = []
     done = []
-    thread.tool_called.connect(lambda name, inputs: tool_calls.append((name, inputs)))
+    thread.tool_called.connect(lambda tool_id, name, inputs: tool_calls.append((tool_id, name, inputs)))
     thread.crew_done.connect(lambda meta, text: done.append((meta, text)))
 
     with patch.object(ChatThread, "_loop_anthropic", side_effect=AssertionError("no model")):
         output = thread._execute_ask_crew({"member": "archivist", "task": "playwright"})
 
     assert output.startswith("Archivist:")
-    assert tool_calls == [
+    assert [(name, inputs) for _tool_id, name, inputs in tool_calls] == [
         ("read_project_memory", {"query": "playwright"}),
         ("search_project_chats", {"query": "playwright"}),
     ]
+    assert tool_calls[0][0].startswith("crew-memory-")
+    assert tool_calls[1][0].startswith("crew-chats-")
     assert "Project memory:" in output
     assert "Project chat history:" in output
     assert done[0][0]["id"] == "archivist"
