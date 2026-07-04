@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import re
 
+from config import MAX_STORED_TERMINAL_OUTPUT_CHARS
+
 TERMINAL_REF_NAME = "term"
 TERMINAL_REF_MIME = "application/x-aichs-terminal-ref"
 MAX_TERMINAL_REF_LINES = 400
-_TERMINAL_REF_RE = re.compile(r"!term\[(\d*)\s*(?::\s*(\d*))?\]")
+_TERMINAL_REF_RE = re.compile(r"(?:!|@|#)term\[(\d*)\s*(?::\s*(\d*))?\]")
 
 
 def build_terminal_summary(result: dict) -> str:
@@ -32,8 +34,38 @@ def build_terminal_summary(result: dict) -> str:
     return "\n\n".join(parts)
 
 
+def retain_terminal_output_tail(
+    current: str,
+    chunk: str,
+    limit: int = MAX_STORED_TERMINAL_OUTPUT_CHARS,
+) -> tuple[str, bool]:
+    text = str(current or "") + str(chunk or "")
+    if limit <= 0:
+        return "", bool(text)
+    if len(text) <= limit:
+        return text, False
+    tail = text[-limit:]
+    newline = tail.find("\n")
+    if 0 <= newline < len(tail) - 1:
+        tail = tail[newline + 1 :]
+    return tail, True
+
+
 def terminal_ref(start: int, end: int) -> str:
-    return f"!{TERMINAL_REF_NAME}[{start}:{end}]"
+    return f"#{TERMINAL_REF_NAME}[{start}:{end}]"
+
+def normalize_terminal_ref(ref: str) -> str:
+    text = str(ref or "").strip()
+    match = _TERMINAL_REF_RE.fullmatch(text)
+    if not match:
+        return text
+    start, end = _parse_ref_range(match, 1_000_000_000)
+    return terminal_ref(start, end)
+
+
+def has_terminal_refs(text: str) -> bool:
+    return bool(_TERMINAL_REF_RE.search(str(text or "")))
+
 
 
 def expand_terminal_refs(text: str, previous_terminal_messages: list[dict]) -> str:

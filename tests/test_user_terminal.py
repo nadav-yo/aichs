@@ -57,7 +57,7 @@ def test_run_user_terminal_command_truncates(monkeypatch, workspace):
 
     result = run_user_terminal_command("noisy", str(workspace))
 
-    assert result["output"] == "abcde"
+    assert result["output"] == "more"
     assert result["line_count"] == 2
     assert result["truncated"] is True
 

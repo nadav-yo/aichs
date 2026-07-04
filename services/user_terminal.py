@@ -7,11 +7,12 @@ from typing import Callable
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from config import MAX_STORED_TERMINAL_OUTPUT_CHARS
 from services.subprocess_utils import popen_no_window
-from services.terminal_refs import build_terminal_summary
+from services.terminal_refs import build_terminal_summary, retain_terminal_output_tail
 from services.tools import _shell_command_args, _shell_env, _strip_ansi
 
-MAX_USER_TERMINAL_OUTPUT_CHARS = 5 * 1024 * 1024
+MAX_USER_TERMINAL_OUTPUT_CHARS = MAX_STORED_TERMINAL_OUTPUT_CHARS
 MAX_USER_TERMINAL_OUTPUT_LINES = 200_000
 
 
@@ -47,8 +48,7 @@ def run_user_terminal_command(
     cancel: threading.Event | None = None,
 ) -> dict:
     started = time.monotonic()
-    lines: list[str] = []
-    stored_chars = 0
+    output = ""
     line_count = 0
     truncated = False
     proc = None
@@ -77,25 +77,23 @@ def run_user_terminal_command(
             line_count += 1
             if on_line:
                 on_line(line.rstrip("\n"))
-            if (
-                len(lines) < MAX_USER_TERMINAL_OUTPUT_LINES
-                and stored_chars < MAX_USER_TERMINAL_OUTPUT_CHARS
-            ):
-                remaining = MAX_USER_TERMINAL_OUTPUT_CHARS - stored_chars
-                if len(line) > remaining:
-                    lines.append(line[:remaining])
-                    stored_chars = MAX_USER_TERMINAL_OUTPUT_CHARS
-                    truncated = True
-                else:
-                    lines.append(line)
-                    stored_chars += len(line)
-            else:
+            output, dropped = retain_terminal_output_tail(
+                output,
+                line,
+                MAX_USER_TERMINAL_OUTPUT_CHARS,
+            )
+            if dropped:
+                truncated = True
+            if len(output.splitlines()) > MAX_USER_TERMINAL_OUTPUT_LINES:
+                kept = output.splitlines(True)[-MAX_USER_TERMINAL_OUTPUT_LINES:]
+                output = "".join(kept)
                 truncated = True
         proc.wait(timeout=5)
         exit_code = int(proc.returncode or 0)
     except Exception as exc:
         message = f"[terminal error] {exc}\n"
-        lines.append(message)
+        output, dropped = retain_terminal_output_tail(output, message, MAX_USER_TERMINAL_OUTPUT_CHARS)
+        truncated = truncated or dropped
         line_count += 1
         if on_line:
             on_line(message.rstrip("\n"))
@@ -103,7 +101,7 @@ def run_user_terminal_command(
         if proc is not None and proc.poll() is None:
             proc.kill()
 
-    output = "".join(lines).rstrip()
+    output = output.rstrip()
     if cancel and cancel.is_set():
         output = (output + "\n[cancelled]").strip()
     return {

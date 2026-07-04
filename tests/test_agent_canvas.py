@@ -32,7 +32,7 @@ from tests.conftest import write_extension
 @pytest.fixture(autouse=True)
 def fast_app_theme(monkeypatch):
     monkeypatch.setattr("ui.main_window.apply_app_theme", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr("ui.widgets.agent_canvas.AgentCanvasPanel.apply_appearance", lambda self: None)
+    monkeypatch.setattr("ui.widgets.agent_canvas.AgentCanvasPanel.apply_appearance", lambda self, **_kwargs: None)
 
 
 @pytest.fixture

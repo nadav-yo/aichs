@@ -76,7 +76,7 @@ from ui.theme import (
 )
 from services.skills import Skill, load_all as load_skills
 from services.shell_tool import is_shell_tool
-from services.terminal_refs import terminal_ref
+from services.terminal_refs import expand_terminal_refs, has_terminal_refs, retain_terminal_output_tail, terminal_ref
 from services.user_terminal import UserTerminalThread
 from services.slash_commands import (
     load_all_commands,
@@ -89,6 +89,7 @@ from ui.widgets.message_input import ComposerWidget
 from ui.widgets.file_mention_picker import FileMentionPicker
 from ui.widgets.skill_picker import SkillPicker
 from ui.widgets.terminal_card import TerminalCard
+from ui.widgets.terminal_panel import IntegratedTerminalPanel
 from ui.widgets.context_ring import ContextRing
 from ui.widgets.context_breakdown import ContextBreakdownDialog
 from ui.widgets.extension_contributions import ExtensionContributionsBar
@@ -1565,6 +1566,7 @@ class ChatPanel(QWidget):
         self._runtimes: dict[str, _ConversationRuntime] = {}
         self._orphan_threads: list[QThread] = []
         self._user_terminal_threads: list[UserTerminalThread] = []
+        self._integrated_terminal_conv_id: str | None = None
         self._conversation_save_pool = QThreadPool(self)
         self._conversation_save_pool.setMaxThreadCount(1)
         self._conversation_load_pool = QThreadPool(self)
@@ -1694,6 +1696,15 @@ class ChatPanel(QWidget):
         )
         self._header_bar.addWidget(self._title_block, 1)
 
+        self.terminal_btn = QPushButton(">_")
+        self.terminal_btn.setFixedSize(38, 30)
+        self.terminal_btn.setCheckable(True)
+        self.terminal_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.terminal_btn.setToolTip("Toggle integrated terminal")
+        self.terminal_btn.clicked.connect(self._toggle_integrated_terminal)
+
+        self._header_bar.addWidget(self.terminal_btn)
+
         self.provider_combo = QComboBox()
         self.provider_combo.setObjectName("chatProviderCombo")
         self.provider_combo.setSizeAdjustPolicy(
@@ -1778,7 +1789,14 @@ class ChatPanel(QWidget):
         input_col.setContentsMargins(22, 8, 22, 10)
         input_col.setSpacing(6)
 
+        self._integrated_terminal = IntegratedTerminalPanel(self.cwd, self)
+        self._integrated_terminal.terminal_finished.connect(self._on_integrated_terminal_finished)
+        self._integrated_terminal.close_requested.connect(self._hide_integrated_terminal)
+        self._integrated_terminal.hide()
+        input_col.addWidget(self._integrated_terminal)
+
         self.composer = ComposerWidget()
+        self.composer.set_workspace(self.cwd)
         self.composer.send_requested.connect(self.send)
         self.composer.input.edit_last_requested.connect(self.edit_last_message)
 
@@ -1888,13 +1906,10 @@ class ChatPanel(QWidget):
         self._last_edit_path = ""
 
     def _release_thread(self, thread: QThread | None, *, cancel: bool = False):
-        """Disconnect UI and keep the QThread alive until it finishes."""
+        """Disconnect UI callbacks and keep the QThread alive until it finishes."""
         if thread is None:
             return
-        try:
-            thread.disconnect()
-        except TypeError:
-            pass
+        _disconnect_thread_signals(thread)
         if cancel and hasattr(thread, "cancel"):
             thread.cancel()
 
@@ -1974,6 +1989,11 @@ class ChatPanel(QWidget):
         self.stop_managed_processes()
         self.store = store
         self.cwd = cwd or os.getcwd()
+        self.composer.set_workspace(self.cwd)
+        self._integrated_terminal.terminate()
+        self._integrated_terminal.hide()
+        self.terminal_btn.setChecked(False)
+        self._integrated_terminal_conv_id = None
         self._invalidate_mention_files()
         for conv_id in list(self._runtimes):
             self._dispose_runtime(conv_id)
@@ -2162,6 +2182,8 @@ class ChatPanel(QWidget):
         self._skill_picker_pool.waitForDone(3000)
         self._context_budget_pool.waitForDone(3000)
         self.stop_managed_processes()
+        if hasattr(self, "_integrated_terminal"):
+            self._integrated_terminal.terminate()
 
     def set_focused_width(self, focused: bool):
         self._focused_width = False
@@ -2323,6 +2345,11 @@ class ChatPanel(QWidget):
             if hasattr(self.composer, "take_pasted_chat_refs")
             else []
         )
+        pasted_materials = (
+            self.composer.take_pasted_materials()
+            if hasattr(self.composer, "take_pasted_materials")
+            else []
+        )
 
         if text.startswith("!") and not images:
             if self._visible_run() or self._visible_compaction():
@@ -2399,13 +2426,17 @@ class ChatPanel(QWidget):
 
         file_refs = message_file_refs(text, pasted_file_refs)
 
+        terminal_snapshot = ChatPanel._terminal_snapshot_for_refs(self, text)
         draft = {
             "content": build_user_content(text, images, []),
             "title_text": text or "Image",
             "skill": self.composer.active_skill(),
             "crew": _first_summoned_crew(text, self._settings.load()),
             "chat_refs": pasted_chat_refs,
+            "pasted_materials": pasted_materials,
             "file_refs": file_refs,
+            "terminal_snapshot": terminal_snapshot,
+            "terminal_ref_context": _terminal_ref_context(getattr(self, "history", []), text, terminal_snapshot),
         }
 
         self.composer.clear()
@@ -2439,6 +2470,10 @@ class ChatPanel(QWidget):
 
         self._enter_streaming()
 
+        snapshot = draft.get("terminal_snapshot")
+        if snapshot and not _same_terminal_snapshot(self.history, snapshot):
+            self.history.append(snapshot)
+
         now = datetime.now().isoformat()
         user_msg = {"role": "user", "content": content, "created_at": now}
         if draft.get("synthetic"):
@@ -2456,6 +2491,22 @@ class ChatPanel(QWidget):
                 "synthetic": "chat_refs",
             })
             self._render_end_index = max(self._render_end_index, len(self.history))
+        pasted_material_context = _pasted_material_context(draft.get("pasted_materials"))
+        if pasted_material_context:
+            self.history.append({
+                "role": "user",
+                "content": pasted_material_context,
+                "synthetic": "pasted_material",
+            })
+            self._render_end_index = max(self._render_end_index, len(self.history))
+        terminal_ref_context = str(draft.get("terminal_ref_context") or "").strip()
+        if terminal_ref_context:
+            self.history.append({
+                "role": "user",
+                "content": terminal_ref_context,
+                "synthetic": "terminal_refs",
+            })
+            self._render_end_index = max(self._render_end_index, len(self.history))
         if draft.get("crew"):
             self._add_notice(_crew_notice_text(crew_metadata(draft["crew"], self._settings.load()), "joined"))
 
@@ -2469,6 +2520,52 @@ class ChatPanel(QWidget):
             deferred_file_target=user_idx,
         )
         self._pin_to_bottom()
+
+    def _terminal_snapshot_for_refs(self, text: str) -> dict | None:
+        if not has_terminal_refs(text):
+            return None
+        terminal = getattr(self, "_integrated_terminal", None)
+        if terminal is None or not terminal.is_running():
+            return None
+        session = terminal.active_session()
+        if session is None or not session.output_text():
+            return None
+        return _terminal_result_message(session.result())
+
+    def _toggle_integrated_terminal(self):
+        if not self._integrated_terminal.isHidden():
+            self._hide_integrated_terminal()
+            return
+        self._ensure_conversation("Terminal", self.model_combo.currentText())
+        self._integrated_terminal_conv_id = self.conv_id
+        self._integrated_terminal.show()
+        self.terminal_btn.setChecked(True)
+        self._integrated_terminal.start(self.cwd)
+        self._pin_to_bottom()
+
+    def _hide_integrated_terminal(self):
+        self._integrated_terminal.hide()
+        self.terminal_btn.setChecked(False)
+        self.composer.focus_input()
+
+    def _on_integrated_terminal_finished(self, result: dict):
+        conv_id = self._integrated_terminal_conv_id or self.conv_id
+        if not conv_id:
+            return
+        msg = _terminal_result_message(result)
+        if conv_id == self.conv_id:
+            self.history.append(msg)
+            self._add_terminal_result_card(msg)
+            self._save(touch_updated=True)
+            self._maybe_auto_title()
+            self._pin_to_bottom()
+            return
+        data = self.store.load_by_id(conv_id)
+        history = prepare_for_storage(data.get("messages", []))
+        history.append(msg)
+        data["messages"] = prepare_for_storage(history)
+        data["updated_at"] = msg["created_at"]
+        self._queue_conversation_save(conv_id, data)
 
     def _run_user_terminal_from_input(self, text: str):
         command = text[1:].strip()
@@ -3181,10 +3278,13 @@ class ChatPanel(QWidget):
         text = str(text or "").strip()
         if not text:
             return
+        terminal_snapshot = ChatPanel._terminal_snapshot_for_refs(self, text)
         draft = {
             "content": build_user_content(text, [], []),
             "title_text": text,
             "skill": None,
+            "terminal_snapshot": terminal_snapshot,
+            "terminal_ref_context": _terminal_ref_context(getattr(self, "history", []), text, terminal_snapshot),
         }
         if synthetic:
             draft["synthetic"] = synthetic
@@ -3435,23 +3535,7 @@ class ChatPanel(QWidget):
         if not conv_id:
             return
 
-        now = datetime.now().isoformat()
-        msg = {
-            "role": "assistant",
-            "content": str(result.get("summary") or ""),
-            "created_at": now,
-            "synthetic": "terminal_result",
-            "terminal": {
-                "command": str(result.get("command") or ""),
-                "cwd": str(result.get("cwd") or ""),
-                "exit_code": int(result.get("exit_code") or 0),
-                "duration_s": float(result.get("duration_s") or 0.0),
-                "line_count": int(result.get("line_count") or 0),
-                "stored_line_count": int(result.get("stored_line_count") or 0),
-                "truncated": bool(result.get("truncated")),
-                "output": str(result.get("output") or ""),
-            },
-        }
+        msg = _terminal_result_message(result)
 
         if conv_id == self.conv_id:
             self.history.append(msg)
@@ -3869,10 +3953,10 @@ class ChatPanel(QWidget):
         self._bottom()
         return card
 
-    def _add_terminal_result_card(self, msg: dict, *, at_top: bool = False) -> QWidget:
+    def _add_terminal_result_card(self, msg: dict, *, at_top: bool = False, collapsed: bool = False) -> QWidget:
         result = msg.get("terminal") if isinstance(msg.get("terminal"), dict) else {}
         card = TerminalCard()
-        card.set_output(str(result.get("output") or ""))
+        card.set_output(str(result.get("output") or ""), collapsed=collapsed)
         card.finish(
             int(result.get("exit_code") or 0),
             detail=_terminal_status_detail(result),
@@ -4257,6 +4341,8 @@ class ChatPanel(QWidget):
         self.jump_btn.setStyleSheet(floating_button_style())
         self.btn.setStyleSheet(send_button_style())
         self.stop_btn.setStyleSheet(stop_button_style())
+        self.terminal_btn.setStyleSheet(icon_button_style(30))
+        self._integrated_terminal.apply_appearance()
         self.context_ring.update()
         if hasattr(self, "_chat_nav"):
             self._chat_nav.apply_appearance()
@@ -4508,7 +4594,7 @@ class ChatPanel(QWidget):
     def _insert_history_bubble(self, history_index: int, *, at_top: bool = False):
         msg = self.history[history_index]
         if msg.get("synthetic") == "terminal_result":
-            widget = self._add_terminal_result_card(msg, at_top=at_top)
+            widget = self._add_terminal_result_card(msg, at_top=at_top, collapsed=True)
             self._track_history_widget(history_index, widget)
             return widget
         tool_records = _saved_tool_call_records(msg)
@@ -4846,6 +4932,10 @@ class ChatPanel(QWidget):
         data = copy.deepcopy(base_data)
         history = copy.deepcopy(data.get("messages", []))
         now = datetime.now().isoformat()
+        snapshot = draft.get("terminal_snapshot")
+        if snapshot and not _same_terminal_snapshot(history, snapshot):
+            history.append(snapshot)
+
         user_msg = {"role": "user", "content": draft["content"], "created_at": now}
         if draft.get("synthetic"):
             user_msg["synthetic"] = draft["synthetic"]
@@ -4856,6 +4946,20 @@ class ChatPanel(QWidget):
                 "role": "user",
                 "content": chat_ref_context,
                 "synthetic": "chat_refs",
+            })
+        pasted_material_context = _pasted_material_context(draft.get("pasted_materials"))
+        if pasted_material_context:
+            history.append({
+                "role": "user",
+                "content": pasted_material_context,
+                "synthetic": "pasted_material",
+            })
+        terminal_ref_context = str(draft.get("terminal_ref_context") or "").strip()
+        if terminal_ref_context:
+            history.append({
+                "role": "user",
+                "content": terminal_ref_context,
+                "synthetic": "terminal_refs",
             })
         data["messages"] = history
         data["updated_at"] = now
@@ -4872,7 +4976,7 @@ class ChatPanel(QWidget):
             crew=draft.get("crew"),
             visible=False,
             deferred_file_refs=draft.get("file_refs") or [],
-            deferred_file_target=len(history) - 1 - (1 if chat_ref_context else 0),
+            deferred_file_target=len(history) - 1 - sum(1 for value in (chat_ref_context, pasted_material_context, terminal_ref_context) if value),
         )
 
     def _next_queued_index_for_current_chat(self) -> int | None:
@@ -5023,6 +5127,75 @@ def _latest_regenerable_assistant_index(history: list[dict]) -> int:
     return idx if history[idx].get("role") == "assistant" else -1
 
 
+
+
+def _disconnect_thread_signals(thread: QThread | None) -> None:
+    if thread is None:
+        return
+    for name in (
+        "chunk",
+        "tool_called",
+        "bash_line",
+        "tool_result",
+        "crew_started",
+        "crew_chunk",
+        "crew_done",
+        "crew_error",
+        "runtime_event",
+        "history_updated",
+        "done",
+        "error",
+        "approval_required",
+        "usage",
+        "finished",
+    ):
+        signal = getattr(thread, name, None)
+        if signal is None:
+            continue
+        try:
+            signal.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+
+
+def _same_terminal_snapshot(history: list[dict], snapshot: dict) -> bool:
+    if not history:
+        return False
+    last = history[-1]
+    if last.get("synthetic") != "terminal_result":
+        return False
+    last_terminal = last.get("terminal") if isinstance(last.get("terminal"), dict) else {}
+    snapshot_terminal = snapshot.get("terminal") if isinstance(snapshot.get("terminal"), dict) else {}
+    return (
+        str(last_terminal.get("command") or "") == str(snapshot_terminal.get("command") or "")
+        and str(last_terminal.get("cwd") or "") == str(snapshot_terminal.get("cwd") or "")
+        and str(last_terminal.get("output") or "") == str(snapshot_terminal.get("output") or "")
+    )
+
+
+def _terminal_result_message(result: dict) -> dict:
+    now = datetime.now().isoformat()
+    output, output_dropped = retain_terminal_output_tail("", str(result.get("output") or ""))
+    stored_line_count = len(output.splitlines())
+    line_count = max(int(result.get("line_count") or 0), stored_line_count)
+    terminal = {
+        "command": str(result.get("command") or ""),
+        "cwd": str(result.get("cwd") or ""),
+        "exit_code": int(result.get("exit_code") or 0),
+        "duration_s": float(result.get("duration_s") or 0.0),
+        "line_count": line_count,
+        "stored_line_count": stored_line_count,
+        "truncated": bool(result.get("truncated")) or output_dropped,
+        "output": output,
+    }
+    return {
+        "role": "assistant",
+        "content": str(result.get("summary") or _terminal_status_detail(terminal)),
+        "created_at": now,
+        "synthetic": "terminal_result",
+        "terminal": terminal,
+    }
+
 def _terminal_status_detail(result: dict) -> str:
     exit_code = int(result.get("exit_code") or 0)
     duration = float(result.get("duration_s") or 0.0)
@@ -5158,6 +5331,63 @@ def _chat_ref_context(refs: list[dict] | None) -> str:
     ]
     for conv_id, title in cleaned:
         lines.append(f"- {title} (conversation_id: {conv_id})")
+    return "\n".join(lines)
+
+
+def _terminal_ref_context(history: list[dict], text: str, snapshot: dict | None = None) -> str:
+    if not has_terminal_refs(text):
+        return ""
+    terminal_messages = [
+        msg for msg in history
+        if isinstance(msg, dict) and msg.get("synthetic") == "terminal_result"
+    ]
+    if snapshot:
+        terminal_messages.append(snapshot)
+    expanded = expand_terminal_refs(text, terminal_messages)
+    if not expanded:
+        return ""
+    return (
+        "[Hidden referenced terminal output]\n"
+        "The user referenced terminal output in their message. "
+        "Use the selected output below as the target of that reference.\n\n"
+        + expanded
+    )
+
+
+def _pasted_material_context(materials: list[dict] | None) -> str:
+    cleaned = []
+    seen = set()
+    for item in materials or []:
+        if not isinstance(item, dict):
+            continue
+        path = " ".join(str(item.get("path") or "").split())
+        text = str(item.get("text") or "").strip()
+        if not path or not text:
+            continue
+        try:
+            start_line = int(item.get("start_line") or 0)
+        except (TypeError, ValueError):
+            start_line = 0
+        try:
+            end_line = int(item.get("end_line") or 0)
+        except (TypeError, ValueError):
+            end_line = 0
+        key = (path.casefold(), start_line, end_line, text)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append((path, start_line, max(start_line, end_line), text))
+    if not cleaned:
+        return ""
+    lines = ["[Hidden pasted material from drag/drop or clipboard]"]
+    for path, start_line, end_line, text in cleaned:
+        if start_line > 0 and end_line > start_line:
+            label = f"{path}:{start_line}-{end_line}"
+        elif start_line > 0:
+            label = f"{path}:{start_line}"
+        else:
+            label = path
+        lines.extend(["", f"File: {label}", "```text", text, "```"])
     return "\n".join(lines)
 
 

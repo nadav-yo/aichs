@@ -4,7 +4,7 @@ import copy
 from services.crew import crew_name_from_metadata
 from services.terminal_refs import expand_terminal_refs
 
-_HIDDEN_SYNTHETIC_MESSAGES = {"tool_results", "active_task", "extension", "extension_resume", "chat_refs"}
+_HIDDEN_SYNTHETIC_MESSAGES = {"tool_results", "active_task", "extension", "extension_resume", "chat_refs", "pasted_material", "terminal_refs"}
 _TRANSIENT_SYNTHETIC_MESSAGES = {"active_task", "extension", "extension_resume"}
 _ACTIVE_TASK_PREFIX = "Continue the active user task."
 
@@ -311,7 +311,7 @@ def _model_context_messages(messages: list[dict]) -> list[dict]:
         visible_msg = copy.deepcopy(msg)
         if visible_msg.get("synthetic") == "terminal_result":
             terminal_messages.append(visible_msg)
-        elif visible_msg.get("role") == "user":
+        elif visible_msg.get("role") == "user" and visible_msg.get("synthetic") != "terminal_refs":
             expanded = expand_terminal_refs(content_text(visible_msg.get("content", "")), terminal_messages)
             if expanded:
                 visible_msg["content"] = _append_model_text(

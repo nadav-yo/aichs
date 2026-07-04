@@ -1624,7 +1624,7 @@ def file_tab_style(object_name: str = "fileViewerTabs") -> str:
     p = palette()
     return (
         flat_tab_style(object_name)
-        + f"QTabWidget#{object_name} QTabBar::tab {{ padding:6px 10px;"
+        + f"QTabWidget#{object_name} QTabBar::tab {{ padding:2px 10px;"
         f"min-width:88px; max-width:220px; background:{p['BG2']}; }}"
         f"QTabWidget#{object_name} QTabBar::close-button {{ margin-left:6px; }}"
     )

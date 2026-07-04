@@ -317,6 +317,8 @@ def test_is_visible_message_hides_runtime_internals():
     assert not is_visible_message({"role": "user", "synthetic": "tool_results"})
     assert not is_visible_message({"role": "user", "synthetic": "extension"})
     assert not is_visible_message({"role": "user", "synthetic": "chat_refs"})
+    assert not is_visible_message({"role": "user", "synthetic": "pasted_material"})
+    assert not is_visible_message({"role": "user", "synthetic": "terminal_refs"})
 
 
 def test_prepare_file_block_notes_omitted_attachment():
@@ -371,10 +373,27 @@ def test_terminal_summary_uses_reference_not_full_context():
         "output": output,
     })
 
-    assert "Output reference: !term[1:50]" in summary
+    assert "Output reference: #term[1:50]" in summary
     assert "Command: pytest -q" in summary
     assert "line 1" not in summary
     assert "line 31" not in summary
+
+
+def test_terminal_refs_hidden_context_does_not_reexpand_itself():
+    messages = [
+        {
+            "role": "assistant",
+            "synthetic": "terminal_result",
+            "content": "Terminal summary",
+            "terminal": {"command": "pwsh", "output": "one\ntwo", "stored_line_count": 2},
+        },
+        {"role": "user", "content": "[Hidden referenced terminal output]\nTerminal output #term[2:2]\n```text\ntwo\n```", "synthetic": "terminal_refs"},
+    ]
+
+    anthropic = prepare_for_anthropic(messages)
+
+    assert anthropic[1]["content"].count("Terminal output #term[2:2]") == 1
+    assert "Referenced terminal output" not in anthropic[1]["content"]
 
 
 def test_terminal_refs_expand_into_model_context():
@@ -382,14 +401,14 @@ def test_terminal_refs_expand_into_model_context():
         {
             "role": "assistant",
             "synthetic": "terminal_result",
-            "content": "Terminal summary\nReference: !term[1:4]",
+            "content": "Terminal summary\nReference: #term[1:4]",
             "terminal": {
                 "command": "pytest -q",
                 "output": "one\ntwo\nthree\nfour",
                 "stored_line_count": 4,
             },
         },
-        {"role": "user", "content": "explain !term[2:3]"},
+        {"role": "user", "content": "explain #term[2:3]"},
     ]
 
     anthropic = prepare_for_anthropic(messages)
@@ -398,12 +417,28 @@ def test_terminal_refs_expand_into_model_context():
     assert "from command: pytest -q" in anthropic[1]["content"]
 
 
+def test_legacy_bang_terminal_refs_still_expand():
+    messages = [
+        {
+            "role": "assistant",
+            "synthetic": "terminal_result",
+            "content": "Terminal summary\nReference: !term[1:2]",
+            "terminal": {"command": "dir", "output": "one\ntwo", "stored_line_count": 2},
+        },
+        {"role": "user", "content": "explain !term[2:2]"},
+    ]
+
+    anthropic = prepare_for_anthropic(messages)
+
+    assert "two" in anthropic[1]["content"]
+
+
 def test_terminal_refs_expand_exact_line_without_shift():
     messages = [
         {
             "role": "assistant",
             "synthetic": "terminal_result",
-            "content": "Terminal summary\nOutput reference: !term[1:2]",
+            "content": "Terminal summary\nOutput reference: #term[1:2]",
             "terminal": {
                 "command": "dir",
                 "output": (
@@ -413,7 +448,7 @@ def test_terminal_refs_expand_exact_line_without_shift():
                 "stored_line_count": 2,
             },
         },
-        {"role": "user", "content": "can you read this file? !term[2:2]"},
+        {"role": "user", "content": "can you read this file? #term[2:2]"},
     ]
 
     anthropic = prepare_for_anthropic(messages)
@@ -427,10 +462,10 @@ def test_terminal_refs_append_to_block_content_for_model_context():
         {
             "role": "assistant",
             "synthetic": "terminal_result",
-            "content": "Terminal summary\nOutput reference: !term[1:1]",
+            "content": "Terminal summary\nOutput reference: #term[1:1]",
             "terminal": {"command": "pytest -q", "output": "ready", "stored_line_count": 1},
         },
-        {"role": "user", "content": [{"type": "text", "text": "show !term[1:1]"}]},
+        {"role": "user", "content": [{"type": "text", "text": "show #term[1:1]"}]},
     ]
 
     anthropic = prepare_for_anthropic(messages)
@@ -440,7 +475,7 @@ def test_terminal_refs_append_to_block_content_for_model_context():
 
 
 def test_expand_terminal_refs_without_previous_terminal_is_empty():
-    assert expand_terminal_refs("see !term[1:2]", []) == ""
+    assert expand_terminal_refs("see #term[1:2]", []) == ""
 
 
 def test_terminal_refs_ignore_missing_and_out_of_range_requests():
@@ -451,11 +486,11 @@ def test_terminal_refs_ignore_missing_and_out_of_range_requests():
             "content": "Terminal summary",
             "terminal": {"output": "one\ntwo", "stored_line_count": 2},
         },
-        {"role": "user", "content": "show !term[9:10]"},
+        {"role": "user", "content": "show #term[9:10]"},
     ]
 
     assert expand_terminal_refs("no refs here", messages) == ""
-    assert "no stored terminal output lines" in expand_terminal_refs("show !term[9:10]", messages)
+    assert "no stored terminal output lines" in expand_terminal_refs("show #term[9:10]", messages)
 
 
 def test_terminal_summary_running_and_truncated():

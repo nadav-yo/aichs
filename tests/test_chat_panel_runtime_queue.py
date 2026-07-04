@@ -9,6 +9,9 @@ from ui.widgets.chat_panel import (
     _chat_ref_context,
     _history_ends_with_assistant_text,
     _message_files,
+    _pasted_material_context,
+    _same_terminal_snapshot,
+    _terminal_ref_context,
     _tool_output_display_text,
     _tool_debug_text,
     _tool_notice_html,
@@ -422,6 +425,39 @@ def test_send_carries_file_refs_without_reading_files_on_ui_thread(workspace, mo
     assert drafts[0]["file_refs"] == ["services\\chat.py"]
 
 
+def test_send_carries_pasted_material_context():
+    class ComposerWithMaterial(_Composer):
+        def take_pasted_materials(self):
+            return [{
+                "path": "src/main.py",
+                "start_line": 2,
+                "end_line": 2,
+                "text": "print('hi')",
+            }]
+
+    drafts = []
+    panel = SimpleNamespace()
+    panel.cwd = "C:/repo"
+    panel.composer = ComposerWithMaterial("look at @src/main.py:2")
+    panel._slash_commands = []
+    panel._slash_commands_cwd = "C:/repo"
+    panel._skill_picker = None
+    panel._file_picker = None
+    panel._settings = SimpleNamespace(load=lambda: {})
+    panel._visible_run = lambda: None
+    panel._visible_compaction = lambda: None
+    panel._send_draft = drafts.append
+
+    ChatPanel.send(panel)
+
+    assert drafts[0]["pasted_materials"] == [{
+        "path": "src/main.py",
+        "start_line": 2,
+        "end_line": 2,
+        "text": "print('hi')",
+    }]
+
+
 def test_send_draft_passes_deferred_file_refs_to_assistant_start(qapp):
     starts = []
     bubbles = []
@@ -429,6 +465,7 @@ def test_send_draft_passes_deferred_file_refs_to_assistant_start(qapp):
     panel.history = []
     panel.conv_data = {"id": "c1"}
     panel._bubbles = {}
+    panel._render_end_index = 0
     panel._settings = SimpleNamespace(load=lambda: {})
     panel._model_for_crew = lambda _crew: "claude-sonnet-4-6"
     panel._ensure_conversation = lambda _title, _model: None
@@ -446,6 +483,12 @@ def test_send_draft_passes_deferred_file_refs_to_assistant_start(qapp):
         "skill": None,
         "crew": None,
         "file_refs": ["src/main.py"],
+        "pasted_materials": [{
+            "path": "src/main.py",
+            "start_line": 1,
+            "end_line": 1,
+            "text": "print('hi')",
+        }],
     })
 
     assert starts == [{
@@ -455,6 +498,8 @@ def test_send_draft_passes_deferred_file_refs_to_assistant_start(qapp):
         "deferred_file_target": 0,
     }]
     assert panel.history[0]["content"] == "read @src/main.py"
+    assert panel.history[1]["synthetic"] == "pasted_material"
+    assert "print('hi')" in panel.history[1]["content"]
     assert bubbles
 
 
@@ -523,6 +568,27 @@ def test_message_files_includes_hidden_clipboard_refs(workspace):
     assert len(files) == 1
     assert files[0]["path"] == "services\\git_diff.py"
     assert files[0]["content"] == "content"
+
+
+def test_pasted_material_context_formats_exact_editor_selection():
+    context = _pasted_material_context([
+        {
+            "path": "src/main.py",
+            "start_line": 10,
+            "end_line": 11,
+            "text": "def main():\n    pass",
+        },
+        {
+            "path": "src/main.py",
+            "start_line": 10,
+            "end_line": 11,
+            "text": "def main():\n    pass",
+        },
+    ])
+
+    assert "[Hidden pasted material from drag/drop or clipboard]" in context
+    assert "File: src/main.py:10-11" in context
+    assert context.count("def main") == 1
 
 
 def test_message_files_keeps_sentence_punctuation_outside_bare_refs(workspace):
@@ -969,3 +1035,202 @@ def test_chat_ref_context_dedupes_and_names_exact_tool():
     assert "read_project_chat" in text
     assert "Viewport Picking (conversation_id: c1)" in text
     assert text.count("conversation_id: c1") == 1
+
+
+
+def test_terminal_result_message_uses_existing_terminal_schema():
+    from ui.widgets.chat_panel import _terminal_result_message
+
+    msg = _terminal_result_message({
+        "command": "pwsh",
+        "cwd": "C:\\repo",
+        "exit_code": 0,
+        "duration_s": 1.25,
+        "line_count": 2,
+        "stored_line_count": 2,
+        "truncated": False,
+        "output": "one\ntwo",
+    })
+
+    assert msg["synthetic"] == "terminal_result"
+    assert msg["terminal"]["command"] == "pwsh"
+    assert msg["terminal"]["output"] == "one\ntwo"
+    assert msg["content"].startswith("exit 0")
+
+
+def test_send_captures_running_integrated_terminal_snapshot_for_refs():
+    class ComposerWithTerminalRef(_Composer):
+        pass
+
+    class Session:
+        def output_text(self):
+            return "one\ntwo"
+
+        def result(self):
+            return {
+                "command": "pwsh",
+                "cwd": "C:/repo",
+                "exit_code": 0,
+                "duration_s": 0.1,
+                "line_count": 2,
+                "stored_line_count": 2,
+                "truncated": False,
+                "output": "one\ntwo",
+            }
+
+    drafts = []
+    panel = SimpleNamespace()
+    panel.cwd = "C:/repo"
+    panel.composer = ComposerWithTerminalRef("explain #term[2:2]")
+    panel._integrated_terminal = SimpleNamespace(
+        is_running=lambda: True,
+        active_session=lambda: Session(),
+    )
+    panel._slash_commands = []
+    panel._slash_commands_cwd = "C:/repo"
+    panel._skill_picker = None
+    panel._file_picker = None
+    panel._settings = SimpleNamespace(load=lambda: {})
+    panel._visible_run = lambda: None
+    panel._visible_compaction = lambda: None
+    panel._send_draft = drafts.append
+
+    ChatPanel.send(panel)
+
+    assert drafts[0]["terminal_snapshot"]["synthetic"] == "terminal_result"
+    assert drafts[0]["terminal_snapshot"]["terminal"]["output"] == "one\ntwo"
+    assert "Hidden referenced terminal output" in drafts[0]["terminal_ref_context"]
+    assert "two" in drafts[0]["terminal_ref_context"]
+
+
+def test_send_draft_appends_terminal_snapshot_before_user(qapp):
+    starts = []
+    panel = SimpleNamespace()
+    panel.history = []
+    panel.conv_data = {"id": "c1"}
+    panel._bubbles = {}
+    panel._render_end_index = 0
+    panel._settings = SimpleNamespace(load=lambda: {})
+    panel._model_for_crew = lambda _crew: "claude-sonnet-4-6"
+    panel._ensure_conversation = lambda _title, _model: None
+    panel._enter_streaming = lambda: None
+    panel._ensure_tail_rendered_for_append = lambda _idx: False
+    panel._add_bubble = lambda *args, **kwargs: None
+    panel._save = lambda touch_updated=True: None
+    panel._maybe_auto_title = lambda: None
+    panel._start_assistant = lambda **kwargs: starts.append(kwargs)
+    panel._pin_to_bottom = lambda: None
+
+    ChatPanel._send_draft(panel, {
+        "content": "explain #term[2:2]",
+        "title_text": "explain #term[2:2]",
+        "skill": None,
+        "crew": None,
+        "file_refs": [],
+        "pasted_materials": [],
+        "terminal_snapshot": {
+            "role": "assistant",
+            "content": "exit 0",
+            "synthetic": "terminal_result",
+            "terminal": {"command": "pwsh", "cwd": "C:/repo", "output": "one\ntwo"},
+        },
+        "terminal_ref_context": "[Hidden referenced terminal output]\n```text\ntwo\n```",
+    })
+
+    assert [msg.get("synthetic") for msg in panel.history] == ["terminal_result", None, "terminal_refs"]
+    assert panel.history[1]["content"] == "explain #term[2:2]"
+    assert "two" in panel.history[2]["content"]
+
+
+def test_terminal_ref_context_uses_latest_terminal_result():
+    context = _terminal_ref_context([
+        {"role": "assistant", "synthetic": "terminal_result", "terminal": {"command": "old", "output": "old"}},
+        {"role": "assistant", "synthetic": "terminal_result", "terminal": {"command": "pwsh", "output": "one\ntwo"}},
+    ], "explain #term[2:2]")
+
+    assert "Hidden referenced terminal output" in context
+    assert "two" in context
+    assert "old" not in context
+
+
+def test_same_terminal_snapshot_matches_terminal_identity_and_output():
+    snapshot = {"terminal": {"command": "pwsh", "cwd": "C:/repo", "output": "ok"}}
+
+    assert _same_terminal_snapshot([{"synthetic": "terminal_result", "terminal": dict(snapshot["terminal"])}], snapshot)
+    assert not _same_terminal_snapshot([], snapshot)
+    assert not _same_terminal_snapshot([{"synthetic": "terminal_result", "terminal": {"output": "new"}}], snapshot)
+
+
+def test_integrated_terminal_finish_records_result_on_active_conversation():
+    from types import SimpleNamespace
+    from ui.widgets.chat_panel import ChatPanel
+
+    added = []
+    saved = []
+    titled = []
+    panel = SimpleNamespace(
+        _integrated_terminal_conv_id="c1",
+        conv_id="c1",
+        history=[],
+        _add_terminal_result_card=lambda msg: added.append(msg),
+        _save=lambda touch_updated=False: saved.append(touch_updated),
+        _maybe_auto_title=lambda: titled.append(True),
+        _pin_to_bottom=lambda: None,
+    )
+
+    ChatPanel._on_integrated_terminal_finished(panel, {
+        "command": "pwsh",
+        "cwd": "C:\\repo",
+        "exit_code": 0,
+        "duration_s": 0.2,
+        "line_count": 1,
+        "stored_line_count": 1,
+        "truncated": False,
+        "output": "ok",
+    })
+
+    assert panel.history[0]["synthetic"] == "terminal_result"
+    assert added == [panel.history[0]]
+    assert saved == [True]
+    assert titled == [True]
+
+
+def test_terminal_result_message_retains_bounded_tail(monkeypatch):
+    import ui.widgets.chat_panel as chat_panel
+    from ui.widgets.chat_panel import _terminal_result_message
+
+    monkeypatch.setattr(chat_panel, "retain_terminal_output_tail", lambda current, chunk: (str(chunk)[-4:], True))
+
+    msg = _terminal_result_message({
+        "command": "pwsh",
+        "cwd": "C:\\repo",
+        "exit_code": 0,
+        "duration_s": 0.1,
+        "line_count": 3,
+        "stored_line_count": 3,
+        "truncated": False,
+        "output": "line1\nline2\nline3",
+    })
+
+    assert msg["terminal"]["output"] == "ine3"
+    assert msg["terminal"]["stored_line_count"] == 1
+    assert msg["terminal"]["line_count"] == 3
+    assert msg["terminal"]["truncated"] is True
+
+
+def test_history_terminal_result_cards_start_collapsed():
+    from types import SimpleNamespace
+    from ui.widgets.chat_panel import ChatPanel
+
+    calls = []
+    panel = SimpleNamespace(
+        history=[{"synthetic": "terminal_result", "terminal": {"output": "ok"}}],
+        _add_terminal_result_card=lambda msg, *, at_top=False, collapsed=False: calls.append((msg, at_top, collapsed)) or "widget",
+        _track_history_widget=lambda history_index, widget: calls.append((history_index, widget)),
+    )
+
+    widget = ChatPanel._insert_history_bubble(panel, 0, at_top=True)
+
+    assert widget == "widget"
+    assert calls[0][1:] == (True, True)
+    assert calls[1] == (0, "widget")

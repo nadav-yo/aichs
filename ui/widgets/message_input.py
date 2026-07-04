@@ -1,3 +1,4 @@
+import os
 import math
 import re
 from pathlib import Path
@@ -32,7 +33,7 @@ from services.file_editor_refs import (
     parse_editor_refs,
 )
 from services.file_ref_clipboard import AICHS_MESSAGE_COPY_MIME, parse_file_refs_payload
-from services.terminal_refs import TERMINAL_REF_MIME
+from services.terminal_refs import TERMINAL_REF_MIME, normalize_terminal_ref
 from ui.theme import (
     attachment_remove_button_style,
     attachment_thumbnail_style,
@@ -45,6 +46,7 @@ from ui.theme import (
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _REFERENCE_RE = re.compile(r'(?<!\S)@(?:"[^"]+"|[^\s@]*[^\s@.,:;!?)\]}])')
+_TERMINAL_REFERENCE_RE = re.compile(r"(?<!\S)#term\[\d+\s*:\s*\d+\]")
 _INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 _INPUT_MIN_HEIGHT = 46
 _INPUT_MAX_LINES = 8
@@ -79,10 +81,11 @@ class _ReferenceHighlighter(QSyntaxHighlighter):
             length = match.end() - start
             code_spans.append((start, match.end()))
             self.setFormat(start, length, self._code_fmt)
-        for match in _REFERENCE_RE.finditer(text):
-            if any(start <= match.start() < end for start, end in code_spans):
-                continue
-            self.setFormat(match.start(), match.end() - match.start(), self._reference_fmt)
+        for pattern in (_REFERENCE_RE, _TERMINAL_REFERENCE_RE):
+            for match in pattern.finditer(text):
+                if any(start <= match.start() < end for start, end in code_spans):
+                    continue
+                self.setFormat(match.start(), match.end() - match.start(), self._reference_fmt)
 
 
 def _path_is_image(path: str) -> bool:
@@ -103,6 +106,7 @@ def _mime_has_chat_refs(mime) -> bool:
         or mime.hasFormat(AICHS_FILE_DROP_MIME)
         or mime.hasFormat(AICHS_COMMIT_DROP_MIME)
         or mime.hasFormat(AICHS_CHAT_DROP_MIME)
+        or mime.hasFormat(TERMINAL_REF_MIME)
     )
 
 
@@ -120,6 +124,34 @@ def _images_from_mime(mime) -> list[QImage]:
                 if not image.isNull():
                     images.append(image)
     return images
+
+
+def _file_refs_from_mime_urls(mime, workspace_root: str | None) -> list[str]:
+    if not workspace_root or not mime.hasUrls():
+        return []
+    try:
+        root = Path(workspace_root).resolve()
+    except (OSError, RuntimeError):
+        return []
+    refs: list[str] = []
+    seen: set[str] = set()
+    for url in mime.urls():
+        path = url.toLocalFile()
+        if not path or _path_is_image(path):
+            continue
+        try:
+            resolved = Path(path).resolve()
+            rel = resolved.relative_to(root).as_posix()
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if not resolved.is_file():
+            continue
+        key = rel.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append(rel)
+    return refs
 
 
 class MessageInput(QTextEdit):
@@ -154,6 +186,8 @@ class MessageInput(QTextEdit):
         self._enter_to_send = False
         self._pasted_file_refs: list[str] = []
         self._pasted_chat_refs: list[dict] = []
+        self._pasted_materials: list[dict] = []
+        self._workspace_root: str | None = None
         self.setAcceptDrops(True)
         self._reference_highlighter = _ReferenceHighlighter(self.document())
         self._apply_style()
@@ -278,9 +312,18 @@ class MessageInput(QTextEdit):
         self._pasted_chat_refs.clear()
         return refs
 
+    def take_pasted_materials(self) -> list[dict]:
+        materials = list(self._pasted_materials)
+        self._pasted_materials.clear()
+        return materials
+
+    def set_workspace(self, cwd: str | None) -> None:
+        self._workspace_root = os.fspath(cwd) if cwd else None
+
     def clear_pasted_file_refs(self):
         self._pasted_file_refs.clear()
         self._pasted_chat_refs.clear()
+        self._pasted_materials.clear()
 
     def remember_file_refs(self, refs: list[str]):
         self._remember_file_refs(refs)
@@ -321,6 +364,7 @@ class MessageInput(QTextEdit):
             text = editor_ref_text(refs)
             if text:
                 self._remember_file_refs(editor_ref_paths(refs))
+                self._remember_editor_materials(refs)
                 self.insert_reference_text(text)
                 return True
         if mime.hasFormat(AICHS_FILE_DROP_MIME):
@@ -357,6 +401,33 @@ class MessageInput(QTextEdit):
                     "id": conv_id,
                     "title": str(ref.get("title") or "Untitled").strip() or "Untitled",
                 })
+
+    def _remember_editor_materials(self, refs: list[dict]):
+        seen = {
+            (
+                str(item.get("path") or "").casefold(),
+                int(item.get("start_line") or 0),
+                int(item.get("end_line") or 0),
+            )
+            for item in self._pasted_materials
+        }
+        for ref in refs:
+            text = str(ref.get("text") or "").strip()
+            path = str(ref.get("path") or "").strip()
+            if not text or not path:
+                continue
+            start_line = int(ref.get("start_line") or 0)
+            end_line = int(ref.get("end_line") or 0)
+            key = (path.casefold(), start_line, end_line)
+            if key in seen:
+                continue
+            seen.add(key)
+            self._pasted_materials.append({
+                "path": path,
+                "start_line": start_line,
+                "end_line": end_line,
+                "text": text,
+            })
 
     def add_file_mention(self, rel_path: str):
         token = f'@"{rel_path}"' if any(ch.isspace() for ch in rel_path) else f"@{rel_path}"
@@ -487,9 +558,11 @@ class MessageInput(QTextEdit):
         if self.insert_refs_from_mime(source):
             return
         if source.hasFormat(TERMINAL_REF_MIME):
-            ref = bytes(source.data(TERMINAL_REF_MIME)).decode("utf-8", errors="replace").strip()
+            ref = normalize_terminal_ref(
+                bytes(source.data(TERMINAL_REF_MIME)).decode("utf-8", errors="replace")
+            )
             if ref:
-                self.textCursor().insertText(ref)
+                self.insert_reference_text(ref)
                 return
         if source.hasFormat(AICHS_MESSAGE_COPY_MIME):
             refs = parse_file_refs_payload(source.data(AICHS_MESSAGE_COPY_MIME))
@@ -502,6 +575,11 @@ class MessageInput(QTextEdit):
             if isinstance(image, QImage):
                 self.image_pasted.emit(image)
                 return
+        refs = _file_refs_from_mime_urls(source, self._workspace_root)
+        if refs:
+            self._remember_file_refs(refs)
+            self.insert_reference_text(file_drop_text(refs))
+            return
         super().insertFromMimeData(source)
 
     def dragEnterEvent(self, event: QDragEnterEvent):
@@ -518,6 +596,11 @@ class MessageInput(QTextEdit):
 
     def dropEvent(self, event: QDropEvent):
         mime = event.mimeData()
+        if mime.hasFormat(TERMINAL_REF_MIME):
+            self._move_cursor_to_drop(event)
+            self.insertFromMimeData(mime)
+            event.acceptProposedAction()
+            return
         if _mime_has_chat_refs(mime):
             self._move_cursor_to_drop(event)
             if self.insert_refs_from_mime(mime):
@@ -529,8 +612,18 @@ class MessageInput(QTextEdit):
                 self.image_pasted.emit(image)
             event.acceptProposedAction()
             return
+        refs = _file_refs_from_mime_urls(mime, self._workspace_root)
+        if refs:
+            self._move_cursor_to_drop(event)
+            self._remember_file_refs(refs)
+            self.insert_reference_text(file_drop_text(refs))
+            event.acceptProposedAction()
+            return
         if mime.hasUrls():
             event.acceptProposedAction()
+            return
+        if mime.hasText():
+            event.ignore()
             return
         super().dropEvent(event)
 
@@ -721,8 +814,14 @@ class ComposerWidget(QWidget):
     def take_pasted_chat_refs(self) -> list[dict]:
         return self.input.take_pasted_chat_refs()
 
+    def take_pasted_materials(self) -> list[dict]:
+        return self.input.take_pasted_materials()
+
     def remember_file_refs(self, refs: list[str]):
         self.input.remember_file_refs(refs)
+
+    def set_workspace(self, cwd: str | None) -> None:
+        self.input.set_workspace(cwd)
 
     def apply_appearance(self):
         self._shell.setStyleSheet(composer_shell_style())
@@ -745,6 +844,11 @@ class ComposerWidget(QWidget):
             event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent):
+        if event.mimeData().hasFormat(TERMINAL_REF_MIME):
+            self.input.insertFromMimeData(event.mimeData())
+            event.acceptProposedAction()
+            self.focus_input()
+            return
         if _mime_has_chat_refs(event.mimeData()):
             if self.input.insert_refs_from_mime(event.mimeData()):
                 event.acceptProposedAction()
@@ -752,8 +856,16 @@ class ComposerWidget(QWidget):
                 return
         for image in _images_from_mime(event.mimeData()):
             self.strip.add_image(image)
+        refs = _file_refs_from_mime_urls(event.mimeData(), self.input._workspace_root)
+        if refs:
+            self.input._remember_file_refs(refs)
+            self.input.insert_reference_text(file_drop_text(refs))
+            self.focus_input()
+            event.acceptProposedAction()
+            return
         if event.mimeData().hasUrls() or event.mimeData().hasImage():
             event.acceptProposedAction()
+            return
 
 
 def _scaled_for_inline(image: QImage) -> QImage:

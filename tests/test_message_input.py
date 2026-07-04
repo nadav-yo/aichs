@@ -68,7 +68,7 @@ def test_drop_image_url_does_not_insert_text(qapp, tmp_path):
     assert composer.strip.has_images()
 
 
-def test_drop_non_image_url_does_not_insert_text(qapp, tmp_path):
+def test_drop_non_image_url_without_workspace_does_not_insert_text(qapp, tmp_path):
     doc = tmp_path / "notes.txt"
     doc.write_text("hello", encoding="utf-8")
 
@@ -80,6 +80,38 @@ def test_drop_non_image_url_does_not_insert_text(qapp, tmp_path):
 
     assert composer.input.toPlainText() == ""
     assert not composer.strip.has_images()
+
+
+def test_drop_workspace_file_url_inserts_file_ref(qapp, tmp_path):
+    doc = tmp_path / "docs" / "notes.txt"
+    doc.parent.mkdir()
+    doc.write_text("hello", encoding="utf-8")
+
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(doc))])
+
+    composer = ComposerWidget()
+    composer.set_workspace(str(tmp_path))
+    composer.input.dropEvent(_drop_event(mime))
+
+    assert composer.input.toPlainText() == "@docs/notes.txt "
+    assert composer.take_pasted_file_refs() == ["docs/notes.txt"]
+
+
+def test_paste_workspace_file_url_inserts_file_ref(qapp, tmp_path):
+    doc = tmp_path / "src" / "main.py"
+    doc.parent.mkdir()
+    doc.write_text("print('hi')", encoding="utf-8")
+
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(doc))])
+
+    composer = ComposerWidget()
+    composer.set_workspace(str(tmp_path))
+    composer.input.insertFromMimeData(mime)
+
+    assert composer.input.toPlainText() == "@src/main.py "
+    assert composer.take_pasted_file_refs() == ["src/main.py"]
 
 
 def test_message_input_grows_after_two_lines(qapp):
@@ -109,11 +141,11 @@ def test_paste_terminal_ref_prefers_hidden_reference(qapp):
     composer = ComposerWidget()
     mime = QMimeData()
     mime.setText("d----          27/05/2026    23:59                .aichs")
-    mime.setData(TERMINAL_REF_MIME, b"!term[27:27]")
+    mime.setData(TERMINAL_REF_MIME, b"#term[27:27]")
 
     composer.input.insertFromMimeData(mime)
 
-    assert composer.input.toPlainText() == "!term[27:27]"
+    assert composer.input.toPlainText() == "#term[27:27] "
 
 
 def test_paste_aichs_message_adds_visible_file_mention_and_records_refs(qapp):
@@ -128,6 +160,38 @@ def test_paste_aichs_message_adds_visible_file_mention_and_records_refs(qapp):
     assert composer.input.toPlainText() == "@services\\git_diff.py: 77%"
     assert composer.take_pasted_file_refs() == ["services\\git_diff.py"]
     assert composer.take_pasted_file_refs() == []
+
+
+def test_paste_legacy_bang_terminal_ref_normalizes_visible_text(qapp):
+    composer = ComposerWidget()
+    mime = QMimeData()
+    mime.setText("alpha")
+    mime.setData(TERMINAL_REF_MIME, b"!term[7:8]")
+
+    composer.input.insertFromMimeData(mime)
+
+    assert composer.input.toPlainText() == "#term[7:8] "
+
+
+def test_drop_terminal_ref_inserts_hidden_reference(qapp):
+    composer = ComposerWidget()
+    mime = QMimeData()
+    mime.setText("alpha")
+    mime.setData(TERMINAL_REF_MIME, b"#term[1:1]")
+
+    composer.input.dropEvent(_drop_event(mime))
+
+    assert composer.input.toPlainText() == "#term[1:1] "
+
+
+def test_drop_plain_text_without_custom_mime_is_ignored(qapp):
+    composer = ComposerWidget()
+    mime = QMimeData()
+    mime.setText("terminal output")
+
+    composer.input.dropEvent(_drop_event(mime))
+
+    assert composer.input.toPlainText() == ""
 
 
 def test_drop_file_ref_inserts_visible_mention(qapp):
@@ -159,6 +223,13 @@ def test_drop_editor_ref_inserts_line_mention_and_records_hidden_file(qapp):
     assert composer.input.toPlainText() == "@src/main.py:10-11 "
     assert composer.take_pasted_file_refs() == ["src/main.py"]
     assert composer.take_pasted_file_refs() == []
+    assert composer.take_pasted_materials() == [{
+        "path": "src/main.py",
+        "start_line": 10,
+        "end_line": 11,
+        "text": "def main():\n    pass",
+    }]
+    assert composer.take_pasted_materials() == []
 
 
 def test_drop_commit_ref_inserts_commit_text(qapp):
