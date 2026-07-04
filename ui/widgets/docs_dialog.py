@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, QUrl, Qt, pyqtSignal
@@ -9,6 +10,7 @@ from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QListWidget, QListWidgetItem,
 )
 
+from services.tool_registry import extension_docs
 from ui.theme import contained_list_style, markdown_css, palette
 from ui.markdown_html import markdown_body
 from ui.widgets.markdown_browser import RemoteImageTextBrowser, copy_code_url_to_clipboard
@@ -23,6 +25,21 @@ _DOC_ORDER = [
     "compact.md",
 ]
 _HEADING_RE = re.compile(r"^\s*#\s+(.+?)\s*$", re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class DocEntry:
+    identifier: str
+    title: str
+    path: Path
+    is_extension: bool = False
+    extension_id: str = ""
+
+    @property
+    def display_title(self) -> str:
+        if self.is_extension:
+            return f"{self.title} [EXTENSION]"
+        return self.title
 
 
 def docs_dir() -> Path:
@@ -60,6 +77,31 @@ def available_docs(root: Path | None = None) -> list[Path]:
     return ordered + extras
 
 
+def available_doc_entries(root: Path | None = None, cwd: str | None = None) -> list[DocEntry]:
+    root = root or docs_dir()
+    entries = [
+        DocEntry(path.name, doc_title(path), path.resolve())
+        for path in available_docs(root)
+    ]
+    if not cwd:
+        return entries
+    docs, _errors = extension_docs(cwd)
+    for doc in docs:
+        path = Path(doc.path)
+        if path.suffix.lower() != ".md" or not path.is_file():
+            continue
+        entries.append(
+            DocEntry(
+                f"extension:{doc.extension_id}:{doc.name}",
+                doc.title,
+                path.resolve(),
+                is_extension=True,
+                extension_id=doc.extension_id,
+            )
+        )
+    return entries
+
+
 def markdown_document_html(markdown_text: str) -> str:
     body = markdown_body(markdown_text, extensions=["fenced_code", "tables", "toc"])
     p = palette()
@@ -75,15 +117,25 @@ class _DocsIndexSignals(QObject):
 
 
 class _DocsIndexWorker(QRunnable):
-    def __init__(self, generation: int, root: Path):
+    def __init__(self, generation: int, root: Path, cwd: str | None = None):
         super().__init__()
         self.signals = _DocsIndexSignals()
         self._generation = generation
         self._root = root
+        self._cwd = cwd
 
     def run(self):
         try:
-            entries = [(path.name, doc_title(path)) for path in available_docs(self._root)]
+            entries = [
+                (
+                    entry.identifier,
+                    entry.title,
+                    str(entry.path),
+                    entry.is_extension,
+                    entry.extension_id,
+                )
+                for entry in available_doc_entries(self._root, self._cwd)
+            ]
         except BaseException as exc:
             self.signals.done.emit(self._generation, [], str(exc) or exc.__class__.__name__)
             return
@@ -95,16 +147,24 @@ class _DocLoadSignals(QObject):
 
 
 class _DocLoadWorker(QRunnable):
-    def __init__(self, generation: int, root: Path, name: str):
+    def __init__(self, generation: int, root: Path, name: str | Path, *, allow_outside_root: bool = False):
         super().__init__()
         self.signals = _DocLoadSignals()
         self._generation = generation
         self._root = root
-        self._name = name
+        raw = Path(name)
+        self._path = raw.resolve() if raw.is_absolute() else (self._root / raw).resolve()
+        self._name = self._path.name
+        self._allow_outside_root = allow_outside_root
 
     def run(self):
-        path = (self._root / self._name).resolve()
-        if not _is_doc_path(self._root, path):
+        path = self._path
+        valid = (
+            path.suffix.lower() == ".md" and path.is_file()
+            if self._allow_outside_root
+            else _is_doc_path(self._root, path)
+        )
+        if not valid:
             self.signals.done.emit(self._generation, self._name, "", "Document is outside the docs directory.")
             return
         try:
@@ -112,14 +172,18 @@ class _DocLoadWorker(QRunnable):
         except OSError as exc:
             self.signals.done.emit(self._generation, self._name, "", str(exc))
             return
-        self.signals.done.emit(self._generation, self._name, text, "")
+        self.signals.done.emit(self._generation, str(path), text, "")
 
 
 class DocsDialog(QDialog):
-    def __init__(self, parent=None, root: Path | None = None):
+    def __init__(self, parent=None, root: Path | None = None, cwd: str | None = None):
         super().__init__(parent)
         self._root = root or docs_dir()
+        self._cwd = cwd
         self._docs: list[str] = []
+        self._entries: dict[str, DocEntry] = {}
+        self._entry_by_path: dict[str, str] = {}
+        self._current_doc_path: Path | None = None
         self._pool = QThreadPool.globalInstance()
         self._index_generation = 0
         self._doc_generation = 0
@@ -169,15 +233,23 @@ class DocsDialog(QDialog):
             self.open_doc(str(current.data(Qt.ItemDataRole.UserRole)))
 
     def open_doc(self, name: str, *, anchor: str = ""):
-        path = (self._root / name).resolve()
-        if not _is_doc_path(self._root, path):
-            return
+        entry = self._entries.get(name)
+        if entry is None:
+            path = (self._root / name).resolve()
+            if not _is_doc_path(self._root, path):
+                return
+            entry = DocEntry(path.name, doc_title(path), path)
         self._doc_generation += 1
         generation = self._doc_generation
         self._pending_anchor = anchor
         self._pending_anchor_generation = generation
-        self._show_markdown(f"Loading `{path.name}`...")
-        worker = _DocLoadWorker(generation, self._root, path.name)
+        self._show_markdown(f"Loading `{entry.path.name}`...")
+        worker = _DocLoadWorker(
+            generation,
+            self._root,
+            entry.path,
+            allow_outside_root=entry.is_extension,
+        )
         worker.signals.done.connect(self._on_doc_ready)
         self._pool.start(worker)
 
@@ -190,9 +262,14 @@ class DocsDialog(QDialog):
             return
         if url.isRelative() or url.isLocalFile():
             raw = url.toLocalFile() if url.isLocalFile() else target
-            local = (self._root / raw.split("#", 1)[0]).resolve()
+            base = self._current_doc_path.parent if self._current_doc_path else self._root
+            local = (base / raw.split("#", 1)[0]).resolve()
+            anchor = target.split("#", 1)[1] if "#" in target else ""
+            entry_id = self._entry_by_path.get(str(local))
+            if entry_id:
+                self.open_doc(entry_id, anchor=anchor)
+                return
             if _is_doc_path(self._root, local):
-                anchor = target.split("#", 1)[1] if "#" in target else ""
                 self.open_doc(local.name, anchor=anchor)
                 return
         QDesktopServices.openUrl(url)
@@ -219,7 +296,7 @@ class DocsDialog(QDialog):
         self._docs = []
         self.nav.clear()
         self._show_markdown("Loading documentation...")
-        worker = _DocsIndexWorker(generation, self._root)
+        worker = _DocsIndexWorker(generation, self._root, self._cwd)
         worker.signals.done.connect(self._on_docs_index_ready)
         self._pool.start(worker)
 
@@ -230,29 +307,32 @@ class DocsDialog(QDialog):
         if error:
             self._show_markdown(f"# Documentation\n\nCould not list docs: {error}")
             return
-        docs = [(str(name), str(title)) for name, title in entries]
-        self._docs = [name for name, _title in docs]
+        docs = [_coerce_doc_entry(self._root, entry) for entry in entries]
+        self._entries = {entry.identifier: entry for entry in docs}
+        self._entry_by_path = {str(entry.path): entry.identifier for entry in docs}
+        self._docs = [entry.identifier for entry in docs]
         if not docs:
             self._show_markdown(
                 f"Documentation was not found at `{str(self._root).replace('`', '')}`."
             )
             return
-        for name, title in docs:
-            item = QListWidgetItem(title)
-            item.setData(Qt.ItemDataRole.UserRole, name)
-            item.setToolTip(name)
+        for entry in docs:
+            item = QListWidgetItem(entry.display_title)
+            item.setData(Qt.ItemDataRole.UserRole, entry.identifier)
+            item.setToolTip(str(entry.path))
             self.nav.addItem(item)
         self.nav.setCurrentRow(0)
 
     def _on_doc_ready(self, generation: int, name: str, text: str, error: str):
         if generation != self._doc_generation:
             return
-        path = (self._root / name).resolve()
+        path = Path(name).resolve()
         if error:
-            text = f"# Documentation\n\nCould not read `{name}`: {error}"
+            text = f"# Documentation\n\nCould not read `{path.name}`: {error}"
+        self._current_doc_path = path
         self.viewer.document().setBaseUrl(QUrl.fromLocalFile(str(path.parent) + os.sep))
         self.viewer.setHtml(markdown_document_html(text))
-        self._select_doc(path.name)
+        self._select_doc(self._entry_by_path.get(str(path), path.name))
         if self._pending_anchor_generation == generation and self._pending_anchor:
             self.viewer.scrollToAnchor(self._pending_anchor)
         self._pending_anchor = ""
@@ -264,6 +344,25 @@ class DocsDialog(QDialog):
         self._index_generation += 1
         self._doc_generation += 1
         super().closeEvent(event)
+
+
+def _coerce_doc_entry(root: Path, value: object) -> DocEntry:
+    if isinstance(value, DocEntry):
+        return value
+    if isinstance(value, (list, tuple)) and len(value) >= 5:
+        identifier, title, path, is_extension, extension_id = value[:5]
+        return DocEntry(
+            str(identifier),
+            str(title),
+            Path(str(path)).resolve(),
+            bool(is_extension),
+            str(extension_id),
+        )
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        identifier, title = value[:2]
+        path = (root / str(identifier)).resolve()
+        return DocEntry(str(identifier), str(title), path)
+    raise ValueError(f"invalid doc entry: {value!r}")
 
 
 def _is_doc_path(root: Path, path: Path) -> bool:

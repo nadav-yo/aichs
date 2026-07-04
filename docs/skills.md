@@ -4,6 +4,16 @@ aichs skills follow the ideas behind **[Agent Skills](https://agentskills.io/)**
 
 Type `/` in the composer to pick a skill. It replaces the base system prompt for that turn. You can optionally restrict which tools the model may call.
 
+Some slash commands are built in and executable instead of Markdown skills:
+
+| Command | Description |
+|---|---|
+| `/compact` | Compact the current conversation |
+| `/reload` | Reload extension and skill registries |
+| `/archivist` | Ask the Archivist to recall durable context from project memory and chat history |
+| `/savememory topic: text` | Save one durable project-memory item |
+| `/readmemory [query]` | Read or search project memory |
+
 ## Locations
 
 | Path | Scope |

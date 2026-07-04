@@ -152,6 +152,28 @@ class ToolApprovalBus(QObject):
             tool_owner=owner,
         )
 
+    def check_tool_always(
+        self,
+        name: str,
+        inputs: dict,
+        cwd: str,
+        policy: ConversationToolPolicy,
+        is_cancelled: Callable[[], bool],
+        *,
+        source: str = "builtin",
+        owner: str = "",
+    ) -> str | None:
+        return self._wait_for_ui(
+            "tool",
+            inputs,
+            cwd,
+            policy,
+            is_cancelled,
+            tool_name=name,
+            tool_source=source,
+            tool_owner=owner,
+        )
+
     def cancel_wait(self, message: str = "[cancelled]") -> None:
         with self._lock:
             pending = self._current

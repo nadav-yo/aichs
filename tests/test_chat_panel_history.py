@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+from PyQt6.QtCore import QPointF, Qt
 import ui.widgets.chat_panel as chat_panel_module
 from ui.widgets.chat_panel import (
     ChatPanel,
@@ -13,6 +14,10 @@ from ui.widgets.chat_panel import (
     _MentionFilesWorker,
     _SkillPickerLoadWorker,
     _ConversationSaveWorker,
+    _ChatNavigationEntry,
+    _ChatNavigationRail,
+    _chat_navigation_entries,
+    _chat_navigation_preview,
     _list_mention_files,
     _saved_tool_calls,
 )
@@ -175,12 +180,36 @@ class _ScrollBar:
         return self._value
 
 
+class _Viewport:
+    def __init__(self, height=0):
+        self._height = height
+
+    def height(self):
+        return self._height
+
+
 class _Scroll:
-    def __init__(self):
+    def __init__(self, height=0):
         self.bar = _ScrollBar()
+        self._viewport = _Viewport(height)
 
     def verticalScrollBar(self):
         return self.bar
+
+    def viewport(self):
+        return self._viewport
+
+
+class _PositionedWidget:
+    def __init__(self, y, height):
+        self._y = y
+        self._height = height
+
+    def y(self):
+        return self._y
+
+    def height(self):
+        return self._height
 
 
 class _Timer:
@@ -274,6 +303,315 @@ class _ConnectSignal:
     def connect(self, slot):
         self.slots.append(slot)
 
+
+class _EnsureScroll:
+    def __init__(self):
+        self.bar = _ScrollBar()
+        self.ensured = []
+
+    def verticalScrollBar(self):
+        return self.bar
+
+    def ensureWidgetVisible(self, widget, xmargin=0, ymargin=0):
+        self.ensured.append((widget, xmargin, ymargin))
+
+
+class _JumpButton:
+    def __init__(self):
+        self.shown = 0
+        self.raised = 0
+
+    def show(self):
+        self.shown += 1
+
+    def raise_(self):
+        self.raised += 1
+
+
+class _MouseEvent:
+    def __init__(self, y):
+        self._y = y
+        self.accepted = False
+
+    def button(self):
+        return Qt.MouseButton.LeftButton
+
+    def position(self):
+        return QPointF(18, self._y)
+
+    def accept(self):
+        self.accepted = True
+
+
+class _NavigationRail:
+    def __init__(self):
+        self.entries = None
+        self.active = None
+        self.synced = 0
+
+    def set_entries(self, entries):
+        self.entries = list(entries)
+
+    def set_active_history_index(self, idx):
+        self.active = idx
+
+    def sync_visibility(self):
+        self.synced += 1
+
+
+def test_chat_navigation_entries_include_only_visible_user_messages(qapp):
+    history = [
+        {"role": "user", "content": "first user"},
+        {"role": "assistant", "content": "answer"},
+        {"role": "user", "content": "hidden extension", "synthetic": "extension"},
+        {"role": "tool", "content": "tool chatter"},
+        {"role": "user", "content": [{"type": "tool_result", "content": "hidden"}], "synthetic": "tool_results"},
+        {"role": "user", "content": "second user"},
+    ]
+
+    entries = _chat_navigation_entries(history)
+
+    assert entries == [
+        _ChatNavigationEntry(0, "first user"),
+        _ChatNavigationEntry(5, "second user"),
+    ]
+
+
+def test_chat_navigation_preview_compacts_text_and_attachment_markers(qapp):
+    long_text = " ".join(["word"] * 30)
+
+    assert _chat_navigation_preview("hello\n\nthere") == "hello there"
+    assert _chat_navigation_preview(long_text, limit=24) == "word word word word..."
+    assert _chat_navigation_preview([
+        {"type": "file", "path": "src/main.py"},
+        {"type": "image"},
+    ]) == "[file: src/main.py] [image]"
+
+
+def test_chat_navigation_rail_hit_testing_and_click_signal(qapp):
+    rail = _ChatNavigationRail()
+    rail.resize(36, 120)
+    rail.set_entries([
+        _ChatNavigationEntry(2, "first"),
+        _ChatNavigationEntry(5, "second"),
+        _ChatNavigationEntry(8, "third"),
+    ])
+    calls = []
+    rail.target_requested.connect(calls.append)
+
+    y = rail._entry_y(1)
+    event = _MouseEvent(y)
+    rail.mousePressEvent(event)
+
+    assert event.accepted is True
+    assert calls == [5]
+    assert rail._entry_at_y(y + rail._HIT_RADIUS + 4) == -1
+
+
+
+def test_chat_navigation_rail_shows_twenty_before_and_after_active(qapp):
+    rail = _ChatNavigationRail()
+    rail.resize(36, 240)
+    assert rail._tick_x(rail._TICK_WIDTH) == 16
+    rail.set_entries([
+        _ChatNavigationEntry(idx, f"turn {idx}") for idx in range(100)
+    ])
+    rail.set_active_history_index(50)
+
+    visible = rail._visible_entries()
+
+    assert len(visible) == 41
+    assert visible[0].history_index == 30
+    assert visible[-1].history_index == 70
+    assert rail._entry_at_y(rail._entry_y(0)) == 0
+    assert rail._entry_at_y(rail._entry_y(40)) == 40
+
+    rail.set_active_history_index(3)
+    visible = rail._visible_entries()
+
+    assert len(visible) == 41
+    assert visible[0].history_index == 0
+    assert visible[-1].history_index == 40
+
+    rail.set_active_history_index(98)
+    visible = rail._visible_entries()
+
+    assert len(visible) == 41
+    assert visible[0].history_index == 59
+    assert visible[-1].history_index == 99
+
+
+def test_active_chat_navigation_user_uses_edge_aware_viewport_anchor(qapp):
+    scroll = _Scroll(height=120)
+    scroll.bar._maximum = 100
+    panel = SimpleNamespace(
+        history=[
+            {"role": "user", "content": "top"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "middle"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "bottom"},
+        ],
+        _bubbles={
+            0: _PositionedWidget(0, 40),
+            2: _PositionedWidget(90, 40),
+            4: _PositionedWidget(180, 40),
+        },
+        scroll=scroll,
+    )
+    panel._chat_viewport_height = lambda: ChatPanel._chat_viewport_height(panel)
+
+    scroll.bar._value = 0
+    assert ChatPanel._active_user_history_index(panel) == 0
+
+    scroll.bar._value = 50
+    assert ChatPanel._active_user_history_index(panel) == 2
+
+    scroll.bar._value = 100
+    assert ChatPanel._active_user_history_index(panel) == 4
+
+    scroll.bar._maximum = 260
+    scroll.bar._value = 260
+    assert ChatPanel._active_user_history_index(panel) == 4
+
+
+def test_chat_navigation_refresh_batches_during_layout_updates(qapp):
+    container = _MessageContainer()
+    rail = _NavigationRail()
+    panel = SimpleNamespace(
+        history=[{"role": "user", "content": "one"}],
+        _chat_nav=rail,
+        _chat_navigation_signature=(),
+        _chat_navigation_refresh_pending=False,
+        _message_layout_batch_depth=0,
+        msg_container=container,
+        _bubbles={},
+        scroll=_Scroll(),
+    )
+    panel._active_user_history_index = lambda: ChatPanel._active_user_history_index(panel)
+    panel._sync_chat_navigation_active = lambda: ChatPanel._sync_chat_navigation_active(panel)
+    panel._apply_chat_navigation_entries = lambda: ChatPanel._apply_chat_navigation_entries(panel)
+    panel._refresh_chat_navigation = lambda: ChatPanel._refresh_chat_navigation(panel)
+    panel._batch_message_layout = lambda: ChatPanel._batch_message_layout(panel)
+
+    with panel._batch_message_layout():
+        panel._refresh_chat_navigation()
+        panel._refresh_chat_navigation()
+        assert rail.entries is None
+        assert panel._chat_navigation_refresh_pending is True
+
+    assert [entry.history_index for entry in rail.entries] == [0]
+    assert panel._chat_navigation_refresh_pending is False
+
+    panel._refresh_chat_navigation()
+
+    assert rail.synced == 1
+
+def test_jump_to_rendered_history_message_uses_scroll_area(qapp):
+    bubble = _DeletedWidget()
+    scroll = _EnsureScroll()
+    panel = SimpleNamespace(
+        history=[{"role": "user", "content": "target"}],
+        _bubbles={0: bubble},
+        scroll=scroll,
+        jump_btn=_JumpButton(),
+        _auto_scroll=True,
+        _programmatic_scroll=False,
+        _cancel_pending_bottom_scrolls=lambda: None,
+        _is_at_bottom=lambda: False,
+        _visible_run=lambda: None,
+        _visible_compaction=lambda: None,
+    )
+    panel._scroll_to_history_index = lambda idx: ChatPanel._scroll_to_history_index(panel, idx)
+
+    ChatPanel._jump_to_history_message(panel, 0)
+
+    assert scroll.ensured == [(bubble, 0, 24)]
+    assert panel._auto_scroll is False
+    assert panel.jump_btn.shown == 1
+
+
+def test_jump_to_hidden_history_message_rebuilds_window_around_target(qapp, monkeypatch):
+    monkeypatch.setattr(chat_panel_module, "_MAX_RENDERED_HISTORY_MESSAGES", 8)
+    scroll = _EnsureScroll()
+    inserted = []
+    panel = SimpleNamespace(
+        history=[{"role": "user", "content": f"message {idx}"} for idx in range(30)],
+        _bubbles={},
+        _history_widgets={},
+        _external_tool_notices={},
+        _history_render_timer=_Timer(),
+        _pending_history_render_target=None,
+        _pending_history_render_next=-1,
+        _render_start_index=24,
+        _render_end_index=30,
+        _older_btn=None,
+        _newer_btn=None,
+        msg_container=_MessageContainer(),
+        msg_layout=_HistoryLayout(),
+        _message_layout_batch_depth=0,
+        scroll=scroll,
+        jump_btn=_JumpButton(),
+        _auto_scroll=True,
+        _programmatic_scroll=False,
+        _visible_run=lambda: None,
+        _visible_compaction=lambda: None,
+        _cancel_pending_bottom_scrolls=lambda: None,
+        _is_at_bottom=lambda: True,
+        _refresh_chat_navigation=lambda: None,
+        _sync_regenerate_flags=lambda: None,
+        _sync_history_paging_buttons=lambda: None,
+    )
+    panel._batch_message_layout = lambda: ChatPanel._batch_message_layout(panel)
+    panel._clear_bubbles = lambda: ChatPanel._clear_bubbles(panel)
+    panel._render_history_window_around = lambda idx: ChatPanel._render_history_window_around(panel, idx)
+    panel._scroll_to_history_index = lambda idx: ChatPanel._scroll_to_history_index(panel, idx)
+
+    def insert(idx, at_top=False):
+        widget = _DeletedWidget()
+        inserted.append((idx, at_top))
+        panel._bubbles[idx] = widget
+        panel._history_widgets.setdefault(idx, []).append(widget)
+        panel.msg_layout.insertWidget(panel.msg_layout.count() - 1, widget)
+        return widget
+
+    panel._insert_history_bubble = insert
+
+    ChatPanel._jump_to_history_message(panel, 12)
+
+    assert panel._render_start_index <= 12 < panel._render_end_index
+    assert panel._render_end_index - panel._render_start_index <= 8
+    assert 12 in panel._bubbles
+    assert scroll.ensured == [(panel._bubbles[12], 0, 24)]
+    assert [idx for idx, _at_top in inserted] == list(
+        range(panel._render_start_index, panel._render_end_index)
+    )
+
+
+def test_refresh_chat_navigation_repopulates_and_clears_entries(qapp):
+    rail = _NavigationRail()
+    panel = SimpleNamespace(
+        history=[
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+            {"role": "user", "content": "three"},
+        ],
+        _chat_nav=rail,
+        _bubbles={},
+        scroll=_Scroll(),
+    )
+    panel._active_user_history_index = lambda: ChatPanel._active_user_history_index(panel)
+    panel._sync_chat_navigation_active = lambda: ChatPanel._sync_chat_navigation_active(panel)
+
+    ChatPanel._refresh_chat_navigation(panel)
+
+    assert [entry.history_index for entry in rail.entries] == [0, 2]
+    assert rail.active == -1
+
+    panel.history = []
+    ChatPanel._refresh_chat_navigation(panel)
+
+    assert rail.entries == []
 
 def test_on_done_preserves_thread_tool_history(qapp):
     thread_history = [

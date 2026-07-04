@@ -173,15 +173,18 @@ def _show_extension_tool(parent, bus, pending: PendingApproval) -> None:
     name = pending.tool_name or "extension tool"
     source = str(getattr(pending, "tool_source", "") or "extension")
     owner = str(getattr(pending, "tool_owner", "") or "")
-    source_label = "MCP" if source == "mcp" else "extension"
+    source_label = "MCP" if source == "mcp" else ("built-in" if source == "builtin" else "extension")
     dlg = QDialog(parent)
     dlg.setWindowTitle(f"Allow {source_label} tool?")
     _apply_dialog_style(dlg)
     layout = QVBoxLayout(dlg)
 
-    note = QLabel(
-        f"Allow the <b>{_escape(name)}</b> {source_label} tool for this conversation?"
+    prompt = (
+        f"Allow the <b>{_escape(name)}</b> {source_label} tool once?"
+        if source == "builtin"
+        else f"Allow the <b>{_escape(name)}</b> {source_label} tool for this conversation?"
     )
+    note = QLabel(prompt)
     note.setWordWrap(True)
     layout.addWidget(note)
 
@@ -191,10 +194,13 @@ def _show_extension_tool(parent, bus, pending: PendingApproval) -> None:
         owner_label.setStyleSheet(_muted_label_style())
         layout.addWidget(owner_label)
 
-    caution = QLabel(
-        "MCP servers and extensions can connect to external systems or run local code. "
+    caution_text = (
+        "Built-in tools still require approval for sensitive actions."
+        if source == "builtin"
+        else "MCP servers and extensions can connect to external systems or run local code. "
         "Only allow tools from sources you trust."
     )
+    caution = QLabel(caution_text)
     caution.setWordWrap(True)
     caution.setStyleSheet(_muted_label_style())
     layout.addWidget(caution)
@@ -202,10 +208,13 @@ def _show_extension_tool(parent, bus, pending: PendingApproval) -> None:
     buttons = QDialogButtonBox()
     buttons.setStyleSheet(dialog_button_box_style())
     allow_once = buttons.addButton("Allow once", QDialogButtonBox.ButtonRole.AcceptRole)
-    allow_chat = buttons.addButton("Allow this conversation", QDialogButtonBox.ButtonRole.ActionRole)
+    allow_chat = None
+    if source != "builtin":
+        allow_chat = buttons.addButton("Allow this conversation", QDialogButtonBox.ButtonRole.ActionRole)
     cancel = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
     allow_once.clicked.connect(dlg.accept)
-    allow_chat.clicked.connect(lambda: dlg.done(2))
+    if allow_chat is not None:
+        allow_chat.clicked.connect(lambda: dlg.done(2))
     cancel.clicked.connect(dlg.reject)
     layout.addWidget(buttons)
 
@@ -218,7 +227,7 @@ def _show_extension_tool(parent, bus, pending: PendingApproval) -> None:
         bus.complete(
             pending,
             approved=False,
-            message=f"[tool error] User denied extension tool {name}.",
+            message=f"[tool error] User denied {source_label} tool {name}.",
         )
 
 

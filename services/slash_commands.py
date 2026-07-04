@@ -21,13 +21,15 @@ class SlashCommand:
 
 
 _ARCHIVIST_PROMPT = DEFAULT_ARCHIVIST_PROMPT
-_EXECUTABLE_BUILTIN_NAMES = {"compact", "reload"}
+_EXECUTABLE_BUILTIN_NAMES = {"compact", "reload", "savememory", "readmemory"}
 _BUILTIN_DESCRIPTIONS = {
     "compact": "Summarize older messages to free context",
     "reload": "Reload skills and extensions",
+    "savememory": "Save a durable project memory",
+    "readmemory": "Read durable project memory",
     "archivist": "Use saved chat memory and exact dropped chat references",
 }
-_ARCHIVIST_TOOLS = ["search_project_chats", "read_project_chat"]
+_ARCHIVIST_TOOLS = ["read_project_memory", "save_project_memory", "search_project_chats", "read_project_chat"]
 
 
 def _builtin_commands(*, load_settings: bool = True) -> list[SlashCommand]:
@@ -35,6 +37,8 @@ def _builtin_commands(*, load_settings: bool = True) -> list[SlashCommand]:
     return [
         SlashCommand("compact", _BUILTIN_DESCRIPTIONS["compact"], executable=True),
         SlashCommand("reload", _BUILTIN_DESCRIPTIONS["reload"], executable=True),
+        SlashCommand("savememory", _BUILTIN_DESCRIPTIONS["savememory"], executable=True),
+        SlashCommand("readmemory", _BUILTIN_DESCRIPTIONS["readmemory"], executable=True),
         archivist,
     ]
 

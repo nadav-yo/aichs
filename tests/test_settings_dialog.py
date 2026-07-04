@@ -20,6 +20,7 @@ from storage.settings import (
     FILE_EDITOR_TAB_SPACES_KEY,
     FILE_REVIEW_PROMPT_TEMPLATE_KEY,
     GIT_FIX_PROMPT_TEMPLATE_KEY,
+    PROJECT_MEMORY_SCOPE_KEY,
     DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
     DEFAULT_GRAPH_AGENT_PROMPT,
     TRASH_RETENTION_DAYS_KEY,
@@ -521,6 +522,7 @@ def test_basic_settings_are_saved_and_reloaded(qapp):
     assert dialog.diagnostic_fix_prompt_template.text() == ""
     assert dialog.git_fix_prompt_template.text() == ""
     assert dialog.graph_agent_prompt.toPlainText() == ""
+    assert dialog.project_memory_scope_combo.currentData() == "local"
     assert "Intent Graph agent" in dialog.graph_agent_prompt.placeholderText()
     assert dialog.commit_message_guidance.parent() is not None
     assert dialog.commit_message_guidance.toPlainText() == ""
@@ -538,6 +540,7 @@ def test_basic_settings_are_saved_and_reloaded(qapp):
     dialog.compact_resume_prompt.setText("Continue with the compacted notes.")
     dialog.auto_title_prompt_instructions.setPlainText("Title this briefly.")
     dialog.graph_agent_prompt.setPlainText("Build graph plans carefully.")
+    dialog.project_memory_scope_combo.setCurrentIndex(dialog.project_memory_scope_combo.findData("global"))
     dialog.compaction_summary_guidance.setPlainText("Keep commands exact.")
     dialog.archivist_prompt.setPlainText("Search memory carefully.")
     dialog.commit_message_guidance.setPlainText("Keep commits short.")
@@ -557,6 +560,7 @@ def test_basic_settings_are_saved_and_reloaded(qapp):
     assert saved[COMPACT_RESUME_PROMPT_KEY] == "Continue with the compacted notes."
     assert saved[AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY] == "Title this briefly."
     assert saved[GRAPH_AGENT_PROMPT_KEY] == "Build graph plans carefully."
+    assert saved[PROJECT_MEMORY_SCOPE_KEY] == "global"
     assert saved[COMPACTION_SUMMARY_GUIDANCE_KEY] == "Keep commands exact."
     assert saved[ARCHIVIST_PROMPT_KEY] == "Search memory carefully."
     assert store.load()[COMMIT_MESSAGE_PROMPT_ADDITION_KEY] == "Keep commits short."
@@ -579,6 +583,7 @@ def test_basic_settings_are_saved_and_reloaded(qapp):
     assert reloaded.compact_resume_prompt.text() == "Continue with the compacted notes."
     assert reloaded.auto_title_prompt_instructions.toPlainText() == "Title this briefly."
     assert reloaded.graph_agent_prompt.toPlainText() == "Build graph plans carefully."
+    assert reloaded.project_memory_scope_combo.currentData() == "global"
     assert reloaded.compaction_summary_guidance.toPlainText() == "Keep commands exact."
     assert reloaded.archivist_prompt.toPlainText() == "Search memory carefully."
     assert reloaded.commit_message_guidance.toPlainText() == "Keep commits short."

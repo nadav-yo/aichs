@@ -32,6 +32,8 @@ def test_crew_metadata_and_prompt():
     archivist = all_crew()[1]
     architect = all_crew()[2]
     assert "search_project_chats" in archivist.tools
+    assert "read_project_memory" in archivist.tools
+    assert "save_project_memory" in archivist.tools
     assert "list_files" in scout.tools
     assert "list_files" in archivist.tools
     assert "list_files" in architect.tools

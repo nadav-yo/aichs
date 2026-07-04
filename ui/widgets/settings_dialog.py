@@ -55,6 +55,7 @@ from storage.settings import (
     DEFAULT_GRAPH_AGENT_PROMPT,
     DEFAULT_GRAPH_GENERATION_STRATEGY,
     DEFAULT_GIT_FIX_PROMPT_TEMPLATE,
+    DEFAULT_PROJECT_MEMORY_SCOPE,
     DEFAULT_TRASH_RETENTION_DAYS,
     DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY,
     FILE_EDITOR_AUTO_SAVE_KEY,
@@ -67,6 +68,7 @@ from storage.settings import (
     MAX_FILE_EDITOR_TAB_SPACES,
     MIN_CANVAS_PARALLEL_LIMIT,
     MIN_FILE_EDITOR_TAB_SPACES,
+    PROJECT_MEMORY_SCOPE_KEY,
     TRASH_RETENTION_DAYS_KEY,
     SettingsStore,
     archivist_prompt,
@@ -85,6 +87,7 @@ from storage.settings import (
     git_fix_prompt_template,
     graph_agent_prompt,
     graph_generation_strategy,
+    project_memory_scope,
     trash_retention_days,
 )
 from ui.avatars import avatar_pixmap, clear_cache, persist_portrait
@@ -1805,6 +1808,17 @@ class SettingsDialog(QDialog):
         memory_layout.setContentsMargins(14, 14, 14, 14)
         memory_layout.setSpacing(10)
 
+        self.project_memory_scope_combo = QComboBox()
+        self.project_memory_scope_combo.addItem("Local project", "local")
+        self.project_memory_scope_combo.addItem("Global user", "global")
+        self.project_memory_scope_combo.addItem("Disabled", "disabled")
+        self.project_memory_scope_combo.setStyleSheet(self._field_style)
+        self._field(memory_layout, "Project memory scope", self.project_memory_scope_combo)
+        memory_layout.addWidget(_hint_label(
+            "Local stores durable memory in this workspace; global shares memory across workspaces.",
+            self._hint_style,
+        ))
+
         self.compaction_summary_guidance = QTextEdit()
         self.compaction_summary_guidance.setPlaceholderText(
             "Optional. Example: Prefer terse bullets and preserve test commands exactly."
@@ -2432,6 +2446,10 @@ class SettingsDialog(QDialog):
         self.graph_agent_prompt.setPlainText(
             self._load_prompt_override(saved, GRAPH_AGENT_PROMPT_KEY, DEFAULT_GRAPH_AGENT_PROMPT)
         )
+        memory_scope_index = self.project_memory_scope_combo.findData(project_memory_scope(saved))
+        if memory_scope_index < 0:
+            memory_scope_index = self.project_memory_scope_combo.findData(DEFAULT_PROJECT_MEMORY_SCOPE)
+        self.project_memory_scope_combo.setCurrentIndex(max(0, memory_scope_index))
         self.compaction_summary_guidance.setPlainText(
             self._load_prompt_override(saved, COMPACTION_SUMMARY_GUIDANCE_KEY)
         )
@@ -2792,6 +2810,9 @@ class SettingsDialog(QDialog):
             COMPACT_RESUME_PROMPT_KEY: self.compact_resume_prompt.text().strip(),
             AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY: self.auto_title_prompt_instructions.toPlainText().strip(),
             GRAPH_AGENT_PROMPT_KEY: self.graph_agent_prompt.toPlainText().strip(),
+            PROJECT_MEMORY_SCOPE_KEY: str(
+                self.project_memory_scope_combo.currentData() or DEFAULT_PROJECT_MEMORY_SCOPE
+            ),
             COMPACTION_SUMMARY_GUIDANCE_KEY: self.compaction_summary_guidance.toPlainText().strip(),
             ARCHIVIST_PROMPT_KEY: self.archivist_prompt.toPlainText().strip(),
             TRASH_RETENTION_DAYS_KEY: self.trash_retention_spin.value(),

@@ -339,7 +339,7 @@ def test_send_uses_loaded_builtin_prompt_command_without_sync_settings(workspace
         "archivist",
         "Memory",
         prompt="Use project memory.",
-        tools=["search_project_chats", "read_project_chat"],
+        tools=["read_project_memory", "save_project_memory", "search_project_chats", "read_project_chat"],
     )
     panel = SimpleNamespace()
     panel.cwd = str(workspace)
@@ -363,7 +363,7 @@ def test_send_uses_loaded_builtin_prompt_command_without_sync_settings(workspace
     assert drafts[0]["title_text"] == "find the plan"
     assert drafts[0]["skill"].name == "archivist"
     assert drafts[0]["skill"].prompt == "Use project memory."
-    assert drafts[0]["skill"].tools == ["search_project_chats", "read_project_chat"]
+    assert drafts[0]["skill"].tools == ["read_project_memory", "save_project_memory", "search_project_chats", "read_project_chat"]
 
 
 def test_send_uses_bare_mcp_command_as_tool_request(workspace):

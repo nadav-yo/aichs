@@ -2226,7 +2226,7 @@ class LeftPanel(QWidget):
             self.settings_changed.emit()
 
     def open_docs(self):
-        DocsDialog(self).exec()
+        DocsDialog(self, cwd=self._file_tree.root_path).exec()
 
     def _show_search_menu(self):
         menu = QMenu(self)

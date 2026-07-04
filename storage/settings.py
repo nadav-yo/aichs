@@ -83,6 +83,9 @@ DEFAULT_GIT_PANEL_LISTS_SPLIT = [120, 220]
 RESUME_SESSION_KEY = "resume_session"
 DEFAULT_RESUME_SESSION = "always"
 _VALID_RESUME_SESSION = frozenset({"always", "ask", "never"})
+PROJECT_MEMORY_SCOPE_KEY = "project_memory_scope"
+DEFAULT_PROJECT_MEMORY_SCOPE = "local"
+_VALID_PROJECT_MEMORY_SCOPES = frozenset({"local", "global", "disabled"})
 
 _LEGACY_PROVIDER_KEYS = {
     "claude": "anthropic_api_key",
@@ -219,6 +222,17 @@ def resume_session(data: dict | None) -> str:
     if mode not in _VALID_RESUME_SESSION:
         return DEFAULT_RESUME_SESSION
     return mode
+
+
+def project_memory_scope(data: dict | None) -> str:
+    data = data if isinstance(data, dict) else {}
+    raw = data.get(PROJECT_MEMORY_SCOPE_KEY)
+    if raw is None and isinstance(data.get("project_memory"), dict):
+        raw = data["project_memory"].get("scope")
+    scope = str(raw or DEFAULT_PROJECT_MEMORY_SCOPE).strip().lower()
+    if scope not in _VALID_PROJECT_MEMORY_SCOPES:
+        return DEFAULT_PROJECT_MEMORY_SCOPE
+    return scope
 
 
 def _text_setting(data: dict | None, key: str, default: str) -> str:

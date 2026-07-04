@@ -31,6 +31,7 @@ PERMISSION_KEYS = (
     "hooks",
     "ui",
     "language",
+    "docs",
     "processes",
     "network",
     "workspace_read",
@@ -45,6 +46,7 @@ _ENFORCED_PERMISSIONS = {
     "hooks",
     "ui",
     "language",
+    "docs",
     "processes",
 }
 _PROCESS_CAPABILITY_HINTS = ("process", "shell")
@@ -243,6 +245,15 @@ class ExtensionPanel:
 
 
 @dataclass(frozen=True)
+class ExtensionDoc:
+    name: str
+    title: str
+    path: str
+    source: str = "extension"
+    extension_id: str = "extension"
+
+
+@dataclass(frozen=True)
 class LanguageContribution:
     name: str
     file_patterns: list[str]
@@ -271,6 +282,7 @@ class ExtensionPermissions:
     hooks: bool = False
     ui: bool = False
     language: bool = False
+    docs: bool = False
     processes: bool = False
     network: bool = False
     workspace_read: bool = False
@@ -297,6 +309,7 @@ class ExtensionFileSummary:
     badges: list[StatusBadge]
     panels: list[ExtensionPanel]
     errors: list[str]
+    docs: list[ExtensionDoc] = field(default_factory=list)
     description: str = ""
     display_name: str = ""
     languages: list[LanguageContribution] = field(default_factory=list)
@@ -330,6 +343,7 @@ class _RegistrySnapshot:
     hooks: tuple[tuple[str, tuple[tuple[HookHandler, str], ...]], ...]
     badges: tuple[StatusBadge, ...]
     panels: tuple[ExtensionPanel, ...]
+    docs: tuple[ExtensionDoc, ...]
     languages: tuple[LanguageContribution, ...]
     errors: tuple[str, ...]
     permission_violations: tuple[str, ...]
@@ -448,8 +462,10 @@ class ToolRegistry:
         self._hooks: dict[str, list[tuple[HookHandler, str]]] = {}
         self._badges: dict[str, StatusBadge] = {}
         self._panels: dict[str, ExtensionPanel] = {}
+        self._docs: dict[str, ExtensionDoc] = {}
         self._languages: dict[str, LanguageContribution] = {}
         self._current_extension_id = "extension"
+        self._current_extension_dir: Path | None = None
         self._current_permissions = ExtensionPermissions()
         self._description = ""
         self.errors: list[str] = []
@@ -753,6 +769,39 @@ class ToolRegistry:
     def panel_by_name(self, name: str) -> ExtensionPanel | None:
         return self._panels.get(name)
 
+    def doc(
+        self,
+        *,
+        name: str,
+        title: str,
+        path: str,
+        source: str = "extension",
+    ) -> None:
+        if not self._allow_contribution(source, "docs", f"doc {name}"):
+            return
+        if not name or not name.replace("_", "").replace("-", "").isalnum():
+            raise ValueError(f"invalid doc name: {name!r}")
+        if not title:
+            raise ValueError("doc title is required")
+        doc_path = _extension_doc_path(
+            path,
+            self._current_extension_dir,
+            source=source,
+        )
+        key = f"{self._current_extension_id}:{name}"
+        if key in self._docs:
+            raise ValueError(f"doc already registered: {name}")
+        self._docs[key] = ExtensionDoc(
+            name=name,
+            title=_clean_description(title),
+            path=str(doc_path),
+            source=source,
+            extension_id=self._current_extension_id,
+        )
+
+    def docs(self) -> list[ExtensionDoc]:
+        return list(self._docs.values())
+
     def languages(self) -> list[LanguageContribution]:
         return list(self._languages.values())
 
@@ -859,6 +908,12 @@ def extension_canvas_tools(cwd: str | None = None) -> tuple[list[ToolDefinition]
     registry = ToolRegistry()
     load_extensions(registry, cwd)
     return registry.all(surface="canvas"), list(registry.errors)
+
+
+def extension_docs(cwd: str | None = None) -> tuple[list[ExtensionDoc], list[str]]:
+    registry = ToolRegistry()
+    load_extensions(registry, cwd)
+    return registry.docs(), list(registry.errors)
 
 
 def run_extension_hooks(cwd: str, event: str, ctx: HookContext) -> list[str]:
@@ -1155,6 +1210,7 @@ def _registry_snapshot(registry: ToolRegistry) -> _RegistrySnapshot:
         ),
         badges=tuple(registry._badges.values()),
         panels=tuple(registry.panels()),
+        docs=tuple(registry.docs()),
         languages=tuple(registry.languages()),
         errors=tuple(registry.errors),
         permission_violations=tuple(registry.permission_violations),
@@ -1182,6 +1238,10 @@ def _apply_registry_snapshot(registry: ToolRegistry, snapshot: _RegistrySnapshot
     for panel in snapshot.panels:
         if panel.name not in registry._panels:
             registry._panels[panel.name] = panel
+    for doc in snapshot.docs:
+        key = f"{doc.extension_id}:{doc.name}"
+        if key not in registry._docs:
+            registry._docs[key] = doc
     for language in snapshot.languages:
         if language.name not in registry._languages:
             registry._languages[language.name] = language
@@ -1332,6 +1392,7 @@ def _iter_extension_entrypoints(root: Path) -> list[Path]:
 def _load_extension_file(registry: ToolRegistry, path: Path) -> None:
     module_name = f"_aichs_ext_{abs(hash(str(path.resolve())))}"
     previous_extension_id = registry._current_extension_id
+    previous_extension_dir = registry._current_extension_dir
     previous_permissions = registry._current_permissions
     try:
         spec = importlib.util.spec_from_file_location(module_name, path)
@@ -1345,6 +1406,7 @@ def _load_extension_file(registry: ToolRegistry, path: Path) -> None:
             registry.errors.append(f"{path}: missing register(registry)")
             return
         registry._current_extension_id = _extension_id_for_path(path)
+        registry._current_extension_dir = path.parent
         registry._current_permissions = _extension_manifest_permissions(
             _extension_manifest_metadata(path)
         )
@@ -1353,6 +1415,7 @@ def _load_extension_file(registry: ToolRegistry, path: Path) -> None:
         registry.errors.append(f"{path}:\n{traceback.format_exc().rstrip()}")
     finally:
         registry._current_extension_id = previous_extension_id
+        registry._current_extension_dir = previous_extension_dir
         registry._current_permissions = previous_permissions
         sys.modules.pop(module_name, None)
 
@@ -1389,6 +1452,7 @@ def _extension_file_summary(
             hooks=static["hooks"],
             badges=static["badges"],
             panels=static["panels"],
+            docs=static["docs"],
             errors=[],
             description=static_description,
             display_name=display_name,
@@ -1418,6 +1482,7 @@ def _extension_file_summary(
         hooks=sorted(registry._hooks.keys()),
         badges=list(registry._badges.values()),
         panels=registry.panels(),
+        docs=registry.docs(),
         errors=errors,
         description=registry._description or _static_extension_description(path, manifest=manifest),
         display_name=display_name,
@@ -1502,6 +1567,7 @@ def _static_extension_contributions(path: Path) -> dict:
         "hooks": [],
         "badges": [],
         "panels": [],
+        "docs": [],
         "languages": [],
     }
     try:
@@ -1576,6 +1642,16 @@ def _static_extension_contributions(path: Path) -> dict:
                         name=panel_name,
                         title=_call_string_arg(node, "title") or panel_name,
                         provider=lambda _ctx: {},
+                    )
+                )
+        elif name == "doc":
+            doc_name = _call_string_arg(node, "name")
+            if doc_name:
+                empty["docs"].append(
+                    ExtensionDoc(
+                        name=doc_name,
+                        title=_call_string_arg(node, "title") or doc_name,
+                        path=_call_string_arg(node, "path"),
                     )
                 )
         elif name == "language":
@@ -1829,6 +1905,28 @@ def _safe_artifact_name(value: str) -> str:
     basename = str(value or "artifact").replace("\\", "/").split("/")[-1]
     safe = "".join(ch if ch.isalnum() or ch in ("_", "-", ".") else "_" for ch in basename)
     return safe.strip(" ._-") or "artifact"
+
+
+def _extension_doc_path(value: str, base: Path | None, *, source: str) -> Path:
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("doc path is required")
+    path = Path(raw)
+    if source != "extension":
+        return path.resolve()
+    if base is None:
+        raise ValueError("extension docs require an extension file context")
+    root = base.resolve()
+    candidate = path.resolve() if path.is_absolute() else (root / path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        raise ValueError("extension doc path must stay inside the extension folder")
+    if candidate.suffix.lower() != ".md":
+        raise ValueError("extension doc path must be a markdown file")
+    if not candidate.is_file():
+        raise ValueError(f"extension doc not found: {candidate}")
+    return candidate
 
 
 def _read_json_object(path: Path) -> dict:

@@ -45,7 +45,7 @@ from storage.settings import SettingsStore, compact_resume_prompt
 _MAX_PARALLEL = 8
 _MAX_CREW_CALLS_PER_TURN = 2
 _ACTIVE_TASK_PREVIEW_CHARS = 500
-_CREW_ONLY_TOOLS = {"search_project_chats", "read_project_chat"}
+_CREW_ONLY_TOOLS = {"search_project_chats", "read_project_chat", "read_project_memory", "save_project_memory"}
 _CHUNK_EMIT_INTERVAL_SEC = 0.10
 _CHUNK_EMIT_MAX_CHARS = 512
 _MIN_COMPACTED_MESSAGE_CHARS = 4_000
@@ -721,6 +721,16 @@ class ChatThread(QThread):
                 source=tool_source(name, self.cwd),
                 owner=tool_extension_id(name, self.cwd),
             )
+        if approval == "always":
+            return self._approval_bus.check_tool_always(
+                name,
+                inputs,
+                self.cwd,
+                self._tool_policy,
+                self._cancel.is_set,
+                source=tool_source(name, self.cwd),
+                owner=tool_extension_id(name, self.cwd),
+            )
         return self._approval_bus.check(
             name, inputs, self.cwd, self._tool_policy, self._cancel.is_set,
         )
@@ -795,16 +805,26 @@ class ChatThread(QThread):
             return message
 
     def _execute_archivist_lookup(self, member, meta: dict, task: str) -> str:
+        self.tool_called.emit("read_project_memory", {"query": task})
+        memory_text = execute(
+            "read_project_memory",
+            {"query": task, "limit": 10},
+            self.cwd,
+            cancel=self._cancel,
+        )
+        self.tool_result.emit("read_project_memory", memory_text)
         self.tool_called.emit("search_project_chats", {"query": task})
-        text = execute(
+        chat_text = execute(
             "search_project_chats",
             {"query": task, "limit": 5},
             self.cwd,
             cancel=self._cancel,
         )
-        self.tool_result.emit("search_project_chats", text)
+        self.tool_result.emit("search_project_chats", chat_text)
         if self._cancel.is_set():
-            text = text or "[cancelled]"
+            text = "[cancelled]"
+        else:
+            text = f"Project memory:\n{memory_text}\n\nProject chat history:\n{chat_text}"
         self.crew_done.emit(meta, text)
         return f"{member.name}: {text}"
 

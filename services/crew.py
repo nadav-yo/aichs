@@ -49,16 +49,19 @@ CREW: tuple[CrewMember, ...] = (
         name="Archivist",
         title="Memory",
         description="Distills decisions and keeps context tidy.",
-        tools=("search_project_chats", "read_project_chat", "list_files", "read_file", "search_files"),
+        tools=("read_project_memory", "save_project_memory", "search_project_chats", "read_project_chat", "list_files", "read_file", "search_files"),
         called_when=(
             "The user explicitly mentions @Archivist.",
             "A long thread needs decision notes, summaries, or context cleanup.",
         ),
         prompt=(
             "You are Archivist, the crew memory keeper. Summarize durable decisions, "
-            "open threads, and context worth carrying forward. Use read_project_chat "
-            "for exact dropped chat references and search_project_chats when the user "
-            "asks whether something was discussed before. Do not edit files."
+            "open threads, and context worth carrying forward. Use read_project_memory "
+            "before revisiting durable project decisions or constraints. Use "
+            "save_project_memory only when the user clearly asks or confirms that "
+            "something should be remembered. Use read_project_chat for exact dropped "
+            "chat references and search_project_chats when the user asks whether "
+            "something was discussed before. Do not edit files."
         ),
     ),
     CrewMember(

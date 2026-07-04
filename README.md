@@ -66,7 +66,7 @@ Open a workspace folder, pick a model, and work in one window:
 - **Agentic coding**: ask the agent to inspect files, explain code, search the repo, make edits, and run approved shell commands
 - **Approval-gated tools**: read, edit, search, git context, shell commands, and extension tools with workspace-scoped paths
 - **Coding workspace**: file tree, syntax-highlighted tabs, git status, diffs, file references, and conversation history
-- **Context management**: usage view, auto-compaction, compacted summaries, and decision memory for long sessions
+- **Context management**: usage view, auto-compaction, compacted summaries, and project memory for long sessions
 - **Customization**: configurable prompts and workflow defaults, slash-command skills, command palette, project/user extensions, custom tools, hooks, badges, and panels
 - **Conversation flow**: streaming Markdown, vision-capable models, file mentions, edit/resend, queued messages, pinned chats, search, and export
 
@@ -86,7 +86,8 @@ Contributor setup, source installs, tests, packaging, and release notes live in
 | Custom model providers | [docs/custom-models.md](docs/custom-models.md) |
 | Extensions and custom tools | [docs/extensions.md](docs/extensions.md) |
 | Slash-command skills | [docs/skills.md](docs/skills.md) |
-| Compaction and decision memory | [docs/compact.md](docs/compact.md) |
+| Compaction | [docs/compact.md](docs/compact.md) |
+| Project memory | [docs/project-memory.md](docs/project-memory.md) |
 | Performance north star | [docs/performance-north-star.md](docs/performance-north-star.md) |
 | YUK user kits | [docs/yuk.md](docs/yuk.md) |
 

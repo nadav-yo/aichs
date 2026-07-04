@@ -14,6 +14,7 @@ from storage.settings import (
     DEFAULT_GRAPH_AGENT_PROMPT,
     DEFAULT_GRAPH_GENERATION_STRATEGY,
     DEFAULT_GIT_FIX_PROMPT_TEMPLATE,
+    DEFAULT_PROJECT_MEMORY_SCOPE,
     SettingsStore,
     archivist_prompt,
     auto_title_prompt_instructions,
@@ -28,6 +29,7 @@ from storage.settings import (
     git_fix_prompt_template,
     graph_agent_prompt,
     graph_generation_strategy,
+    project_memory_scope,
     resume_session,
     DEFAULT_RESUME_SESSION,
 )
@@ -151,6 +153,14 @@ def test_file_prompt_templates_default_and_strip():
     )
     assert archivist_prompt({"archivist_prompt": "  Search memory  "}) == "Search memory"
     assert graph_agent_prompt({"graph_agent_prompt": "  Build graphs  "}) == "Build graphs"
+
+
+def test_project_memory_scope_defaults_and_validate():
+    assert project_memory_scope({}) == DEFAULT_PROJECT_MEMORY_SCOPE
+    assert project_memory_scope({"project_memory_scope": "global"}) == "global"
+    assert project_memory_scope({"project_memory_scope": "disabled"}) == "disabled"
+    assert project_memory_scope({"project_memory_scope": "bogus"}) == DEFAULT_PROJECT_MEMORY_SCOPE
+    assert project_memory_scope({"project_memory": {"scope": "global"}}) == "global"
 
 
 def test_canvas_settings_defaults_and_validate():

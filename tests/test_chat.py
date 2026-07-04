@@ -138,6 +138,8 @@ def test_chat_thread_exposes_ask_crew_tool_by_default(workspace, qapp):
     assert ASK_CREW_TOOL_NAME in names
     assert "search_project_chats" not in names
     assert "read_project_chat" not in names
+    assert "read_project_memory" not in names
+    assert "save_project_memory" not in names
 
     crew_thread = ChatThread(
         "claude-sonnet-4-6",
@@ -163,6 +165,8 @@ def test_archivist_gets_project_chat_memory_tool(workspace, qapp):
     names = {t["name"] for t in thread._tools_anthropic()}
     assert "search_project_chats" in names
     assert "read_project_chat" in names
+    assert "read_project_memory" in names
+    assert "save_project_memory" in names
 
 
 def test_emit_chunk_buffering(qapp, workspace):
@@ -310,6 +314,26 @@ def test_write_scope_limits_edit_file_to_tests(workspace, qapp):
     assert allowed is None
 
 
+def test_save_project_memory_requires_approval_every_call(workspace, qapp):
+    bus = ToolApprovalBus()
+    thread = ChatThread("claude-sonnet-4-6", [], "sys", str(workspace), approval_bus=bus)
+    approvals = []
+    bus.approval_needed.connect(
+        lambda pending: approvals.append(pending.tool_name) or bus.complete(
+            pending,
+            approved=True,
+            grant_extension_tool=True,
+        )
+    )
+
+    first = thread._execute_one("tool-1", "save_project_memory", {"topic": "x", "text": "Remember x."})
+    second = thread._execute_one("tool-2", "save_project_memory", {"topic": "x", "text": "Remember y."})
+
+    assert "Saved decision memory" in first[2]
+    assert "Saved decision memory" in second[2]
+    assert approvals == ["save_project_memory", "save_project_memory"]
+
+
 def test_execute_ask_crew_runs_nested_member(workspace, qapp):
     thread = ChatThread("claude-sonnet-4-6", [], "sys", str(workspace))
     started = []
@@ -356,7 +380,12 @@ def test_execute_ask_crew_archivist_uses_memory_lookup_without_model(workspace, 
         output = thread._execute_ask_crew({"member": "archivist", "task": "playwright"})
 
     assert output.startswith("Archivist:")
-    assert tool_calls == [("search_project_chats", {"query": "playwright"})]
+    assert tool_calls == [
+        ("read_project_memory", {"query": "playwright"}),
+        ("search_project_chats", {"query": "playwright"}),
+    ]
+    assert "Project memory:" in output
+    assert "Project chat history:" in output
     assert done[0][0]["id"] == "archivist"
 
 

@@ -1,4 +1,4 @@
-# Compaction and Decision Memory
+# Compaction
 
 Compaction is only context management. When a conversation grows past the
 context budget, compaction cuts off an older prefix of the chat, asks the model
@@ -18,52 +18,18 @@ Do not automatically save raw compaction archives by default. That would make
 compaction a hidden retention mechanism instead of a straightforward context
 cleanup operation.
 
-## Decision Memory
+## Related State
 
-Durable project decisions should live outside core compaction as an opt-in
-extension.
+Durable project memory, handoff notes, and large-output retention live outside
+core compaction. Project memory is a separate built-in store with local, global,
+and disabled scopes; see [Project Memory](project-memory.md). Compaction itself
+stays focused on context reduction and resumability.
 
-The decision-memory extension exposes narrow tools:
+Extensions can still provide their own context-resilience workflows. Extension
+tools, commands, context providers, and hooks receive `ctx.extension_id` and
+`ctx.storage`, so they can share project-scoped state without hand-rolled paths.
 
-- `remember_decision(topic, decision)` saves one short durable decision
-- `recall_decisions(topic)` returns decisions for one topic
-- `list_decision_topics()` lists known decision keys
-
-Storage is intentionally tiny:
-
-```json
-{
-  "authentication": [
-    "Use JWT for API authentication."
-  ],
-  "compaction": [
-    "Decision memory should be an opt-in extension, not part of core compaction."
-  ]
-}
-```
-
-The extension may add a small context snippet to the main prompt:
-
-- recall decisions before revisiting a durable architecture, product, strategy,
-  or implementation topic
-- remember only strong user-confirmed decisions
-- avoid transient plans, tool output, summaries, guesses, secrets, and facts
-  easily rediscovered from the repo
-- optionally show known topic keys, but do not inject all decision contents into
-  every prompt
-
-## Why Extension-Only
-
-Keeping decision memory as an extension makes the behavior explicit,
-workspace-disableable, and easy to inspect. It also avoids coupling memory
-policy to compaction, cron jobs, or raw transcript retention.
-
-Core infrastructure should only provide the extension API needed for this:
-extension tools, commands, context providers, and hooks receive
-`ctx.extension_id` and `ctx.storage`, so they can share project-scoped state
-without hand-rolled paths.
-
-For context-resilience workflows, extensions should use:
+For extension-owned workflows, use:
 
 - JSON state for compact handoff notes, decisions, blockers, and next steps.
 - Text artifacts for bulky tool output or reports via

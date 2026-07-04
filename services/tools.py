@@ -28,6 +28,7 @@ from services.subprocess_utils import popen_no_window, run_no_window  # noqa: E4
 from services.tool_policy import resolve_path, validate_tool_paths  # noqa: E402
 from services.tool_registry import ToolContext, ToolRegistry, load_extensions  # noqa: E402
 from services.mcp_tools import register_mcp_tools  # noqa: E402
+from services.project_memory import read_project_memory, save_project_memory  # noqa: E402
 
 # ── Tool schemas ──────────────────────────────────────────────────────────────
 
@@ -346,6 +347,59 @@ def _register_builtin_tools(registry: ToolRegistry) -> None:
         source="builtin",
     )
     registry.tool(
+        name="read_project_memory",
+        description=(
+            "Read durable project memory records for this workspace. Use before "
+            "summarizing or revisiting durable decisions, constraints, preferences, "
+            "or project handoff notes. Read-only."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional words/topic to search. Omit to list recent memory.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum records to return (default 20, max 50).",
+                },
+            },
+        },
+        execute=_execute_read_project_memory,
+        parallel_safe=True,
+        source="builtin",
+    )
+    registry.tool(
+        name="save_project_memory",
+        description=(
+            "Save one short durable project memory record. Use only when the user "
+            "clearly asks or confirms that a decision, constraint, preference, or "
+            "handoff note should be remembered. Requires user approval every time."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "description": "Stable lowercase topic key, e.g. compaction or authentication.",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "One concise sentence to remember.",
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Memory kind, e.g. decision, constraint, preference, handoff, or note.",
+                },
+            },
+            "required": ["topic", "text"],
+        },
+        execute=_execute_save_project_memory,
+        approval="always",
+        source="builtin",
+    )
+    registry.tool(
         name="read_project_chat",
         description=(
             "Read one exact saved aichs conversation for this project by conversation_id. "
@@ -425,6 +479,27 @@ def _execute_read_project_chat(ctx: ToolContext, inputs: dict) -> str:
         ctx.cwd,
         inputs.get("max_messages"),
     )
+
+
+def _execute_read_project_memory(ctx: ToolContext, inputs: dict) -> str:
+    return read_project_memory(
+        ctx.cwd,
+        str(inputs.get("query") or ""),
+        limit=inputs.get("limit", 20),
+    )
+
+
+def _execute_save_project_memory(ctx: ToolContext, inputs: dict) -> str:
+    try:
+        return save_project_memory(
+            ctx.cwd,
+            topic=str(inputs.get("topic") or ""),
+            text=str(inputs.get("text") or ""),
+            kind=str(inputs.get("kind") or "decision"),
+            source="agent",
+        )
+    except ValueError as exc:
+        return f"[tool error] {exc}"
 
 
 def _read_text_limited(path: Path, max_bytes: int) -> str:

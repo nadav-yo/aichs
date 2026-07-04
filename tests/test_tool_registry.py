@@ -17,6 +17,7 @@ from services.tool_registry import (
     extension_canvas_context_snippets,
     extension_canvas_tools,
     extension_context_snippets,
+    extension_docs,
     disable_unreviewed_extensions,
     clear_extension_cache,
     extension_errors,
@@ -218,6 +219,61 @@ def test_extension_context_exposes_extension_storage(workspace):
 
     assert errors == []
     assert ("Stored note", "stored") in snippets
+
+
+def test_extension_doc_registration_uses_extension_relative_path(workspace):
+    doc_dir = workspace / ".aichs" / "extensions" / "doc_ext" / "docs"
+    doc_dir.mkdir(parents=True)
+    (doc_dir / "guide.md").write_text("# Extension Guide\n", encoding="utf-8")
+    write_extension(
+        workspace,
+        "doc_ext/extension.py",
+        """
+        def register(registry):
+            registry.doc(
+                name="guide",
+                title="Extension Guide",
+                path="docs/guide.md",
+            )
+        """,
+    )
+
+    docs, errors = extension_docs(str(workspace))
+    overview = extension_overview(str(workspace)).files[0]
+
+    assert errors == []
+    assert len(docs) == 1
+    assert docs[0].name == "guide"
+    assert docs[0].title == "Extension Guide"
+    assert Path(docs[0].path) == (doc_dir / "guide.md").resolve()
+    assert overview.docs[0].name == "guide"
+
+
+def test_manifest_permissions_block_undeclared_docs(workspace):
+    ext_dir = workspace / ".aichs" / "extensions" / "doc-block"
+    doc_dir = ext_dir / "docs"
+    doc_dir.mkdir(parents=True)
+    (doc_dir / "guide.md").write_text("# Guide\n", encoding="utf-8")
+    (ext_dir / "aichs-extension.json").write_text(
+        json.dumps({"permissions": {"context": True}}) + "\n",
+        encoding="utf-8",
+    )
+    (ext_dir / "extension.py").write_text(
+        """
+def register(registry):
+    registry.doc(name="guide", title="Guide", path="docs/guide.md")
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    docs, errors = extension_docs(str(workspace))
+    overview = extension_overview(str(workspace)).files[0]
+
+    assert docs == []
+    assert any("doc guide" in error for error in errors)
+    assert overview.docs == []
+    assert any("doc guide" in item for item in overview.permission_violations)
 
 
 def test_extension_callback_surfaces_are_timed(workspace, monkeypatch):

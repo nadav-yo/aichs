@@ -643,6 +643,25 @@ def transparent_scroll_area_style(
     )
 
 
+def chat_navigation_preview_style(theme: str | None = None) -> str:
+    p = palette(theme)
+    return (
+        "QFrame#chatNavigationPreview { "
+        f"background:{p['BG2']}; border:1px solid {p['BORDER']};"
+        "border-radius:8px; }"
+    )
+
+
+def chat_navigation_preview_label_style(*, active: bool = False, theme: str | None = None) -> str:
+    p = palette(theme)
+    bg = p["BG3"] if active else "transparent"
+    return (
+        f"QLabel {{ color:{p['TEXT']}; background:{bg};"
+        "border-radius:7px; padding:4px 10px; "
+        + "}"
+    )
+
+
 def menu_style(
     *,
     selector: str = "QMenu",

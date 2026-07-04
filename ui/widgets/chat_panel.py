@@ -59,6 +59,7 @@ from services.export import default_export_name, write_conversation_markdown
 from services.file_search import list_workspace_files
 from services.file_refs import MENTION_RE, files_for_refs, message_file_refs
 from services.processes import RuntimeProcessApi, get_process_manager
+from services.project_memory import parse_save_memory_args, read_project_memory, save_project_memory
 from services.tool_registry import (
     RuntimeCommandApi,
     extension_errors,
@@ -69,7 +70,8 @@ from ui.theme import (
     send_button_style, stop_button_style, floating_button_style,
     tool_notice_style, center_notice_style, icon_button_style, inline_code_style,
     secondary_button_style, surface_frame_style, hint_label_style, code_text_edit_style,
-    compact_combo_box_style,
+    compact_combo_box_style, chat_navigation_preview_style,
+    chat_navigation_preview_label_style,
     chat_header_style, WORKBENCH_HEADER_MARGINS, WORKBENCH_HEADER_SPACING,
 )
 from services.skills import Skill, load_all as load_skills
@@ -1009,6 +1011,38 @@ class _ConversationRuntime:
     tool_policy: ConversationToolPolicy = field(default_factory=ConversationToolPolicy)
 
 
+@dataclass(frozen=True)
+class _ChatNavigationEntry:
+    history_index: int
+    preview: str
+
+
+def _chat_navigation_preview(content, limit: int = 72) -> str:
+    text = " ".join(content_preview(content).split())
+    if not text:
+        text = "Message"
+    if len(text) <= limit:
+        return text
+    cut = text[: max(0, limit - 3)].rstrip()
+    word_boundary = cut.rfind(" ")
+    if word_boundary >= max(8, limit // 2):
+        cut = cut[:word_boundary].rstrip()
+    return cut + "..."
+
+
+def _chat_navigation_entries(history: list[dict]) -> list[_ChatNavigationEntry]:
+    entries: list[_ChatNavigationEntry] = []
+    for idx, msg in enumerate(history):
+        if msg.get("role") != "user" or not is_visible_message(msg):
+            continue
+        entries.append(_ChatNavigationEntry(idx, _chat_navigation_preview(msg.get("content"))))
+    return entries
+
+
+def _chat_navigation_signature(entries: list[_ChatNavigationEntry]) -> tuple[tuple[int, str], ...]:
+    return tuple((entry.history_index, entry.preview) for entry in entries)
+
+
 class _MessageListContainer(QWidget):
     """Message column; notifies when layout height changes (new/tall bubbles)."""
 
@@ -1023,11 +1057,18 @@ class _MessageListContainer(QWidget):
 
 
 class _ScrollHost(QWidget):
-    """Scroll area container with a floating jump-to-bottom button."""
+    """Scroll area container with floating chat navigation controls."""
 
-    def __init__(self, scroll: QScrollArea, jump_btn: QPushButton, parent=None):
+    def __init__(
+        self,
+        scroll: QScrollArea,
+        jump_btn: QPushButton,
+        nav_rail: "_ChatNavigationRail | None" = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self._jump_btn = jump_btn
+        self._nav_rail = nav_rail
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1035,11 +1076,252 @@ class _ScrollHost(QWidget):
 
         jump_btn.setParent(self)
         jump_btn.raise_()
+        if nav_rail is not None:
+            nav_rail.setParent(self)
+            nav_rail.raise_()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         btn = self._jump_btn
         btn.move(self.width() - btn.width() - 16, self.height() - btn.height() - 16)
+        if self._nav_rail is not None:
+            margin = 0
+            top = 20
+            bottom = btn.height() + 36
+            height = max(80, self.height() - top - bottom)
+            rail_width = self._nav_rail.width()
+            self._nav_rail.setGeometry(
+                self.width() - rail_width - margin,
+                top,
+                rail_width,
+                height,
+            )
+            self._nav_rail.sync_visibility()
+
+
+class _ChatNavigationRail(QWidget):
+    """Compact user-turn minimap for a chat transcript."""
+
+    target_requested = pyqtSignal(int)
+
+    _WIDTH = 36
+    _MIN_MESSAGES = 3
+    _MIN_HOST_WIDTH = 520
+    _TICK_WIDTH = 18
+    _TICK_HEIGHT = 2
+    _TICK_RIGHT_MARGIN = 2
+    _HIT_RADIUS = 7
+    _PREVIEW_ROW_HEIGHT = 38
+    _PREVIEW_VISIBLE_ROWS = 12
+    _VISIBLE_RADIUS = 20
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._entries: list[_ChatNavigationEntry] = []
+        self._hovered = -1
+        self._active_history_index = -1
+        self._visible_entries_cache: list[_ChatNavigationEntry] = []
+        self._visible_cache_key: tuple[int, int] | None = None
+        self._popover = QFrame(parent)
+        self._popover.setObjectName("chatNavigationPreview")
+        self._popover_layout = QVBoxLayout(self._popover)
+        self._popover_layout.setContentsMargins(8, 8, 8, 8)
+        self._popover_layout.setSpacing(2)
+        self._popover.hide()
+        self.setFixedWidth(self._WIDTH)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.hide()
+
+    def setParent(self, parent, *args):
+        super().setParent(parent, *args)
+        self._popover.setParent(parent)
+
+    def set_entries(self, entries: list[_ChatNavigationEntry]):
+        if entries == self._entries:
+            self.sync_visibility()
+            return
+        self._entries = list(entries)
+        self._invalidate_visible_entries()
+        self._hovered = -1
+        self._hide_preview()
+        self.sync_visibility()
+        self.update()
+
+    def entries(self) -> list[_ChatNavigationEntry]:
+        return list(self._entries)
+
+    def set_active_history_index(self, history_index: int):
+        if history_index == self._active_history_index:
+            return
+        self._active_history_index = history_index
+        self._invalidate_visible_entries()
+        self.update()
+
+    def sync_visibility(self):
+        parent = self.parentWidget()
+        visible = (
+            len(self._entries) >= self._MIN_MESSAGES
+            and parent is not None
+            and parent.width() >= self._MIN_HOST_WIDTH
+            and self.height() >= 80
+        )
+        self.setVisible(visible)
+        if not visible:
+            self._hide_preview()
+
+    def apply_appearance(self):
+        self._popover.setStyleSheet(chat_navigation_preview_style())
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        visible_entries = self._visible_entries()
+        if not visible_entries:
+            return
+        p = palette()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        count = len(visible_entries)
+        for row, entry in enumerate(visible_entries):
+            y = self._entry_y(row, count)
+            active = entry.history_index == self._active_history_index
+            hovered = row == self._hovered
+            color = p["TEXT"] if active else (p["TEXT_DIM"] if hovered else p["BORDER"])
+            width = self._TICK_WIDTH + (3 if active or hovered else 0)
+            height = self._TICK_HEIGHT + (1 if active else 0)
+            x = self._tick_x(width)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(color))
+            painter.drawRoundedRect(x, int(y - height / 2), width, height, height, height)
+
+    def mouseMoveEvent(self, event):
+        row = self._entry_at_y(event.position().y())
+        if row != self._hovered:
+            self._hovered = row
+            self.update()
+            if row >= 0:
+                self._show_preview(row)
+            else:
+                self._hide_preview()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = -1
+        self.update()
+        self._hide_preview()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            row = self._entry_at_y(event.position().y())
+            visible_entries = self._visible_entries()
+            if 0 <= row < len(visible_entries):
+                self.target_requested.emit(visible_entries[row].history_index)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def _tick_x(self, width: int) -> int:
+        return max(0, self.width() - width - self._TICK_RIGHT_MARGIN)
+
+    def _entry_y(self, row: int, count: int | None = None) -> float:
+        if count is None:
+            count = len(self._visible_entries())
+        if count <= 1:
+            return self.height() / 2
+        top = 12
+        bottom = max(top + 1, self.height() - 12)
+        return top + (bottom - top) * row / (count - 1)
+
+    def _entry_at_y(self, y: float) -> int:
+        visible_entries = self._visible_entries()
+        if not visible_entries:
+            return -1
+        best = -1
+        best_distance = self._HIT_RADIUS + 1
+        count = len(visible_entries)
+        for row in range(count):
+            distance = abs(self._entry_y(row, count) - y)
+            if distance < best_distance:
+                best = row
+                best_distance = distance
+        return best
+
+    def _visible_entries(self) -> list[_ChatNavigationEntry]:
+        key = (len(self._entries), self._active_history_index)
+        if self._visible_cache_key == key:
+            return self._visible_entries_cache
+        if len(self._entries) <= self._VISIBLE_RADIUS * 2 + 1:
+            visible_entries = list(self._entries)
+        else:
+            center = self._active_entry_row()
+            if center < 0:
+                center = len(self._entries) - 1
+            visible = self._VISIBLE_RADIUS * 2 + 1
+            start = max(0, center - self._VISIBLE_RADIUS)
+            start = min(start, max(0, len(self._entries) - visible))
+            visible_entries = self._entries[start:start + visible]
+        self._visible_entries_cache = visible_entries
+        self._visible_cache_key = key
+        return visible_entries
+
+    def _invalidate_visible_entries(self):
+        self._visible_cache_key = None
+        self._visible_entries_cache = []
+
+    def _active_entry_row(self) -> int:
+        for row, entry in enumerate(self._entries):
+            if entry.history_index == self._active_history_index:
+                return row
+        return -1
+
+    def _show_preview(self, hovered: int):
+        parent = self.parentWidget()
+        visible_entries = self._visible_entries()
+        if parent is None or not visible_entries:
+            return
+        while self._popover_layout.count():
+            item = self._popover_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        rows = self._preview_window(hovered)
+        for row in rows:
+            entry = visible_entries[row]
+            label = QLabel(entry.preview, self._popover)
+            label.setWordWrap(False)
+            label.setFixedHeight(30)
+            label.setCursor(Qt.CursorShape.PointingHandCursor)
+            label.setStyleSheet(chat_navigation_preview_label_style(active=(row == hovered)))
+            label.mousePressEvent = (
+                lambda event, idx=entry.history_index: self._preview_clicked(event, idx)
+            )
+            self._popover_layout.addWidget(label)
+
+        width = 354
+        height = len(rows) * self._PREVIEW_ROW_HEIGHT + 16
+        x = max(8, self.x() - width - 8)
+        y = int(self.y() + self._entry_y(hovered, len(visible_entries)) - height / 2)
+        y = max(8, min(y, parent.height() - height - 8))
+        self._popover.setGeometry(x, y, width, height)
+        self._popover.show()
+        self._popover.raise_()
+
+    def _preview_clicked(self, event, history_index: int):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.target_requested.emit(history_index)
+            event.accept()
+
+    def _preview_window(self, hovered: int) -> list[int]:
+        count = len(self._visible_entries())
+        visible = min(self._PREVIEW_VISIBLE_ROWS, count)
+        start = max(0, hovered - visible // 2)
+        start = min(start, max(0, count - visible))
+        return list(range(start, start + visible))
+
+    def _hide_preview(self):
+        self._popover.hide()
 
 
 class _ToolNoticeWidget(QFrame):
@@ -1329,6 +1611,8 @@ class ChatPanel(QWidget):
         self._last_scroll_value = 0
         self._bubbles: dict[int, MessageBubble] = {}
         self._history_widgets: dict[int, list[QWidget]] = {}
+        self._chat_navigation_signature: tuple[tuple[int, str], ...] = ()
+        self._chat_navigation_refresh_pending = False
         self._render_start_index = 0
         self._render_end_index = 0
         self._older_btn: QPushButton | None = None
@@ -1481,7 +1765,9 @@ class ChatPanel(QWidget):
         self.jump_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.jump_btn.clicked.connect(self._resume_auto_scroll)
 
-        self.scroll_host = _ScrollHost(self.scroll, self.jump_btn)
+        self._chat_nav = _ChatNavigationRail()
+        self._chat_nav.target_requested.connect(self._jump_to_history_message)
+        self.scroll_host = _ScrollHost(self.scroll, self.jump_btn, self._chat_nav)
         self.scroll.verticalScrollBar().valueChanged.connect(self._on_scroll)
         root.addWidget(self.scroll_host, 1)
 
@@ -2044,7 +2330,8 @@ class ChatPanel(QWidget):
                 self._skill_picker.hide()
             if self._file_picker:
                 self._file_picker.hide()
-            self._run_builtin_command(cmd)
+            invocation = slash_invocation(text)
+            self._run_builtin_command(cmd, invocation[1] if invocation else "")
             return
 
         builtin_prompt_cmd = ChatPanel._loaded_builtin_prompt_command(self, text) if text and not images else None
@@ -2714,7 +3001,7 @@ class ChatPanel(QWidget):
         self.composer.input.exit_slash_mode()
         self._skill_picker.hide()
         if getattr(command, "source", "builtin") == "builtin" and getattr(command, "executable", False):
-            self._run_builtin_command(command.name)
+            self._run_builtin_command(command.name, "")
         elif getattr(command, "executable", False):
             self._run_extension_command(command.name, "")
         else:
@@ -2764,7 +3051,7 @@ class ChatPanel(QWidget):
         )
         return skill
 
-    def _run_builtin_command(self, name: str):
+    def _run_builtin_command(self, name: str, args: str = ""):
         if name == "compact":
             self.compact_conversation(force=True)
         elif name == "reload":
@@ -2774,6 +3061,18 @@ class ChatPanel(QWidget):
             self._update_context_ui()
             self._refresh_extension_ui()
             self._start_extension_reload_check()
+        elif name == "savememory":
+            parsed = parse_save_memory_args(args)
+            if parsed is None:
+                self._add_notice("Usage: /savememory <topic> <memory> or /savememory <topic>: <memory>")
+                return
+            topic, memory = parsed
+            try:
+                self._add_notice(save_project_memory(self.cwd, topic=topic, text=memory, source="user"))
+            except ValueError as exc:
+                self._add_notice(f"Could not save memory: {exc}")
+        elif name == "readmemory":
+            self._add_notice(read_project_memory(self.cwd, args))
 
     def _start_extension_reload_check(self) -> None:
         self._extension_reload_generation += 1
@@ -3680,6 +3979,8 @@ class ChatPanel(QWidget):
             self._track_history_widget(history_index, bubble)
             self._render_end_index = max(self._render_end_index, history_index + 1)
         self._bottom()
+        if hasattr(self, "_refresh_chat_navigation"):
+            self._refresh_chat_navigation()
         return bubble
 
     def _make_bubble(self, content, is_user: bool, typing: bool = False,
@@ -3707,6 +4008,153 @@ class ChatPanel(QWidget):
         if not os.path.isfile(abs_path):
             return
         self.open_file.emit(abs_path, None)
+
+    def _refresh_chat_navigation(self):
+        if getattr(self, "_message_layout_batch_depth", 0) > 0:
+            self._chat_navigation_refresh_pending = True
+            return
+        apply_entries = getattr(self, "_apply_chat_navigation_entries", None)
+        if apply_entries is not None:
+            apply_entries()
+        else:
+            ChatPanel._apply_chat_navigation_entries(self)
+
+    def _apply_chat_navigation_entries(self):
+        rail = getattr(self, "_chat_nav", None)
+        if rail is None:
+            return
+        entries = _chat_navigation_entries(self.history)
+        signature = _chat_navigation_signature(entries)
+        if signature != getattr(self, "_chat_navigation_signature", None):
+            self._chat_navigation_signature = signature
+            rail.set_entries(entries)
+        else:
+            rail.sync_visibility()
+        self._sync_chat_navigation_active()
+
+    def _sync_chat_navigation_active(self):
+        rail = getattr(self, "_chat_nav", None)
+        if rail is None:
+            return
+        rail.set_active_history_index(self._active_user_history_index())
+
+    def _active_user_history_index(self) -> int:
+        if not hasattr(self, "scroll"):
+            return -1
+        bar = self.scroll.verticalScrollBar()
+        viewport_top = bar.value()
+        viewport_height_fn = getattr(self, "_chat_viewport_height", None)
+        viewport_height = (
+            viewport_height_fn()
+            if viewport_height_fn is not None
+            else ChatPanel._chat_viewport_height(self)
+        )
+        viewport_bottom = viewport_top + viewport_height if viewport_height > 0 else viewport_top
+
+        if viewport_height > 0 and bar.maximum() > 0 and viewport_top >= bar.maximum() - 8:
+            focus_y = viewport_bottom - 8
+        elif viewport_top <= 8:
+            focus_y = viewport_top + 8
+        elif viewport_height > 0:
+            focus_y = viewport_top + viewport_height / 2
+        else:
+            focus_y = viewport_top + 8
+
+        candidates = []
+        fallback_candidates = []
+        for idx, bubble in sorted(self._bubbles.items()):
+            if not (0 <= idx < len(self.history)):
+                continue
+            msg = self.history[idx]
+            if msg.get("role") != "user" or not is_visible_message(msg):
+                continue
+            y = bubble.y() if hasattr(bubble, "y") else 0
+            height = bubble.height() if hasattr(bubble, "height") else 0
+            bottom = y + height
+            center = y + height / 2
+            distance = abs(focus_y - center)
+            fallback_candidates.append((distance, idx))
+            if viewport_height > 0 and (bottom < viewport_top + 8 or y > viewport_bottom - 8):
+                continue
+            candidates.append((distance, idx))
+        if candidates:
+            return min(candidates)[1]
+        if fallback_candidates:
+            return min(fallback_candidates)[1]
+        return -1
+
+    def _chat_viewport_height(self) -> int:
+        viewport = self.scroll.viewport() if hasattr(self.scroll, "viewport") else None
+        if viewport is not None and hasattr(viewport, "height"):
+            return max(0, int(viewport.height()))
+        if hasattr(self.scroll, "height"):
+            return max(0, int(self.scroll.height()))
+        return 0
+
+    def _jump_to_history_message(self, history_index: int):
+        if history_index < 0 or history_index >= len(self.history):
+            return
+        msg = self.history[history_index]
+        if msg.get("role") != "user" or not is_visible_message(msg):
+            return
+        if history_index not in self._bubbles:
+            if self._visible_run() or self._visible_compaction():
+                return
+            self._render_history_window_around(history_index)
+        self._scroll_to_history_index(history_index)
+
+    def _render_history_window_around(self, history_index: int):
+        self._history_render_timer.stop()
+        self._pending_history_render_target = None
+        self._pending_history_render_next = -1
+        start = _window_start(
+            self.history,
+            history_index + 1,
+            _OLDER_RENDER_BYTES,
+            _OLDER_RENDER_MESSAGES,
+        )
+        end = _window_end(
+            self.history,
+            history_index,
+            _NEWER_RENDER_BYTES,
+            _NEWER_RENDER_MESSAGES,
+        )
+        end = max(end, history_index + 1)
+        if end - start > _MAX_RENDERED_HISTORY_MESSAGES:
+            half = _MAX_RENDERED_HISTORY_MESSAGES // 2
+            start = max(0, history_index - half)
+            end = min(len(self.history), start + _MAX_RENDERED_HISTORY_MESSAGES)
+            start = max(0, min(start, end - _MAX_RENDERED_HISTORY_MESSAGES))
+        with time_operation(
+            "chat.render.navigation_window",
+            detail=f"target={history_index} start={start} end={end}",
+        ):
+            with self._batch_message_layout():
+                self._clear_bubbles()
+                self._render_start_index = start
+                self._render_end_index = end
+                for idx in range(start, end):
+                    self._insert_history_bubble(idx)
+                self._sync_regenerate_flags()
+                self._sync_history_paging_buttons()
+        if hasattr(self, "_refresh_chat_navigation"):
+            self._refresh_chat_navigation()
+
+    def _scroll_to_history_index(self, history_index: int):
+        bubble = self._bubbles.get(history_index)
+        if bubble is None:
+            return
+        self._cancel_pending_bottom_scrolls()
+        self._auto_scroll = False
+        self._programmatic_scroll = True
+        self.scroll.ensureWidgetVisible(bubble, 0, 24)
+        self._last_scroll_value = self.scroll.verticalScrollBar().value()
+        self._programmatic_scroll = False
+        if not self._is_at_bottom():
+            self.jump_btn.show()
+            self.jump_btn.raise_()
+        if hasattr(self, "_sync_chat_navigation_active"):
+            self._sync_chat_navigation_active()
 
     def _find_turn_user_index(self) -> int | None:
         i = len(self.history) - 1
@@ -3781,6 +4229,8 @@ class ChatPanel(QWidget):
         self.btn.setStyleSheet(send_button_style())
         self.stop_btn.setStyleSheet(stop_button_style())
         self.context_ring.update()
+        if hasattr(self, "_chat_nav"):
+            self._chat_nav.apply_appearance()
         if hasattr(self, "_extension_bar"):
             self._extension_bar.apply_appearance()
 
@@ -3835,6 +4285,8 @@ class ChatPanel(QWidget):
             item = self.msg_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        if hasattr(self, "_refresh_chat_navigation"):
+            self._refresh_chat_navigation()
 
     @contextmanager
     def _batch_message_layout(self):
@@ -3850,6 +4302,13 @@ class ChatPanel(QWidget):
             if outermost:
                 self.msg_container.setUpdatesEnabled(updates_enabled)
                 self.msg_container.update()
+                if getattr(self, "_chat_navigation_refresh_pending", False):
+                    self._chat_navigation_refresh_pending = False
+                    apply_entries = getattr(self, "_apply_chat_navigation_entries", None)
+                    if apply_entries is not None:
+                        apply_entries()
+                    else:
+                        ChatPanel._apply_chat_navigation_entries(self)
 
     def _render_history_tail(self):
         with time_operation(
@@ -3875,6 +4334,8 @@ class ChatPanel(QWidget):
                 self._sync_regenerate_flags()
                 if target_start == sync_start:
                     self._sync_history_paging_buttons()
+        if hasattr(self, "_refresh_chat_navigation"):
+            self._refresh_chat_navigation()
         if target_start < sync_start:
             self._pending_history_render_target = target_start
             self._pending_history_render_next = sync_start - 1
@@ -3909,6 +4370,8 @@ class ChatPanel(QWidget):
         self._pending_history_render_next = -1
         self._trim_rendered_history_from_bottom()
         self._sync_history_paging_buttons()
+        if hasattr(self, "_refresh_chat_navigation"):
+            self._refresh_chat_navigation()
 
     def _render_visible_run(self):
         run = self._visible_run()
@@ -3968,6 +4431,8 @@ class ChatPanel(QWidget):
                 self._trim_rendered_history_from_bottom()
                 self._sync_history_paging_buttons()
 
+        if hasattr(self, "_refresh_chat_navigation"):
+            self._refresh_chat_navigation()
         self._prepend_restore = (old_value, old_max)
         self._prepend_restore_timer.start()
 
@@ -4008,6 +4473,8 @@ class ChatPanel(QWidget):
                 self._trim_rendered_history_from_top()
                 self._sync_regenerate_flags()
                 self._sync_history_paging_buttons()
+        if hasattr(self, "_refresh_chat_navigation"):
+            self._refresh_chat_navigation()
 
     def _insert_history_bubble(self, history_index: int, *, at_top: bool = False):
         msg = self.history[history_index]
@@ -4045,6 +4512,8 @@ class ChatPanel(QWidget):
         self._bubbles[history_index] = bubble
         self._track_history_widget(history_index, bubble)
         bubble.set_regenerable(history_index == _latest_regenerable_assistant_index(self.history))
+        if hasattr(self, "_refresh_chat_navigation"):
+            self._refresh_chat_navigation()
         return bubble
 
     def _history_insert_index(self, *, at_top: bool) -> int:
@@ -4086,6 +4555,8 @@ class ChatPanel(QWidget):
         for idx in range(max_end, self._render_end_index):
             self._remove_history_index_widgets(idx)
         self._render_end_index = max_end
+        if hasattr(self, "_sync_chat_navigation_active"):
+            self._sync_chat_navigation_active()
 
     def _trim_rendered_history_from_top(self):
         min_start = max(0, self._render_end_index - _MAX_RENDERED_HISTORY_MESSAGES)
@@ -4094,6 +4565,8 @@ class ChatPanel(QWidget):
         for idx in range(self._render_start_index, min_start):
             self._remove_history_index_widgets(idx)
         self._render_start_index = min_start
+        if hasattr(self, "_sync_chat_navigation_active"):
+            self._sync_chat_navigation_active()
 
     def _remove_paging_button(self, attr: str):
         button = getattr(self, attr)
@@ -4213,6 +4686,8 @@ class ChatPanel(QWidget):
     def _on_scroll(self, value: int):
         if self._programmatic_scroll:
             self._last_scroll_value = value
+            if hasattr(self, "_sync_chat_navigation_active"):
+                self._sync_chat_navigation_active()
             return
         if (
             self._history_prepend_enabled
@@ -4224,6 +4699,8 @@ class ChatPanel(QWidget):
 
         prev = self._last_scroll_value
         self._last_scroll_value = value
+        if hasattr(self, "_sync_chat_navigation_active"):
+            self._sync_chat_navigation_active()
 
         if not self._is_at_bottom() and (prev is None or value < prev):
             self._cancel_pending_bottom_scrolls()
@@ -4247,6 +4724,8 @@ class ChatPanel(QWidget):
     def _on_message_list_resize(self):
         if self._auto_scroll:
             self._scroll_to_bottom(force=True)
+        if hasattr(self, "_sync_chat_navigation_active"):
+            self._sync_chat_navigation_active()
 
     def _resume_auto_scroll(self):
         self._auto_scroll = True

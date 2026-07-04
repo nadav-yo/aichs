@@ -6,10 +6,12 @@ from ui.widgets.docs_dialog import (
     _DocLoadWorker,
     _DocsIndexWorker,
     DocsDialog,
+    available_doc_entries,
     available_docs,
     doc_title,
     markdown_document_html,
 )
+from tests.conftest import write_extension
 
 
 def test_available_docs_uses_known_order_then_extras(tmp_path):
@@ -23,6 +25,65 @@ def test_available_docs_uses_known_order_then_extras(tmp_path):
         "skills.md",
         "z-extra.md",
     ]
+
+
+def test_available_doc_entries_includes_extension_docs(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "configuration.md").write_text("# Configuration\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    doc_dir = workspace / ".aichs" / "extensions" / "decision-memory" / "docs"
+    doc_dir.mkdir(parents=True)
+    (doc_dir / "decision-memory.md").write_text("# Decision Memory\n", encoding="utf-8")
+    write_extension(
+        workspace,
+        "decision-memory/extension.py",
+        """
+        def register(registry):
+            registry.doc(
+                name="decision_memory",
+                title="Decision Memory",
+                path="docs/decision-memory.md",
+            )
+        """,
+    )
+
+    entries = available_doc_entries(docs, str(workspace))
+
+    assert [entry.display_title for entry in entries] == [
+        "Configuration",
+        "Decision Memory [EXTENSION]",
+    ]
+    assert entries[1].is_extension is True
+
+
+def test_docs_dialog_labels_extension_docs(qapp, tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    workspace = tmp_path / "workspace"
+    doc_dir = workspace / ".aichs" / "extensions" / "decision-memory" / "docs"
+    doc_dir.mkdir(parents=True)
+    (doc_dir / "decision-memory.md").write_text("# Decision Memory\n\nDurable choices.", encoding="utf-8")
+    write_extension(
+        workspace,
+        "decision-memory/extension.py",
+        """
+        def register(registry):
+            registry.doc(
+                name="decision_memory",
+                title="Decision Memory",
+                path="docs/decision-memory.md",
+            )
+        """,
+    )
+
+    dialog = DocsDialog(root=docs, cwd=str(workspace))
+    try:
+        assert _process_until(qapp, lambda: dialog.nav.count() == 1)
+        assert dialog.nav.item(0).text() == "Decision Memory [EXTENSION]"
+        assert _process_until(qapp, lambda: "Durable choices" in dialog.viewer.toPlainText())
+    finally:
+        dialog.close()
 
 
 def test_doc_title_reads_first_heading(tmp_path):
@@ -49,7 +110,13 @@ def test_docs_index_worker_reads_titles(qapp, tmp_path):
 
     worker.run()
 
-    assert done == [(3, [("configuration.md", "Configuration")], "")]
+    assert done == [(3, [(
+        "configuration.md",
+        "Configuration",
+        str((docs / "configuration.md").resolve()),
+        False,
+        "",
+    )], "")]
 
 
 def test_doc_load_worker_reads_selected_doc(qapp, tmp_path):
@@ -62,7 +129,7 @@ def test_doc_load_worker_reads_selected_doc(qapp, tmp_path):
 
     worker.run()
 
-    assert done == [(7, "skills.md", "# Skills\n\nBody", "")]
+    assert done == [(7, str((docs / "skills.md").resolve()), "# Skills\n\nBody", "")]
 
 
 def test_docs_dialog_loads_markdown(qapp, tmp_path):

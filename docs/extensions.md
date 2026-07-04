@@ -98,6 +98,7 @@ Folder manifests should declare extension permissions:
     "hooks": false,
     "ui": false,
     "language": false,
+    "docs": false,
     "processes": false,
     "network": false,
     "workspace_read": false,
@@ -109,7 +110,7 @@ Folder manifests should declare extension permissions:
 
 These permissions are a disclosure and app-level contribution contract. Core
 blocks undeclared registry contributions such as tools, commands, context,
-hooks, UI, language features, and process-control commands. They are not an
+hooks, UI, language features, docs, and process-control commands. They are not an
 operating-system sandbox: enabled extensions still run local Python code in the
 AICHS process, and workspace/network declarations are shown as risk disclosures.
 Imported, new, or changed extensions are disabled until reviewed.
@@ -491,6 +492,25 @@ does not resume from guessed continuation state.
 Examples live outside the app repo at
 [nadav-yo/aichs-extensions](https://github.com/nadav-yo/aichs-extensions).
 They are opt-in and are not shipped with `aichs` by default.
+
+## Documentation
+
+Extensions can add markdown documents to the app's Docs dialog. Extension docs
+appear after core docs, and the nav title includes an `EXTENSION` label so they
+are not mistaken for built-in app documentation.
+
+```python
+def register(registry):
+    registry.doc(
+        name="decision_memory",
+        title="Decision Memory",
+        path="docs/decision-memory.md",
+    )
+```
+
+`path` is resolved relative to the extension folder, must point to an existing
+`.md` file, and must stay inside that extension folder. Folder-extension
+manifests should declare `"docs": true` when they register docs.
 
 ## Language Features
 

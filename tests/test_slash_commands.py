@@ -16,7 +16,7 @@ from storage.settings import ARCHIVIST_PROMPT_KEY, SettingsStore
 
 def test_builtin_names():
     names = {cmd.name for cmd in BUILTIN_COMMANDS}
-    assert names == {"archivist", "compact", "reload"}
+    assert names == {"archivist", "compact", "readmemory", "reload", "savememory"}
 
 
 @pytest.mark.parametrize(
@@ -24,6 +24,8 @@ def test_builtin_names():
     [
         ("/compact", "compact"),
         ("/RELOAD extra", "reload"),
+        ("/savememory compaction use local memory", "savememory"),
+        ("/readmemory compaction", "readmemory"),
         ("  /compact  ", "compact"),
         ("/archivist notes", None),
         ("/unknown", None),
@@ -44,13 +46,15 @@ def test_parse_executable_builtin_command_does_not_load_settings(monkeypatch):
 
     assert parse_builtin_command("/compact") == "compact"
     assert parse_builtin_command("/reload") == "reload"
+    assert parse_builtin_command("/savememory topic text") == "savememory"
+    assert parse_builtin_command("/readmemory topic") == "readmemory"
 
 
 def test_parse_builtin_prompt_command():
     cmd = parse_builtin_prompt_command("/archivist what did we decide?")
     assert cmd is not None
     assert cmd.name == "archivist"
-    assert cmd.tools == ["search_project_chats", "read_project_chat"]
+    assert cmd.tools == ["read_project_memory", "save_project_memory", "search_project_chats", "read_project_chat"]
     assert parse_builtin_prompt_command("/compact") is None
 
 
@@ -61,7 +65,7 @@ def test_archivist_prompt_uses_settings_without_changing_tools():
 
     assert cmd is not None
     assert cmd.prompt == "Search the durable project memory."
-    assert cmd.tools == ["search_project_chats", "read_project_chat"]
+    assert cmd.tools == ["read_project_memory", "save_project_memory", "search_project_chats", "read_project_chat"]
 
 
 @pytest.mark.parametrize(
@@ -80,7 +84,7 @@ def test_slash_invocation(text, expected):
 
 def test_load_all_commands_includes_builtins(workspace):
     names = {c.name for c in load_all_commands(str(workspace)) if c.source == "builtin"}
-    assert names == {"archivist", "compact", "reload"}
+    assert names == {"archivist", "compact", "readmemory", "reload", "savememory"}
 
 
 def test_load_all_commands_includes_extension(workspace_with_extension):

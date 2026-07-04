@@ -17,6 +17,7 @@ state, and recent workspaces, to another directory.
 | `compact_resume_prompt` | Default resume message used after compact-and-resume when no extension prompt is supplied |
 | `auto_title_prompt_instructions` | Replaces the title-writing instructions; the first user message is attached automatically |
 | `compaction_summary_guidance` | Optional additive guidance appended to the fixed compaction summary prompt |
+| `project_memory_scope` | Project memory storage scope: `local` (default), `global`, or `disabled` |
 | `archivist_prompt` | Replaces instructions for the built-in `/archivist` slash command; command name and tools stay fixed |
 | `commit_message_prompt_addition` | Optional additive guidance appended to generated commit-message requests |
 | `default_models` | Default model per provider |
@@ -26,7 +27,11 @@ state, and recent workspaces, to another directory.
 | `compaction.reserve_tokens` | Optional. Tokens held back for the next reply before auto-compaction (omit to scale from each model's context window) |
 | `compaction.keep_recent_tokens` | Optional. Recent message tokens to keep verbatim when compacting (omit to scale automatically) |
 
-API keys can also be set via environment variables or **Settings → Models** before launch.
+API keys can also be set via environment variables or **Settings -> Models** before launch.
+
+Project memory defaults to local workspace storage at `.aichs/memory/project-memory.json`.
+Set `project_memory_scope` to `global` to use `AICHS_HOME/memory/global-memory.json`,
+or `disabled` to prevent project-memory reads and writes.
 
 MCP servers are configured separately in standard `mcp.json` files; see
 [MCP](mcp.md).
