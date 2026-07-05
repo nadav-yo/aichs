@@ -225,6 +225,13 @@ def test_configure_combo_box_popup_installs_explicit_list_view(qapp):
     qapp.processEvents()
 
 
+def test_combo_popup_viewport_margins_ignore_protected_qt_objects():
+    class ProtectedView:
+        def setViewportMargins(self, *_args):
+            raise RuntimeError("no access to protected functions or signals for objects not created from Python")
+
+    assert theme_module._set_viewport_margins(ProtectedView(), 0, 4, 0, 4) is False
+
 def test_combo_popup_delegate_paints_mouseover_row(qapp):
     from PyQt6.QtCore import QRect, QStringListModel
     from PyQt6.QtGui import QImage, QPainter

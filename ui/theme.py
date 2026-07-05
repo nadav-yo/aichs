@@ -77,8 +77,15 @@ elif sys.platform == "win32":
 else:
     UI_FONT = "Sans Serif"
     FONT_FAMILY = "sans-serif"
-MONO_FONT = "Menlo"
-MONO_FONT_CSS = "Menlo, 'SF Mono', 'Cascadia Code', 'Courier New', monospace"
+if sys.platform == "darwin":
+    MONO_FONT = "Menlo"
+    MONO_FONT_CSS = "Menlo, Monaco, monospace"
+elif sys.platform == "win32":
+    MONO_FONT = "Consolas"
+    MONO_FONT_CSS = "Consolas, 'Courier New', monospace"
+else:
+    MONO_FONT = "monospace"
+    MONO_FONT_CSS = "monospace"
 DEFAULT_THEME = "dark"
 DEFAULT_FONT_SIZE = "medium"
 DEFAULT_COMPACTION_THRESHOLD_PCT = 90
@@ -172,8 +179,26 @@ def app_font(size_name: str | None = None):
 
 
 def mono_font(size_pt: int | None = None):
-    from PyQt6.QtGui import QFont
-    return QFont(MONO_FONT, size_pt or mono_font_pt())
+    from PyQt6.QtGui import QFont, QFontDatabase
+    from PyQt6.QtWidgets import QApplication
+
+    if QApplication.instance():
+        families = set(QFontDatabase.families())
+        candidates = {
+            "darwin": ("Menlo", "SF Mono", "Monaco", "Courier New"),
+            "win32": ("Consolas", "Courier New"),
+        }.get(sys.platform, ("monospace", "DejaVu Sans Mono", "Liberation Mono", "Courier New"))
+        for family in candidates:
+            if family in families:
+                font = QFont(family)
+                break
+        else:
+            font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+    else:
+        font = QFont(MONO_FONT)
+    font.setPointSize(size_pt or mono_font_pt())
+    font.setStyleHint(QFont.StyleHint.Monospace)
+    return font
 
 
 def list_selection_bg(theme: str | None = None) -> str:
@@ -2092,6 +2117,13 @@ def install_combo_popup_delegate(view, theme: str | None = None) -> None:
         view.viewport().update()
 
 
+def _set_viewport_margins(view, left: int, top: int, right: int, bottom: int) -> bool:
+    try:
+        view.setViewportMargins(left, top, right, bottom)
+    except RuntimeError:
+        return False
+    return True
+
 def configure_combo_box_popup(combo, theme: str | None = None) -> None:
     from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QComboBox, QFrame, QListView
@@ -2110,7 +2142,7 @@ def configure_combo_box_popup(combo, theme: str | None = None) -> None:
     view.setLineWidth(0)
     view.setMidLineWidth(0)
     view.setContentsMargins(0, 0, 0, 0)
-    view.setViewportMargins(0, COMBO_POPUP_VIEW_PADDING, 0, COMBO_POPUP_VIEW_PADDING)
+    _set_viewport_margins(view, 0, COMBO_POPUP_VIEW_PADDING, 0, COMBO_POPUP_VIEW_PADDING)
     view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     view.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
     install_combo_popup_delegate(view, theme_name)
@@ -2144,7 +2176,7 @@ def resize_combo_popup_container(
     chrome = view_padding * 2 + 2
     height = list_h + chrome
 
-    view.setViewportMargins(0, view_padding, 0, view_padding)
+    _set_viewport_margins(view, 0, view_padding, 0, view_padding)
     view.setMinimumHeight(height)
     view.setMaximumHeight(height)
     container.setMinimumHeight(height)
@@ -2511,30 +2543,34 @@ def _fit_combo_popup_container(container, popup_theme: str, *, repeat: bool = Fa
         p = palette(popup_theme)
         surface = p["BG3"]
         color = QColor(surface)
-        view.setFrameShape(QFrame.Shape.NoFrame)
-        view.setLineWidth(0)
-        view.setMidLineWidth(0)
-        view.setContentsMargins(0, 0, 0, 0)
-        view.setViewportMargins(0, COMBO_POPUP_VIEW_PADDING, 0, COMBO_POPUP_VIEW_PADDING)
-        view.setAutoFillBackground(True)
-        view_pal = view.palette()
-        view_pal.setColor(QPalette.ColorRole.Window, color)
-        view_pal.setColor(QPalette.ColorRole.Base, color)
-        view_pal.setColor(QPalette.ColorRole.Highlight, QColor(combo_popup_item_selected_bg(popup_theme)))
-        view_pal.setColor(QPalette.ColorRole.HighlightedText, QColor(p["SELECTION_TEXT"]))
-        view.setPalette(view_pal)
-        view.setStyleSheet(combo_box_popup_view_style(popup_theme))
-        install_combo_popup_delegate(view, str(popup_theme))
-        if view.viewport() is not None:
-            view.viewport().setAutoFillBackground(True)
-            view.viewport().setContentsMargins(0, 0, 0, 0)
-            viewport_pal = view.viewport().palette()
-            viewport_pal.setColor(QPalette.ColorRole.Window, color)
-            viewport_pal.setColor(QPalette.ColorRole.Base, color)
-            viewport_pal.setColor(QPalette.ColorRole.Highlight, QColor(combo_popup_item_selected_bg(popup_theme)))
-            viewport_pal.setColor(QPalette.ColorRole.HighlightedText, QColor(p["SELECTION_TEXT"]))
-            view.viewport().setPalette(viewport_pal)
-            view.viewport().setStyleSheet(f"background:{surface}; border:none;")
+        try:
+            view.setFrameShape(QFrame.Shape.NoFrame)
+            view.setLineWidth(0)
+            view.setMidLineWidth(0)
+            view.setContentsMargins(0, 0, 0, 0)
+            _set_viewport_margins(view, 0, COMBO_POPUP_VIEW_PADDING, 0, COMBO_POPUP_VIEW_PADDING)
+            view.setAutoFillBackground(True)
+            view_pal = view.palette()
+            view_pal.setColor(QPalette.ColorRole.Window, color)
+            view_pal.setColor(QPalette.ColorRole.Base, color)
+            view_pal.setColor(QPalette.ColorRole.Highlight, QColor(combo_popup_item_selected_bg(popup_theme)))
+            view_pal.setColor(QPalette.ColorRole.HighlightedText, QColor(p["SELECTION_TEXT"]))
+            view.setPalette(view_pal)
+            view.setStyleSheet(combo_box_popup_view_style(popup_theme))
+            install_combo_popup_delegate(view, str(popup_theme))
+            viewport = view.viewport()
+            if viewport is not None:
+                viewport.setAutoFillBackground(True)
+                viewport.setContentsMargins(0, 0, 0, 0)
+                viewport_pal = viewport.palette()
+                viewport_pal.setColor(QPalette.ColorRole.Window, color)
+                viewport_pal.setColor(QPalette.ColorRole.Base, color)
+                viewport_pal.setColor(QPalette.ColorRole.Highlight, QColor(combo_popup_item_selected_bg(popup_theme)))
+                viewport_pal.setColor(QPalette.ColorRole.HighlightedText, QColor(p["SELECTION_TEXT"]))
+                viewport.setPalette(viewport_pal)
+                viewport.setStyleSheet(f"background:{surface}; border:none;")
+        except RuntimeError:
+            return
     try:
         resize_combo_popup_container(container)
         path = QPainterPath()

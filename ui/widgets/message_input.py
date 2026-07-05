@@ -41,6 +41,7 @@ from ui.theme import (
     composer_reference_colors,
     composer_shell_style,
     composer_style,
+    mono_font,
     skill_chip_style,
 )
 
@@ -70,7 +71,7 @@ class _ReferenceHighlighter(QSyntaxHighlighter):
         self._code_fmt = QTextCharFormat()
         self._code_fmt.setForeground(QColor(code_colors["foreground"]))
         self._code_fmt.setBackground(QColor(code_colors["background"]))
-        self._code_fmt.setFontFamily("Cascadia Code")
+        self._code_fmt.setFont(mono_font())
         self._code_fmt.setFontWeight(QFont.Weight.DemiBold)
         self.rehighlight()
 

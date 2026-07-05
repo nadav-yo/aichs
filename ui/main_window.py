@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from PyQt6.QtCore import Qt, QByteArray, QSize, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap, QShortcut, QKeySequence
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QShortcut, QKeySequence
 
 from storage.repository import ConversationStore
 from storage.agent_canvas import CanvasSaveRefused, load_agent_canvas, save_agent_canvas
@@ -37,7 +37,7 @@ from services.mcp_tools import start_mcp_capability_warmup
 from services.palette import PaletteContext, build_palette_items
 from services.processes import get_process_manager
 from services.tool_registry import disable_unreviewed_extensions
-from ui.theme import apply_app_theme, current_theme, palette, toggle_tab_button_style
+from ui.theme import apply_app_theme, current_theme, mono_font, palette, toggle_tab_button_style
 from ui.widgets.left_panel import LeftPanel
 from ui.widgets.chat_panel import ChatPanel
 from ui.widgets.file_viewer import FileViewerPanel
@@ -93,8 +93,7 @@ def _right_rail_icon(kind: str, *, active: bool = False) -> QIcon:
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setPen(QPen(color, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
     if kind == "language":
-        font = QFont("Cascadia Code")
-        font.setPixelSize(13)
+        font = mono_font(13)
         font.setBold(True)
         painter.setFont(font)
         painter.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "{}")

@@ -68,6 +68,8 @@ def test_app_and_mono_font(qapp):
     assert font.pointSize() > 0
     mono = theme.mono_font(12)
     assert mono.family()
+    assert mono.pointSize() == 12
+    assert "Cascadia Code" not in theme.MONO_FONT_CSS
 
 
 def test_primary_button_style_has_hover_and_pressed(qapp):
