@@ -12,6 +12,7 @@ from ui.main_window import (
     DEFAULT_ACTIVITY_WIDTH,
     MAX_ACTIVITY_WIDTH,
     MIN_ACTIVITY_WIDTH,
+    WORKBENCH_MIN_VIEWER_WIDTH,
     MainWindow,
     _ExtensionReviewThread,
 )
@@ -365,9 +366,12 @@ def test_main_window_open_file_preserves_user_workbench_split(
         qapp.processEvents()
         window._open_file(str(first))
 
-        window._workbench.setSizes([700, 300])
+        total = max(1, sum(window._workbench.sizes()))
+        viewer_width = max(WORKBENCH_MIN_VIEWER_WIDTH + 80, total * 35 // 100)
+        chat_width = max(1, total - viewer_width)
+        window._workbench.setSizes([chat_width, viewer_width])
         qapp.processEvents()
-        window._on_workbench_splitter_moved(700, 1)
+        window._on_workbench_splitter_moved(chat_width, 1)
         expected_ratio = window._workbench.sizes()[0] / sum(window._workbench.sizes())
 
         window._open_file(str(second))
