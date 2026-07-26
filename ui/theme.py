@@ -79,13 +79,13 @@ else:
     FONT_FAMILY = "sans-serif"
 if sys.platform == "darwin":
     MONO_FONT = "Menlo"
-    MONO_FONT_CSS = "Menlo, Monaco, monospace"
+    MONO_FONT_CSS = "Menlo"
 elif sys.platform == "win32":
     MONO_FONT = "Consolas"
-    MONO_FONT_CSS = "Consolas, 'Courier New', monospace"
+    MONO_FONT_CSS = "Consolas"
 else:
-    MONO_FONT = "monospace"
-    MONO_FONT_CSS = "monospace"
+    MONO_FONT = "DejaVu Sans Mono"
+    MONO_FONT_CSS = "DejaVu Sans Mono"
 DEFAULT_THEME = "dark"
 DEFAULT_FONT_SIZE = "medium"
 DEFAULT_COMPACTION_THRESHOLD_PCT = 90
@@ -187,7 +187,7 @@ def mono_font(size_pt: int | None = None):
         candidates = {
             "darwin": ("Menlo", "SF Mono", "Monaco", "Courier New"),
             "win32": ("Consolas", "Courier New"),
-        }.get(sys.platform, ("monospace", "DejaVu Sans Mono", "Liberation Mono", "Courier New"))
+        }.get(sys.platform, ("DejaVu Sans Mono", "Liberation Mono", "Courier New"))
         for family in candidates:
             if family in families:
                 font = QFont(family)

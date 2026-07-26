@@ -1,6 +1,7 @@
 import json
 
 from services.mcp_config import McpServerConfig
+from ui.theme import FONT_FAMILY, MONO_FONT_CSS
 import services.mcp_logs as mcp_logs
 from services.mcp_logs import (
     append_mcp_log,
@@ -40,6 +41,9 @@ def test_mcp_activity_html_uses_event_formatting(workspace):
     assert "Connect failed" in html
     assert "#fecaca" in html
     assert "Connection refused" in html
+    assert f"font-family:{FONT_FAMILY}" in html
+    assert f"font-family:{MONO_FONT_CSS}" in html
+    assert "monospace" not in html.lower()
 
 
 def test_clear_mcp_logs_removes_only_selected_server(workspace):

@@ -9,6 +9,7 @@ from typing import Any
 
 import config
 from services.mcp_config import McpServerConfig
+from ui.theme import FONT_FAMILY, MONO_FONT_CSS
 
 
 MCP_LOG_NAME = "mcp.log"
@@ -85,12 +86,12 @@ def format_mcp_logs_html(server: McpServerConfig, *, limit: int = 200) -> str:
         )
     return (
         "<html><head><style>"
-        "body { margin:0; font-family:Segoe UI, sans-serif; color:#e4e4e7; }"
+        f"body {{ margin:0; font-family:{FONT_FAMILY}; color:#e4e4e7; }}"
         ".row { padding:7px 4px; border-bottom:1px solid #27272a; }"
-        ".ts { color:#a1a1aa; font-family:Consolas, monospace; margin-right:10px; }"
+        f".ts {{ color:#a1a1aa; font-family:{MONO_FONT_CSS}; margin-right:10px; }}"
         ".badge { border:1px solid; border-radius:5px; padding:1px 6px; font-weight:600; font-size:12px; margin-right:10px; }"
         ".msg { color:#e4e4e7; }"
-        ".details { color:#a1a1aa; margin:4px 0 0 132px; font-family:Consolas, monospace; }"
+        f".details {{ color:#a1a1aa; margin:4px 0 0 132px; font-family:{MONO_FONT_CSS}; }}"
         "</style></head><body>"
         + "".join(body)
         + "</body></html>"

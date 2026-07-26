@@ -60,6 +60,7 @@ from services.tool_policy import ConversationToolPolicy, ToolApprovalBus
 from services.tool_registry import extension_canvas_context_snippets, extension_canvas_tools
 from services.workspace import build_system
 from ui.theme import (
+    MONO_FONT_CSS,
     agent_canvas_style,
     compact_combo_box_style,
     graph_question_dialog_style,
@@ -2211,7 +2212,7 @@ class AgentCanvasPanel(QWidget):
             "<div style='margin:3px 0; padding:4px 6px; border-radius:5px; "
             f"background:{background}; color:#d7dee8;'>"
             f"{toggle}"
-            f"<span style='font-family:Consolas, monospace; color:#d7dee8;'>{safe_name}</span>"
+            f"<span style='font-family:{MONO_FONT_CSS}; color:#d7dee8;'>{safe_name}</span>"
             f"<span style='font-weight:700; color:{status_color}; margin-left:8px;'>{safe_status}</span>"
             f"{count_html}"
             f"{summary_html}"
