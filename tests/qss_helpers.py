@@ -304,7 +304,7 @@ def _run_window_probe_inprocess(
     script: Path,
     probe_args: tuple[str, ...],
 ) -> subprocess.CompletedProcess[str]:
-    """Run the probe in-process; Linux offscreen subprocesses can SIGSEGV on MainWindow."""
+    """Run the probe in-process where offscreen Qt subprocesses are unstable."""
     import io
 
     from tests.qss_window_probe import main
@@ -329,7 +329,7 @@ def _run_window_probe_inprocess(
 def run_offscreen_window_probe(*probe_args: str) -> subprocess.CompletedProcess[str]:
     repo_root = Path(__file__).resolve().parent.parent
     script = Path(__file__).resolve().parent / "qss_window_probe.py"
-    if sys.platform == "linux":
+    if sys.platform in {"linux", "win32"}:
         return _run_window_probe_inprocess(script, probe_args)
     env = {
         key: value

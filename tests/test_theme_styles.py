@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 from tests.qss_helpers import (
     assert_all_app_stylesheets_parse,
@@ -61,6 +62,15 @@ def test_ad_hoc_qss_baseline_ignores_line_number_drift(tmp_path, monkeypatch):
 def test_window_stylesheets_parse_without_qt_warnings(workspace, qapp):
     result = run_offscreen_window_probe(str(workspace))
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_windows_window_probe_runs_inprocess(monkeypatch):
+    expected = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(qss_helpers.sys, "platform", "win32")
+    monkeypatch.setattr(qss_helpers, "_run_window_probe_inprocess", lambda *_args: expected)
+    monkeypatch.setattr(qss_helpers.subprocess, "run", lambda *_args, **_kwargs: None)
+
+    assert qss_helpers.run_offscreen_window_probe("workspace") is expected
 
 
 def test_app_and_mono_font(qapp):
