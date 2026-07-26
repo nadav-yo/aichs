@@ -30,9 +30,6 @@ jobs:
           - name: Windows x64
             os: windows-latest
             artifact: wheel-windows-x64
-          - name: macOS Intel
-            os: macos-13
-            artifact: wheel-macos-x64
           - name: macOS Apple Silicon
             os: macos-14
             artifact: wheel-macos-arm64
@@ -184,8 +181,8 @@ jobs:
               print(f"Built files do not match release version {expected}: {bad}", file=sys.stderr)
               sys.exit(1)
           wheels = [name for name in files if name.endswith(".whl")]
-          if len(wheels) != 4 or any("none-any.whl" in name for name in wheels):
-              print(f"Expected four platform wheels, got: {wheels}", file=sys.stderr)
+          if len(wheels) != 3 or any("none-any.whl" in name for name in wheels):
+              print(f"Expected three platform wheels, got: {wheels}", file=sys.stderr)
               sys.exit(1)
           PY
           python -m twine check dist/*
