@@ -18,10 +18,12 @@ class FileMentionPicker(QFrame):
         self,
         files: list[tuple[str, str]],
         crew: list[CrewMember] | None = None,
+        prefiltered: bool = False,
         parent=None,
     ):
         super().__init__(parent)
         self._all = files
+        self._prefiltered = prefiltered
         self._crew = crew or []
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
@@ -40,8 +42,9 @@ class FileMentionPicker(QFrame):
 
         self.filter("@")
 
-    def set_files(self, files: list[tuple[str, str]]):
+    def set_files(self, files: list[tuple[str, str]], *, prefiltered: bool = False):
         self._all = files
+        self._prefiltered = prefiltered
 
     def set_crew(self, crew: list[CrewMember]):
         self._crew = crew
@@ -58,14 +61,15 @@ class FileMentionPicker(QFrame):
             item.setData(_ROLE_TOKEN, member.name)
             item.setToolTip(member.description)
             self._list.addItem(item)
-        matches = []
-        for rel, abs_path in self._all:
-            name = rel.rsplit("/", 1)[-1].lower()
-            haystack = rel.lower()
-            if not q or q in haystack or q in name:
-                matches.append((rel, abs_path))
-            if len(matches) >= 80:
-                break
+        matches = self._all[:80] if self._prefiltered else []
+        if not self._prefiltered:
+            for rel, abs_path in self._all:
+                name = rel.rsplit("/", 1)[-1].lower()
+                haystack = rel.lower()
+                if not q or q in haystack or q in name:
+                    matches.append((rel, abs_path))
+                if len(matches) >= 80:
+                    break
         for rel, abs_path in matches:
             item = QListWidgetItem(f"@{rel}")
             item.setData(_ROLE_KIND, "file")

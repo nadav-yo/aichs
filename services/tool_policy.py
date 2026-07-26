@@ -10,6 +10,7 @@ from typing import Callable
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from services.shell_tool import SHELL_TOOL_NAME, is_shell_tool
+from services.organization_policy import CapabilityRequest, decide
 
 
 @dataclass
@@ -113,6 +114,10 @@ class ToolApprovalBus(QObject):
         if err:
             return f"[tool error] {err}"
 
+        governed = _governance_block(_builtin_capability(name, inputs), name, inputs, cwd)
+        if governed:
+            return governed
+
         if name in ("read_file", "list_files", "search_files"):
             return None
 
@@ -139,6 +144,16 @@ class ToolApprovalBus(QObject):
         source: str = "extension",
         owner: str = "",
     ) -> str | None:
+        governed = _governance_block(
+            "mcp_tool" if source == "mcp" else "extension_tool",
+            name,
+            inputs,
+            cwd,
+            source=source,
+            owner=_policy_owner(owner),
+        )
+        if governed:
+            return governed
         if name in policy.approved_extension_tools:
             return None
         return self._wait_for_ui(
@@ -163,6 +178,16 @@ class ToolApprovalBus(QObject):
         source: str = "builtin",
         owner: str = "",
     ) -> str | None:
+        governed = _governance_block(
+            "mcp_tool" if source == "mcp" else "builtin_tool",
+            name,
+            inputs,
+            cwd,
+            source=source,
+            owner=_policy_owner(owner),
+        )
+        if governed:
+            return governed
         return self._wait_for_ui(
             "tool",
             inputs,
@@ -239,3 +264,42 @@ class ToolApprovalBus(QObject):
         if not pending.approved:
             return pending.denied_message
         return None
+
+
+
+def _builtin_capability(name: str, inputs: dict) -> str:
+    if name == "read_file" or name in ("list_files", "search_files"):
+        return "file_read"
+    if name == "edit_file":
+        return "file_write"
+    if is_shell_tool(name):
+        return "shell"
+    return "builtin_tool"
+
+
+def _governance_block(
+    kind: str,
+    name: str,
+    inputs: dict,
+    cwd: str,
+    *,
+    source: str = "builtin",
+    owner: str = "",
+) -> str | None:
+    decision = decide(CapabilityRequest(
+        kind=kind,
+        name=name,
+        cwd=cwd,
+        source=source,
+        owner=owner,
+        path=str(inputs.get("path") or inputs.get("directory") or ""),
+        metadata={"input_keys": sorted(str(key) for key in inputs)},
+    ))
+    if decision.result == "deny":
+        return f"[tool error] {decision.message}"
+    return None
+
+
+def _policy_owner(owner: str) -> str:
+    text = str(owner or "")
+    return text[4:] if text.startswith("mcp:") else text

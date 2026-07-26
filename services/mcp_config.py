@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
 import config
+from services.organization_policy import CapabilityRequest, decide, governance_signature
 
 
 MCP_CONFIG_NAME = "mcp.json"
@@ -112,13 +113,27 @@ def load_mcp_config(cwd: str | None = None, *, include_disabled: bool = False) -
             signatures.append((scope, str(path), "missing"))
         for name, entry in _server_entries(raw).items():
             server = _server_config(scope, name, entry, state)
+            decision = decide(CapabilityRequest(
+                kind="mcp_server",
+                name=server.name,
+                cwd=str(cwd or ""),
+                source="mcp",
+                owner=server.name,
+            ))
+            if decision.result == "deny":
+                server = replace(
+                    server,
+                    enabled=False,
+                    review_required=False,
+                    errors=tuple(list(server.errors) + [decision.message]),
+                )
             if include_disabled or server.enabled or server.review_required:
                 servers.append(server)
 
     return McpConfigSnapshot(
         servers=tuple(servers),
         errors=tuple(errors),
-        signature=tuple(signatures) + _state_signature(state),
+        signature=tuple(signatures) + _state_signature(state) + (governance_signature(cwd),),
     )
 
 

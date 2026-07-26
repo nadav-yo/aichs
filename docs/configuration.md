@@ -35,3 +35,7 @@ or `disabled` to prevent project-memory reads and writes.
 
 MCP servers are configured separately in standard `mcp.json` files; see
 [MCP](mcp.md).
+
+Organization governance is configured separately through signed files under
+`AICHS_HOME/organization/`; see [Organization Governance](organization-governance.md)
+for policy format, trust keys, runtime lock behavior, and audit logging.

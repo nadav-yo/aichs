@@ -21,6 +21,20 @@ Some slash commands are built in and executable instead of Markdown skills:
 | `AICHS_HOME/skills/*.md` | User-global |
 | `.agents/skills/*.md` | Project-local (same name overrides global) |
 
+
+## Organization Governance
+
+When signed Organization Governance is active, skills are filtered before the
+slash-command picker sees them. Policy can allow or deny skills by SHA-256 hash
+or slash-command name. In `strict` mode, unlisted skills are denied.
+
+If the policy requires YUK packages, skill loading also verifies the recorded
+YUK package metadata and the current skill file hashes. A missing or changed
+required asset blocks the governed skill capability and writes an audit event.
+
+See [Organization Governance](organization-governance.md#skill-rules) for the
+policy fields and examples.
+
 ## File format
 
 ```markdown

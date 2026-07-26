@@ -14,6 +14,7 @@ from typing import Callable, Literal
 
 import config
 from services.performance import time_operation
+from services.organization_policy import CapabilityRequest, decide, governance_signature
 
 
 ToolExecute = Callable[["ToolContext", dict], str]
@@ -1195,6 +1196,10 @@ def _load_extensions_uncached(
     for path in extension_files if extension_files is not None else _extension_files(cwd):
         if is_extension_disabled(path, cwd):
             continue
+        decision = _extension_policy_decision(path, cwd)
+        if decision.result == "deny":
+            registry.errors.append(f"{path}: {decision.message}")
+            continue
         _load_extension_file(registry, path)
 
 
@@ -1278,6 +1283,7 @@ def _extension_cache_signature_for_metadata(
         tuple(_extension_file_signature_from_metadata(item) for item in extension_metadata),
         _path_signature(_disabled_extensions_path(cwd)),
         _path_signature(_reviewed_extensions_path(cwd)),
+        governance_signature(cwd),
     )
 
 
@@ -1438,6 +1444,34 @@ def _extension_file_summary(
     reviewed = _extension_reviewed(path, cwd, content_hash)
     review_required = not reviewed
     risk_messages = _extension_risk_messages(permissions)
+    policy_decision = _extension_policy_decision(path, cwd, content_hash=content_hash)
+    if policy_decision.result == "deny":
+        static_description = _static_extension_description(path, manifest=manifest)
+        static = _static_extension_contributions(path)
+        return ExtensionFileSummary(
+            path=str(path),
+            status="Blocked",
+            tools=static["tools"],
+            canvas_tools=static["canvas_tools"],
+            commands=static["commands"],
+            contexts=static["contexts"],
+            canvas_contexts=static["canvas_contexts"],
+            hooks=static["hooks"],
+            badges=static["badges"],
+            panels=static["panels"],
+            docs=static["docs"],
+            errors=[policy_decision.message],
+            description=static_description,
+            display_name=display_name,
+            languages=static["languages"],
+            requirements=requirements,
+            missing_requirements=missing_requirements,
+            permissions=permissions,
+            content_hash=content_hash,
+            reviewed=reviewed,
+            review_required=review_required,
+            risk_messages=risk_messages,
+        )
     if is_extension_disabled(path, cwd) or not load_code:
         static_description = _static_extension_description(path, manifest=manifest)
         static = _static_extension_contributions(path)
@@ -1944,3 +1978,18 @@ def _write_json_object(path: Path, data: dict) -> None:
         raise ValueError("extension config/state must be a JSON object")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+
+def _extension_policy_decision(path: str | Path, cwd: str | None, *, content_hash: str = ""):
+    entrypoint = _extension_entrypoint_path(Path(path))
+    digest = content_hash or extension_content_hash(entrypoint)
+    return decide(CapabilityRequest(
+        kind="extension",
+        name=_extension_id_for_path(entrypoint),
+        cwd=str(cwd or ""),
+        path=str(entrypoint),
+        hash=digest,
+        source="extension",
+        owner=_extension_id_for_path(entrypoint),
+    ))

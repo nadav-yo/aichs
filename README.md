@@ -83,6 +83,7 @@ Contributor setup, source installs, tests, packaging, and release notes live in
 | Topic | |
 |---|---|
 | Configuration | [docs/configuration.md](docs/configuration.md) |
+| Organization governance | [docs/organization-governance.md](docs/organization-governance.md) |
 | Custom model providers | [docs/custom-models.md](docs/custom-models.md) |
 | Extensions and custom tools | [docs/extensions.md](docs/extensions.md) |
 | Slash-command skills | [docs/skills.md](docs/skills.md) |

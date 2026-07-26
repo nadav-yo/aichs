@@ -126,6 +126,23 @@ manifest description, the module-level `EXTENSION_DESCRIPTION` constant,
 fallback, including while an extension is disabled and its `register()` function
 is not executed.
 
+
+## Organization Governance
+
+When signed Organization Governance is active, extension loading is checked
+before extension Python executes. Policy can allow or deny extensions by content
+hash or name, and `strict` mode denies unlisted extensions. Governed extension
+content hashes also participate in registry cache keys so a changed policy or
+changed extension invalidates discovery.
+
+If the policy requires YUK packages, extension loading also verifies the
+recorded YUK import metadata and current installed asset hashes. Blocked
+extensions remain visible as blocked in overview data but do not register tools,
+commands, hooks, context, badges, panels, or docs.
+
+See [Organization Governance](organization-governance.md#extension-rules) for
+policy fields and hash behavior.
+
 ## Tools
 
 Tools are callable by the model:

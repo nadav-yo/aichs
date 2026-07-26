@@ -6,6 +6,7 @@ from pathlib import Path
 
 import config
 from services.performance import time_operation
+from services.organization_policy import CapabilityRequest, decide, file_sha256
 
 _USER_DIR = config.AICHS_HOME / "skills"
 
@@ -18,6 +19,8 @@ class Skill:
     description: str
     prompt:      str
     tools:       list[str] | None = field(default=None)  # None = all tools allowed
+    path:        str = ""
+    content_hash: str = ""
 
 
 def load_all(cwd: str | None = None) -> list[Skill]:
@@ -35,7 +38,7 @@ def load_all(cwd: str | None = None) -> list[Skill]:
         for directory in dirs:
             for path in _skill_paths(directory):
                 skill = _parse(path)
-                if skill:
+                if skill and _skill_allowed(skill, cwd):
                     skills[skill.name] = skill
         return sorted(skills.values(), key=lambda s: s.name)
 
@@ -74,7 +77,11 @@ def _parse(path: Path) -> Skill | None:
     name = meta.get("name") or path.stem
     desc = meta.get("description", "")
     tools = _parse_tools(meta.get("tools", ""))
-    return Skill(name=name, description=desc, prompt=prompt, tools=tools)
+    try:
+        digest = file_sha256(path)
+    except OSError:
+        digest = ""
+    return Skill(name=name, description=desc, prompt=prompt, tools=tools, path=str(path), content_hash=digest)
 
 
 def _parse_front(text: str) -> dict[str, str]:
@@ -90,3 +97,16 @@ def _parse_tools(raw: str) -> list[str] | None:
         return None
     names = re.findall(r"[\w_]+", raw)
     return names if names else None
+
+
+
+def _skill_allowed(skill: Skill, cwd: str | None) -> bool:
+    decision = decide(CapabilityRequest(
+        kind="skill",
+        name=skill.name,
+        cwd=str(cwd or ""),
+        path=skill.path,
+        hash=skill.content_hash,
+        source="skill",
+    ))
+    return decision.result != "deny"

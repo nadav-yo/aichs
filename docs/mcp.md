@@ -139,6 +139,21 @@ surfaces.
 
 MCP tools require approval by default before use in a conversation.
 
+
+## Organization Governance
+
+When signed Organization Governance is active, MCP servers and MCP tools are
+checked centrally before they are advertised or called. Policy can allow or deny
+server names, and can allow or deny individual remote tools per server.
+`strict` mode denies unlisted servers.
+
+Governance state is included in MCP discovery cache signatures. Changing policy,
+trust keys, or lock state invalidates the advertised MCP tool set. Normal
+project-local MCP review still applies in addition to organization policy.
+
+See [Organization Governance](organization-governance.md#mcp-rules) for policy
+examples.
+
 ## Tool Results
 
 `aichs` follows the standard MCP `tools/call` result shape. Plain text-only
@@ -164,4 +179,3 @@ errors that return `isError: true` are treated as tool errors in the chat UI.
 If no global or project `mcp.json` exists, the MCP path does not start servers,
 open network connections, discover tools, or import the MCP SDK. Normal chats
 only perform cheap config-file existence checks.
-

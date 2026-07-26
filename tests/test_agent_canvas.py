@@ -25,7 +25,7 @@ from ui.widgets.agent_canvas import (
 )
 from ui.widgets.agent_canvas_schema import input_ports, output_ports
 from ui.widgets.agent_canvas_schema import _CONNECTION_RULES, _CREATION_ACTIONS
-from ui.theme import agent_canvas_style
+from ui.theme import MONO_FONT_CSS, agent_canvas_style
 from tests.conftest import write_extension
 
 
@@ -57,6 +57,13 @@ def test_canvas_token_payload_round_trips():
     assert parsed == token
     assert parse_canvas_token(b"not json") is None
     assert parse_canvas_token(b'{"kind":"operation","title":""}') is None
+
+
+def test_agent_canvas_tool_html_uses_platform_monospace_family():
+    html = AgentCanvasPanel._run_tool_html({"name": "search_files", "status": "succeeded"})
+
+    assert f"font-family:{MONO_FONT_CSS}" in html
+    assert "monospace" not in html.lower()
 
 
 def test_agent_canvas_places_and_connects_graph_nodes(qapp, workspace):

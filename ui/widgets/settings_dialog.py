@@ -28,6 +28,7 @@ from services.model_registry import (
     load_user_providers,
     save_user_providers,
 )
+from services.organization_policy import governance_state
 from services.yuk import (
     YukExportSelection,
     apply_yuk,
@@ -1368,6 +1369,7 @@ class SettingsDialog(QDialog):
         saved = store.load()
         self._saved = saved
         self._cwd = cwd or str(saved.get("workspace_path") or os.getcwd())
+        self._governance_state = governance_state(self._cwd)
         self._page_ids = [page_id for page_id, _title in _NAV]
         self._built_pages: set[str] = set()
         self._yuk_export_generation = 0
@@ -1552,11 +1554,39 @@ class SettingsDialog(QDialog):
         sep.setStyleSheet(separator_frame_style())
         return sep
 
+
+    def _add_governance_status(self, layout: QVBoxLayout) -> None:
+        state = self._governance_state
+        if state.mode == "personal":
+            return
+        name = state.organization_name or state.organization_id or "organization"
+        if state.mode == "locked":
+            text = f"Managed by {name}: policy verification failed. {state.error}"
+            tone = "danger"
+        else:
+            version = f" v{state.version}" if state.version else ""
+            text = f"Managed by {name}: {state.policy_id}{version}."
+            tone = "success"
+        label = QLabel(text)
+        label.setObjectName("organizationManagedStatus")
+        label.setWordWrap(True)
+        label.setStyleSheet(
+            status_pill_style(
+                tone="danger" if tone == "danger" else "neutral",
+                padding="8px 10px",
+                text_color="#fecaca" if tone == "danger" else None,
+                background="#341417" if tone == "danger" else None,
+                border_color="#7f1d1d" if tone == "danger" else None,
+            )
+        )
+        layout.addWidget(label)
+
     def _page_general(self, saved: dict) -> QWidget:
         page, layout = self._page_shell(
             "General",
             "Look, feel, and composer behavior.",
         )
+        self._add_governance_status(layout)
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["dark", "light"])
         self.theme_combo.setStyleSheet(self._field_style)

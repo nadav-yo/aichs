@@ -31,3 +31,19 @@ or skipped.
 
 YUK packages reject unsafe zip paths such as absolute paths, drive-prefixed
 paths, `..` traversal, and symlinks.
+
+## Organization Governance
+
+YUK remains a portable personalization package. It is not a policy authority and
+it does not make governance decisions.
+
+In governed installations, a signed organization policy can require imported
+YUK packages by `package_id` and package SHA-256. During import, `aichs` records
+package metadata and the installed skill/extension asset hashes in
+`AICHS_HOME/organization/yuk.installed.json`. Later governed skill and extension
+loading checks that record and verifies the current asset hashes before the
+capability is allowed.
+
+This gives organizations a way to require a known starter kit without treating
+that kit as trusted policy. The signed policy remains the source of truth. See
+[Organization Governance](organization-governance.md#required-yuk-assets).
