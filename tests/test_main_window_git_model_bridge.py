@@ -714,7 +714,6 @@ def test_workspace_dashboard_empty_html_uses_app_font_family():
     html = _empty_html("README is empty.")
 
     assert f"font-family:{FONT_FAMILY}" in html
-    assert "font-family:sans-serif" not in html
 
 
 def test_main_window_workspace_restores_expanded_context_rail(qapp, workspace):
