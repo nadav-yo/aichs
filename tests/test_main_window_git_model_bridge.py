@@ -16,10 +16,10 @@ from ui.main_window import (
     MainWindow,
     _ExtensionReviewThread,
 )
-from ui.theme import palette
+from ui.theme import FONT_FAMILY, palette
 from ui.widgets.left_panel import _WorkspaceNavPanel
 from ui.widgets.window_chrome import _resize_edges_for_pos, chromed_dialog_layout
-from ui.widgets.workspace_dashboard import WorkspaceDashboard
+from ui.widgets.workspace_dashboard import WorkspaceDashboard, _empty_html
 
 
 def _wait_until(qapp, predicate, timeout_s: float = 2.0):
@@ -645,6 +645,33 @@ def test_main_window_left_rail_clicks_toggle_activity_drawer(qapp, workspace):
         qapp.setStyleSheet(app_style)
 
 
+def test_main_window_restores_zero_width_left_panel_as_activity_rail(qapp, workspace):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    window = MainWindow(startup_workspace=str(workspace))
+    try:
+        window._restore_layout({
+            "activity_sizes": [0, 700, 30],
+            "activity_collapsed": False,
+        })
+
+        assert not window._root_splitter.isCollapsible(0)
+        assert window._left.is_activity_panel_collapsed()
+        assert window._left.minimumWidth() == window._left._collapsed_width
+        assert window._root_splitter.sizes()[0] >= window._left._collapsed_width
+
+        window._left._activity_buttons["files"].click()
+
+        assert not window._left.is_activity_panel_collapsed()
+        assert window._root_splitter.sizes()[0] > window._left._collapsed_width
+    finally:
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
 def test_main_window_workspace_rail_shows_dashboard(qapp, workspace):
     cwd = os.getcwd()
     app_style = qapp.styleSheet()
@@ -681,6 +708,13 @@ def test_main_window_workspace_rail_shows_dashboard(qapp, workspace):
         os.chdir(cwd)
         qapp.setFont(app_font)
         qapp.setStyleSheet(app_style)
+
+
+def test_workspace_dashboard_empty_html_uses_app_font_family():
+    html = _empty_html("README is empty.")
+
+    assert f"font-family:{FONT_FAMILY}" in html
+    assert "font-family:sans-serif" not in html
 
 
 def test_main_window_workspace_restores_expanded_context_rail(qapp, workspace):

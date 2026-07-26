@@ -388,6 +388,7 @@ class MainWindow(QMainWindow):
         self._root_splitter.setStretchFactor(0, 0)
         self._root_splitter.setStretchFactor(1, 1)
         self._root_splitter.setStretchFactor(2, 0)
+        self._root_splitter.setCollapsible(0, False)
 
         self._left.selected.connect(self._load_conversation)
         self._left.new_chat.connect(self._new_conversation)
@@ -694,6 +695,9 @@ class MainWindow(QMainWindow):
 
         activity = saved.get("activity_sizes")
         has_saved_activity = bool(activity and len(activity) == 3)
+        activity_collapsed = bool(saved.get("activity_collapsed", False))
+        if has_saved_activity and activity[0] <= COLLAPSED_ACTIVITY_WIDTH:
+            activity_collapsed = True
         if has_saved_activity:
             self._root_splitter.setSizes(activity)
         else:
@@ -713,7 +717,7 @@ class MainWindow(QMainWindow):
             self._left.show_canvas_activity()
         else:
             self._left.set_active_activity(active_activity)
-        if bool(saved.get("activity_collapsed", False)):
+        if activity_collapsed:
             self._left.collapse_activity_panel()
         if bool(saved.get("context_collapsed", True)):
             self._collapse_context()
@@ -726,7 +730,7 @@ class MainWindow(QMainWindow):
                 except (TypeError, ValueError):
                     context_width = None
             self._expand_context(width=context_width)
-        if not has_saved_activity and not bool(saved.get("activity_collapsed", False)):
+        if not has_saved_activity and not activity_collapsed:
             sizes = self._root_splitter.sizes()
             if len(sizes) == 3:
                 total = max(1, sum(sizes))

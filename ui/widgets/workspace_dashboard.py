@@ -23,6 +23,7 @@ from services.workspace_snapshot import (
 )
 from services.performance import time_operation
 from ui.theme import (
+    FONT_FAMILY,
     chat_font_pt,
     contained_list_style,
     markdown_css,
@@ -562,7 +563,7 @@ def _markdown_panel_html(text: str, *, empty_text: str) -> str:
 def _empty_html(text: str) -> str:
     p = palette()
     return (
-        f"<style>body {{ color:{p['TEXT_DIM']}; font-family:sans-serif;"
+        f"<style>body {{ color:{p['TEXT_DIM']}; font-family:{FONT_FAMILY};"
         "margin:0; padding:6px 8px; }}</style>"
         f"<p>{text}</p>"
     )

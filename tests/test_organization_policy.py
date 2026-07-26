@@ -2,10 +2,12 @@
 import base64
 import json
 
+import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
 import config
+import services.organization_policy as organization_policy
 from services.audit import audit_log_path
 from services.mcp_config import load_mcp_config, write_mcp_json
 from services.organization_policy import (
@@ -177,3 +179,93 @@ def test_settings_shows_managed_status(qapp, workspace):
     labels = [w for w in dialog.findChildren(QLabel) if w.objectName() == "organizationManagedStatus"]
     assert labels
     assert "Managed by Example Org" in labels[0].text()
+
+
+def test_policy_rule_evaluators_cover_allowlists_and_strict_defaults():
+    request = CapabilityRequest(kind="model", name="gpt-5", provider="openai")
+    assert organization_policy._decide_model({"deny": ["openai:*"]}, request, "team_safe").result == "deny"
+    assert organization_policy._decide_model({"allow": ["openai:gpt-5"]}, request, "team_safe").result == "allow"
+    assert organization_policy._decide_model({"allow": ["other"]}, request, "team_safe").result == "deny"
+    assert organization_policy._decide_model({}, request, "strict").result == "deny"
+
+    shell = CapabilityRequest(kind="shell", name="execute")
+    assert organization_policy._decide_tool({"shell": "approval_required"}, shell, "team_safe").result == "approval_required"
+    assert organization_policy._decide_tool({}, shell, "strict").result == "deny"
+    file_read = CapabilityRequest(kind="file_read", name="read")
+    assert organization_policy._decide_tool({"filesystem": "deny"}, file_read, "team_safe").result == "deny"
+    assert organization_policy._decide_tool({"allow": ["write"]}, file_read, "team_safe").result == "deny"
+
+    extension = CapabilityRequest(kind="extension", name="demo", hash="bad")
+    assert organization_policy._decide_hash_or_name({"deny_hashes": ["bad"]}, extension, "team_safe").result == "deny"
+    assert organization_policy._decide_hash_or_name({"allow_hashes": ["good"]}, extension, "team_safe").result == "deny"
+    assert organization_policy._decide_hash_or_name({"allow": ["demo"]}, extension, "team_safe").result == "allow"
+    assert organization_policy._decide_hash_or_name({}, extension, "strict").result == "deny"
+
+
+def test_policy_mcp_and_helper_matching_rules():
+    server = CapabilityRequest(kind="mcp_server", name="server-a")
+    assert organization_policy._decide_mcp({"deny_servers": ["server-*"]}, server, "team_safe").result == "deny"
+    assert organization_policy._decide_mcp({"allow_servers": ["server-a"]}, server, "team_safe").result == "allow"
+    assert organization_policy._decide_mcp({}, server, "strict").result == "deny"
+
+    tool = CapabilityRequest(kind="mcp_tool", name="delete", owner="server-a")
+    assert organization_policy._decide_mcp({"deny_tools": {"server-a": ["delete"]}}, tool, "team_safe").result == "deny"
+    assert organization_policy._decide_mcp({"allow_tools": {"server-a": ["read"]}}, tool, "team_safe").result == "deny"
+    assert organization_policy._decide_mcp({"allow_tools": {"server-a": ["delete"]}}, tool, "team_safe").result == "allow"
+
+    assert organization_policy._matches_any("abc", ["*"])
+    assert organization_policy._matches_any("abc", ["ab*"])
+    assert organization_policy._matches_any("abc", ["abc"])
+    assert not organization_policy._matches_any("abc", ["def"])
+    assert organization_policy._string_list("one") == ["one"]
+    assert organization_policy._string_list([" one ", "", None, 2]) == ["one", "2"]
+    assert organization_policy._string_list({"one": 1}) == []
+
+
+def test_governance_missing_policy_and_required_yuk_failures(workspace, tmp_path):
+    policy_path, _policy = _write_signed_policy()
+    assert governance_state(str(workspace)).mode == "governed"
+    policy_path.unlink()
+    assert governance_state(str(workspace)).mode == "locked"
+
+    package = tmp_path / "required.yuk"
+    package.write_text("required", encoding="utf-8")
+    _write_signed_policy(required_yuks=[{"package_id": "required", "sha256": file_sha256(package)}])
+    ok, message = organization_policy.required_yuks_ok(str(workspace))
+    assert not ok
+    assert message == "Required YUK is not installed: required"
+
+    record_yuk_install(
+        package_path=package,
+        manifest={"package_id": "required"},
+        skills=[],
+        extensions=[],
+    )
+    installed = organization_policy.installed_yuks_path()
+    data = json.loads(installed.read_text(encoding="utf-8"))
+    data["packages"]["required"]["sha256"] = "wrong"
+    installed.write_text(json.dumps(data), encoding="utf-8")
+    ok, message = organization_policy.required_yuks_ok(str(workspace))
+    assert not ok
+    assert message == "Required YUK hash mismatch: required"
+
+
+def test_policy_file_validation_helpers(workspace):
+    trust = organization_policy.trust_path()
+    trust.parent.mkdir(parents=True, exist_ok=True)
+    trust.write_text(json.dumps({"format": "wrong"}), encoding="utf-8")
+    with pytest.raises(ValueError, match="unsupported"):
+        organization_policy._load_trust()
+
+    trust.write_text(json.dumps({"format": TRUST_FORMAT, "keys": {}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="no keys"):
+        organization_policy._load_trust()
+
+    policy = organization_policy.policy_path()
+    policy.write_text(json.dumps({"format": "wrong"}), encoding="utf-8")
+    with pytest.raises(ValueError, match="Unsupported"):
+        organization_policy._load_verified_policy(policy, {})
+
+    policy.write_text(json.dumps({"format": POLICY_FORMAT}), encoding="utf-8")
+    with pytest.raises(ValueError, match="unsigned"):
+        organization_policy._load_verified_policy(policy, {})
