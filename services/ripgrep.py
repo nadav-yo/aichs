@@ -6,6 +6,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from aichs_native import binary_path
+
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,7 +33,7 @@ def _bundled_candidates() -> tuple[Path, ...]:
         Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(),
         _ROOT,
     ]
-    return tuple(
+    candidates = [
         root / relative
         for root in roots
         if str(root)
@@ -39,7 +41,11 @@ def _bundled_candidates() -> tuple[Path, ...]:
             Path("bin") / executable,
             Path("tools") / "vendor" / "ripgrep" / platform / executable,
         )
-    )
+    ]
+    wheel_binary = binary_path(executable)
+    if wheel_binary is not None:
+        candidates.append(wheel_binary)
+    return tuple(candidates)
 
 
 def _platform_name() -> str:

@@ -9,6 +9,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from aichs_native import binary_path
 from config import IGNORED
 from services.subprocess_utils import popen_no_window
 
@@ -87,7 +88,7 @@ def _indexer_path() -> Path | None:
             candidate = root / relative
             if candidate.is_file():
                 return candidate
-    return None
+    return binary_path(executable)
 
 
 class _IndexerSession:

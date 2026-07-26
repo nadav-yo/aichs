@@ -57,9 +57,16 @@ include-package-data = true
 py-modules = ["app", "config", "main"]
 
 [tool.setuptools.packages.find]
-include = ["assets*", "services*", "storage*", "ui*"]
+include = ["aichs_native*", "assets*", "services*", "storage*", "ui*"]
 
 [tool.setuptools.package-data]
+aichs_native = [
+  "THIRD_PARTY_NOTICES.md",
+  "bin/rg",
+  "bin/rg.exe",
+  "bin/aichs-indexer",
+  "bin/aichs-indexer.exe",
+]
 assets = [
   "*.png",
   "*.svg",

@@ -54,6 +54,14 @@ def test_prepare_returns_false_without_a_bundled_indexer(tmp_path, monkeypatch):
     assert indexer.query_filename_index(tmp_path, "main", limit=80) is None
 
 
+def test_indexer_falls_back_to_platform_wheel_helper(tmp_path, monkeypatch):
+    binary = tmp_path / "aichs-indexer.exe"
+    binary.write_text("", encoding="utf-8")
+    monkeypatch.setattr(indexer, "binary_path", lambda _name: binary)
+
+    assert indexer._indexer_path() == binary
+
+
 def test_clear_filename_index_stops_workspace_session(tmp_path, monkeypatch):
     indexer.clear_filename_index()
     process = _Process("READY\t0\n")

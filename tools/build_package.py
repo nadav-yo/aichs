@@ -5,6 +5,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    from tools.native_search_tools import stage_native_search_tools
+except ModuleNotFoundError:  # Direct ``python tools/build_package.py`` execution.
+    from native_search_tools import stage_native_search_tools
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "assets"
@@ -52,28 +56,12 @@ def _prepare_native_search_tools() -> None:
     """Stage the native search executables that the packaged desktop app owns."""
 
     platform = _platform_name()
-    rg = shutil.which("rg")
-    if not rg:
-        raise RuntimeError(
-            "Ripgrep is required to create a distributable package. Install rg on the "
-            "build machine; end users receive the bundled executable."
-        )
-    rg_name = "rg.exe" if sys.platform == "win32" else "rg"
-    rg_dest = VENDOR_DIR / "ripgrep" / platform / rg_name
+    rg_src, indexer_src = stage_native_search_tools(ROOT / "aichs_native" / "bin")
+    rg_dest = VENDOR_DIR / "ripgrep" / platform / rg_src.name
+    indexer_dest = VENDOR_DIR / "aichs-indexer" / platform / indexer_src.name
     rg_dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(rg, rg_dest)
-
-    cargo = shutil.which("cargo")
-    if not cargo:
-        raise RuntimeError("Cargo is required to build the bundled aichs filename indexer.")
-    subprocess.check_call(
-        [cargo, "build", "--release", "--manifest-path", "rust/aichs-indexer/Cargo.toml"],
-        cwd=ROOT,
-    )
-    indexer_name = "aichs-indexer.exe" if sys.platform == "win32" else "aichs-indexer"
-    indexer_src = ROOT / "rust" / "aichs-indexer" / "target" / "release" / indexer_name
-    indexer_dest = VENDOR_DIR / "aichs-indexer" / platform / indexer_name
     indexer_dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(rg_src, rg_dest)
     shutil.copy2(indexer_src, indexer_dest)
 
 

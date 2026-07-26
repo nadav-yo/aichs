@@ -19,6 +19,9 @@ build/
 
 # Rust build output
 rust/aichs-indexer/target/
+tools/vendor/
+aichs_native/bin/*
+!aichs_native/bin/.gitkeep
 
 # Secrets / credentials (user settings live in ~/.aichs/, outside this repo)
 .env
