@@ -27,12 +27,21 @@ jobs:
           - name: Linux x64
             os: ubuntu-22.04
             artifact: wheel-linux-x64
+            manylinux: true
+            wheel_platform_tag: manylinux_2_28_x86_64
           - name: Windows x64
             os: windows-latest
             artifact: wheel-windows-x64
+            manylinux: false
+            wheel_platform_tag: win_amd64
           - name: macOS Apple Silicon
             os: macos-14
             artifact: wheel-macos-arm64
+            manylinux: false
+            wheel_platform_tag: macosx_11_0_arm64
+
+    env:
+      AICHS_WHEEL_PLATFORM_TAG: ${{ matrix.wheel_platform_tag }}
 
     steps:
       - name: Check out tag
@@ -42,20 +51,20 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Python
+        if: ${{ !matrix.manylinux }}
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Set up Rust
+        if: ${{ !matrix.manylinux }}
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Ripgrep (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes ripgrep
 
       - name: Install Ripgrep (macOS)
         if: runner.os == 'macOS'
-        run: brew install ripgrep
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: cargo install --locked ripgrep --version 14.1.1
 
       - name: Install Ripgrep (Windows)
         if: runner.os == 'Windows'
@@ -63,22 +72,50 @@ jobs:
         run: choco install ripgrep --yes --no-progress
 
       - name: Install wheel build tools
+        if: ${{ !matrix.manylinux }}
         run: python -m pip install --upgrade build
 
       - name: Stage native helpers
+        if: ${{ !matrix.manylinux }}
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: python tools/stage_native_search.py
 
       - name: Build platform wheel
+        if: ${{ !matrix.manylinux }}
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: python -m build --wheel
+
+      - name: Build manylinux platform wheel
+        if: matrix.manylinux
+        run: |
+          docker run --rm \
+            -e AICHS_WHEEL_PLATFORM_TAG \
+            -v "$GITHUB_WORKSPACE:/project" \
+            -w /project \
+            quay.io/pypa/manylinux_2_28_x86_64 \
+            bash -ec '
+              dnf install --assumeyes curl gcc gcc-c++ make
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+              source "$HOME/.cargo/env"
+              cargo install --locked ripgrep --version 14.1.1
+              /opt/python/cp311-cp311/bin/python -m pip install --upgrade build
+              /opt/python/cp311-cp311/bin/python tools/stage_native_search.py
+              /opt/python/cp311-cp311/bin/python -m build --wheel
+            '
 
       - name: Verify native helpers are in the wheel
         shell: python
         run: |
           import pathlib
+          import os
           import zipfile
 
           wheels = list(pathlib.Path("dist").glob("*.whl"))
           assert len(wheels) == 1, wheels
+          expected_tag = os.environ["AICHS_WHEEL_PLATFORM_TAG"]
+          assert wheels[0].name.endswith(f"-{expected_tag}.whl"), wheels[0]
           with zipfile.ZipFile(wheels[0]) as wheel:
               names = set(wheel.namelist())
           suffix = ".exe" if __import__("sys").platform == "win32" else ""
