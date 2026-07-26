@@ -4,3 +4,4 @@ openai==2.38.0
 mcp>=1.27,<2
 markdown==3.10.2
 pygments==2.20.0
+cryptography>=46,<50

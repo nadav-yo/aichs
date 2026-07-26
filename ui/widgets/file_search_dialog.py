@@ -168,7 +168,7 @@ class FileSearchDialog(QDialog):
             self._candidate_entries = ()
             self._show_placeholder("Loading files...")
             return
-        source_entries = (
+        source_entries = None if getattr(self._index, "native_root", None) is not None else (
             self._candidate_entries
             if _is_query_refinement(self._candidate_query, query)
             else self._index.entries

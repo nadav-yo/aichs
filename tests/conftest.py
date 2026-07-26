@@ -63,6 +63,7 @@ def clear_service_caches():
     from services.language_snapshot import clear_language_status_cache
     from services.tool_registry import clear_all_extension_caches
     from services.mcp_tools import clear_mcp_caches
+    from services.organization_policy import clear_governance_cache
 
     clear_workspace_file_cache()
     clear_git_snapshot_cache()
@@ -70,6 +71,7 @@ def clear_service_caches():
     clear_language_status_cache()
     clear_all_extension_caches()
     clear_mcp_caches()
+    clear_governance_cache()
     yield
     clear_workspace_file_cache()
     clear_git_snapshot_cache()
@@ -77,6 +79,7 @@ def clear_service_caches():
     clear_language_status_cache()
     clear_all_extension_caches()
     clear_mcp_caches()
+    clear_governance_cache()
 
 
 @pytest.fixture

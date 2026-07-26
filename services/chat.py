@@ -40,6 +40,7 @@ from services.tools import (
 )
 from services.tool_registry import HookContext, run_extension_hooks
 from services.usage import merge_usage, normalize_usage
+from services.organization_policy import CapabilityRequest, decide
 from storage.settings import SettingsStore, compact_resume_prompt
 
 _MAX_PARALLEL = 8
@@ -175,6 +176,14 @@ class ChatThread(QThread):
 
     def run(self):
         try:
+            model_decision = decide(CapabilityRequest(
+                kind="model",
+                name=self.model,
+                cwd=self.cwd,
+                provider=getattr(self._model_cfg, "provider_id", "") or self.provider,
+            ))
+            if model_decision.result == "deny":
+                raise ValueError(model_decision.message)
             self._resolve_system()
             self._resolve_deferred_file_refs()
             start_ctx = HookContext(

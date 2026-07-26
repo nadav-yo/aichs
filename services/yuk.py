@@ -33,6 +33,7 @@ from services.tool_registry import (
     set_extension_enabled,
     extension_static_summary,
 )
+from services.organization_policy import record_yuk_install
 
 
 YUK_FORMAT = "aichs-yuk/v1"
@@ -203,6 +204,7 @@ def export_yuk(
     manifest = {
         "format": YUK_FORMAT,
         "name": name,
+        "package_id": _safe_name(name).lower(),
         "settings": _selected_settings(settings, selected),
         "avatar_refs": {},
         "items": [],
@@ -329,6 +331,12 @@ def apply_yuk(
         settings[key] = value
         result.settings_applied.append(key)
     SettingsStore().save(settings)
+    record_yuk_install(
+        package_path=inspection.path,
+        manifest=manifest,
+        skills=list(result.skills_installed),
+        extensions=list(result.extensions_installed),
+    )
     return result
 
 

@@ -56,7 +56,7 @@ from services.model_registry import configured_provider_ids
 from services.performance import time_operation
 from services.workspace import build_system
 from services.export import default_export_name, write_conversation_markdown
-from services.file_search import list_workspace_files
+from services.file_search import list_workspace_files, search_file_names
 from services.file_refs import MENTION_RE, files_for_refs, message_file_refs
 from services.processes import RuntimeProcessApi, get_process_manager
 from services.project_memory import parse_save_memory_args, read_project_memory, save_project_memory
@@ -177,18 +177,19 @@ class _MentionFilesSignals(QObject):
 
 
 class _MentionFilesWorker(QRunnable):
-    def __init__(self, generation: int, cwd: str, limit: int = 800):
+    def __init__(self, generation: int, cwd: str, query: str = "", limit: int = 80):
         super().__init__()
         self.signals = _MentionFilesSignals()
         self._generation = generation
         self._cwd = cwd
+        self._query = query
         self._limit = limit
 
     def run(self):
         self.signals.done.emit(
             self._generation,
             self._cwd,
-            _list_mention_files(self._cwd, limit=self._limit),
+            _list_mention_files(self._cwd, self._query, limit=self._limit),
         )
 
 
@@ -1583,6 +1584,7 @@ class ChatPanel(QWidget):
         self._mention_files_generation = 0
         self._mention_files_loading = False
         self._mention_files_cwd = ""
+        self._mention_files_query = ""
         self._mention_files: list[tuple[str, str]] = []
         self._extension_command_pool = QThreadPool(self)
         self._extension_command_pool.setMaxThreadCount(1)
@@ -3008,12 +3010,13 @@ class ChatPanel(QWidget):
             self._file_picker = FileMentionPicker(
                 files,
                 crew=_enabled_crew(self._settings.load()),
+                prefiltered=True,
                 parent=self,
             )
             self._file_picker.file_selected.connect(self._on_file_mention_selected)
             self._file_picker.crew_selected.connect(self._on_crew_mention_selected)
         else:
-            self._file_picker.set_files(files)
+            self._file_picker.set_files(files, prefiltered=True)
             self._file_picker.set_crew(_enabled_crew(self._settings.load()))
         self._file_picker.filter(text)
         if self._file_picker.count() == 0:
@@ -3027,24 +3030,24 @@ class ChatPanel(QWidget):
         self._mention_files_generation += 1
         self._mention_files_loading = False
         self._mention_files_cwd = ""
+        self._mention_files_query = ""
         self._mention_files = []
         if self._file_picker:
             self._file_picker.set_files([])
 
     def _ensure_mention_files_loading(self):
-        if self._mention_files_cwd == self.cwd:
-            return
-        if self._mention_files_loading:
+        normalized = self._file_mention_text.lstrip("@").strip()
+        if self._mention_files_cwd == self.cwd and self._mention_files_query == normalized:
             return
         self._mention_files_generation += 1
         generation = self._mention_files_generation
         self._mention_files_loading = True
-        worker = _MentionFilesWorker(generation, self.cwd)
+        worker = _MentionFilesWorker(generation, self.cwd, normalized)
         worker.signals.done.connect(self._on_mention_files_ready)
         self._mention_files_pool.start(worker)
 
     def _mention_file_candidates(self) -> list[tuple[str, str]]:
-        if self._mention_files_cwd == self.cwd:
+        if self._mention_files_cwd == self.cwd and self._mention_files_query == self._file_mention_text.lstrip("@").strip():
             return self._mention_files
         return []
 
@@ -3055,10 +3058,11 @@ class ChatPanel(QWidget):
         if cwd != self.cwd:
             return
         self._mention_files_cwd = cwd
+        self._mention_files_query = self._file_mention_text.lstrip("@").strip()
         self._mention_files = list(files or [])
         if not self._file_picker or not self._file_mention_text:
             return
-        self._file_picker.set_files(self._mention_files)
+        self._file_picker.set_files(self._mention_files, prefiltered=True)
         self._file_picker.filter(self._file_mention_text)
         if self._file_picker.count() == 0:
             self._file_picker.hide()
@@ -5290,17 +5294,12 @@ def _window_end(history: list[dict], start: int, byte_limit: int, message_limit:
 _MENTION_RE = MENTION_RE
 
 
-def _list_mention_files(cwd: str, limit: int = 800) -> list[tuple[str, str]]:
+def _list_mention_files(cwd: str, query: str = "", limit: int = 80) -> list[tuple[str, str]]:
     root = Path(cwd).resolve()
-    out: list[tuple[str, str]] = []
-    for file_path in list_workspace_files(root, limit=limit):
-        abs_path = Path(file_path)
-        try:
-            rel = abs_path.resolve().relative_to(root).as_posix()
-        except (OSError, ValueError):
-            continue
-        out.append((rel, str(abs_path)))
-    return out
+    return [
+        (match.rel_path.replace("\\", "/"), match.path)
+        for match in search_file_names(root, query, limit=limit)
+    ]
 
 
 def _mentioned_files(cwd: str, text: str) -> list[dict]:

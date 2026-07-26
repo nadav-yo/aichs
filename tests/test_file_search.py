@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 
 import services.file_search as file_search
+from services.filename_indexer import FilenameMatch
 from services.file_search import (
     FileSearchEntry,
     FileSearchIndex,
@@ -68,6 +69,21 @@ def test_file_search_index_reuses_file_scan(workspace, monkeypatch):
     assert index.search("CCF")
     assert index.search("CamCaFil")
     assert len(calls) == 1
+
+
+def test_file_search_uses_complete_native_index_when_available(workspace, monkeypatch):
+    native_matches = [
+        FilenameMatch("deep/CamelCaseFiltering.py", "CamelCaseFiltering.py", 120, (0, 5, 9))
+    ]
+    monkeypatch.setattr(file_search, "prepare_filename_index", lambda root: root == workspace.resolve())
+    monkeypatch.setattr(file_search, "query_filename_index", lambda root, query, *, limit: native_matches)
+
+    index = FileSearchIndex.from_root(workspace)
+    matches = index.search("CCF")
+
+    assert index.entries == ()
+    assert matches[0].rel_path == "deep/CamelCaseFiltering.py"
+    assert matches[0].path == str(workspace / "deep" / "CamelCaseFiltering.py")
 
 
 def test_file_search_index_reuses_recent_index(workspace, monkeypatch):

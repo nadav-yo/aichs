@@ -21,14 +21,16 @@ from config import (  # noqa: E402
     MAX_TOOL_OUTPUT_LINES,
     MAX_TOOL_READ_BYTES,
 )
-from services.shell_tool import shell_tool_name  # noqa: E402
+from services.shell_tool import is_shell_tool, shell_tool_name  # noqa: E402
 from services.content import is_visible_message  # noqa: E402
 from storage.repository import ConversationStore, project_conversation_summaries, workspace_id  # noqa: E402
 from services.subprocess_utils import popen_no_window, run_no_window  # noqa: E402
+from services.ripgrep import ripgrep_path  # noqa: E402
 from services.tool_policy import resolve_path, validate_tool_paths  # noqa: E402
-from services.tool_registry import ToolContext, ToolRegistry, load_extensions  # noqa: E402
+from services.tool_registry import ToolContext, ToolDefinition, ToolRegistry, load_extensions  # noqa: E402
 from services.mcp_tools import register_mcp_tools  # noqa: E402
 from services.project_memory import read_project_memory, save_project_memory  # noqa: E402
+from services.organization_policy import CapabilityRequest, decide  # noqa: E402
 
 # ── Tool schemas ──────────────────────────────────────────────────────────────
 
@@ -89,6 +91,7 @@ def tools_anthropic(cwd: str | None = None, *, surface: str = "chat") -> list:
             "input_schema": tool.input_schema,
         }
         for tool in registry_for(cwd).all(surface=surface)
+        if _tool_allowed_by_policy(tool, cwd or "")
     ]
 
 
@@ -146,6 +149,9 @@ def execute(name: str, inputs: dict, cwd: str, on_line=None, cancel=None) -> str
         path_err = validate_tool_paths(name, inputs, cwd)
         if path_err:
             return f"[tool error] {path_err}"
+        decision = decide(_tool_capability_request(tool, cwd, inputs))
+        if decision.result == "deny":
+            return f"[tool error] {decision.message}"
 
         ctx = ToolContext(
             cwd=cwd,
@@ -1064,7 +1070,8 @@ def _snippet(text: str, terms: list[str], radius: int = 120) -> str:
 
 
 def _search_files_with_rg(directory: Path, glob: str, pattern: str, cwd: str, cancel=None) -> str | None:
-    if not shutil.which("rg"):
+    rg = ripgrep_path()
+    if not rg:
         return None
     if _cancelled(cancel):
         return "[cancelled]"
@@ -1073,7 +1080,7 @@ def _search_files_with_rg(directory: Path, glob: str, pattern: str, cwd: str, ca
     try:
         r = run_no_window(
             [
-                "rg",
+                rg,
                 "--line-number",
                 "--with-filename",
                 "--color",
@@ -1156,3 +1163,58 @@ def _trim_output(text: str) -> str:
     if truncated:
         return text + "\n\n[output truncated]"
     return text
+
+
+
+def _tool_allowed_by_policy(tool: ToolDefinition, cwd: str) -> bool:
+    return decide(_tool_capability_request(tool, cwd, {})).result != "deny"
+
+
+def _tool_capability_request(tool: ToolDefinition, cwd: str, inputs: dict) -> CapabilityRequest:
+    source = tool.source or "builtin"
+    if source == "mcp":
+        kind = "mcp_tool"
+        owner = _policy_owner(tool.extension_id)
+        remote_name = _remote_mcp_tool_name(tool.name, owner)
+        name = remote_name or tool.name
+    elif source == "extension":
+        kind = "extension_tool"
+        owner = tool.extension_id
+        name = tool.name
+    elif is_shell_tool(tool.name):
+        kind = "shell"
+        owner = "builtin"
+        name = tool.name
+    elif tool.name in {"read_file", "list_files", "search_files"}:
+        kind = "file_read"
+        owner = "builtin"
+        name = tool.name
+    elif tool.name == "edit_file":
+        kind = "file_write"
+        owner = "builtin"
+        name = tool.name
+    else:
+        kind = "builtin_tool"
+        owner = "builtin"
+        name = tool.name
+    return CapabilityRequest(
+        kind=kind,
+        name=name,
+        cwd=cwd,
+        source=source,
+        owner=owner,
+        path=str(inputs.get("path") or inputs.get("directory") or ""),
+        metadata={"tool_name": tool.name},
+    )
+
+
+def _policy_owner(owner: str) -> str:
+    text = str(owner or "")
+    return text[4:] if text.startswith("mcp:") else text
+
+
+def _remote_mcp_tool_name(advertised: str, server: str) -> str:
+    prefix = "mcp__" + "".join(ch if ch.isalnum() else "_" for ch in server).strip("_") + "__"
+    if advertised.startswith(prefix):
+        return advertised[len(prefix):]
+    return ""

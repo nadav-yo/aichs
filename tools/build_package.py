@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "assets"
+VENDOR_DIR = ROOT / "tools" / "vendor"
 PNG_DIR = ASSETS / "png"
 ICON_BUILD_DIR = ROOT / "build" / "icons"
 WINDOWS_ICO = ICON_BUILD_DIR / "app.ico"
@@ -32,6 +33,7 @@ def main() -> int:
     _prepare_icons()
     if args.prepare_icons_only:
         return 0
+    _prepare_native_search_tools()
 
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm"]
     if not args.no_clean:
@@ -44,6 +46,43 @@ def _prepare_icons() -> None:
     _write_windows_ico(WINDOWS_ICO)
     if sys.platform == "darwin":
         _write_macos_icns(MACOS_ICNS)
+
+
+def _prepare_native_search_tools() -> None:
+    """Stage the native search executables that the packaged desktop app owns."""
+
+    platform = _platform_name()
+    rg = shutil.which("rg")
+    if not rg:
+        raise RuntimeError(
+            "Ripgrep is required to create a distributable package. Install rg on the "
+            "build machine; end users receive the bundled executable."
+        )
+    rg_name = "rg.exe" if sys.platform == "win32" else "rg"
+    rg_dest = VENDOR_DIR / "ripgrep" / platform / rg_name
+    rg_dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(rg, rg_dest)
+
+    cargo = shutil.which("cargo")
+    if not cargo:
+        raise RuntimeError("Cargo is required to build the bundled aichs filename indexer.")
+    subprocess.check_call(
+        [cargo, "build", "--release", "--manifest-path", "rust/aichs-indexer/Cargo.toml"],
+        cwd=ROOT,
+    )
+    indexer_name = "aichs-indexer.exe" if sys.platform == "win32" else "aichs-indexer"
+    indexer_src = ROOT / "rust" / "aichs-indexer" / "target" / "release" / indexer_name
+    indexer_dest = VENDOR_DIR / "aichs-indexer" / platform / indexer_name
+    indexer_dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(indexer_src, indexer_dest)
+
+
+def _platform_name() -> str:
+    if sys.platform == "win32":
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    return "linux"
 
 
 def _write_windows_ico(path: Path) -> None:

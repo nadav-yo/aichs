@@ -58,6 +58,7 @@ def test_search_file_contents_skips_binary_and_honors_limit(workspace):
 
 
 def test_search_file_contents_reads_only_preview_window(workspace, monkeypatch):
+    monkeypatch.setattr(text_search, "ripgrep_path", lambda: None)
     path = workspace / "large.txt"
     path.write_bytes(b"needle-" + (b"x" * 128))
     read_sizes = []
@@ -117,6 +118,7 @@ def test_search_file_contents_skips_line_scan_when_preview_has_no_match(workspac
 
 
 def test_search_file_contents_reuses_folded_query_for_line_matches(workspace, monkeypatch):
+    monkeypatch.setattr(text_search, "ripgrep_path", lambda: None)
     path = workspace / "match.txt"
     path.write_text("Needle here\n", encoding="utf-8")
     folded_queries = []
@@ -135,7 +137,8 @@ def test_search_file_contents_reuses_folded_query_for_line_matches(workspace, mo
     assert folded_queries == ["needle"]
 
 
-def test_search_file_contents_keeps_uncapped_refinement_candidates(workspace):
+def test_search_file_contents_keeps_uncapped_refinement_candidates(workspace, monkeypatch):
+    monkeypatch.setattr(text_search, "ripgrep_path", lambda: None)
     for name, text in (
         ("one.txt", "alpha needle deep\n"),
         ("two.txt", "alpha needle deeper\n"),

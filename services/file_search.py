@@ -6,10 +6,11 @@ from pathlib import Path
 from typing import Iterable
 
 from config import IGNORED
+from services.filename_indexer import clear_filename_index, prepare_filename_index, query_filename_index
 from services.performance import time_operation
 
 _WORKSPACE_FILE_CACHE_TTL_S = 2.0
-_WORKSPACE_FILE_CACHE: dict[tuple[str, int], tuple[tuple[int, int, int], float, tuple[str, ...]]] = {}
+_WORKSPACE_FILE_CACHE: dict[tuple[str, int | None], tuple[tuple[int, int, int], float, tuple[str, ...]]] = {}
 _WORKSPACE_FILE_CACHE_LOCK = threading.Lock()
 
 
@@ -32,11 +33,12 @@ class FileSearchEntry:
 @dataclass(frozen=True)
 class FileSearchIndex:
     entries: tuple[FileSearchEntry, ...]
+    native_root: Path | None = None
 
     @classmethod
-    def from_root(cls, root: str | Path, *, scan_limit: int = 1200) -> "FileSearchIndex":
+    def from_root(cls, root: str | Path, *, scan_limit: int | None = None) -> "FileSearchIndex":
         root_path = Path(root).resolve()
-        key = (str(root_path), int(scan_limit), tuple(sorted(IGNORED)))
+        key = (str(root_path), scan_limit, tuple(sorted(IGNORED)))
         signature = _workspace_root_signature(root_path)
         now = time.monotonic()
         with _FILE_SEARCH_INDEX_CACHE_LOCK:
@@ -50,6 +52,11 @@ class FileSearchIndex:
             "file_search.index",
             detail=f"root={root_path} limit={scan_limit}",
         ):
+            if scan_limit is None and prepare_filename_index(root_path):
+                index = cls((), root_path)
+                with _FILE_SEARCH_INDEX_CACHE_LOCK:
+                    _FILE_SEARCH_INDEX_CACHE[key] = (signature, now, index)
+                return index
             entries = []
             for path in list_workspace_files(root_path, limit=scan_limit):
                 entries.append(
@@ -85,6 +92,22 @@ class FileSearchIndex:
         limit: int = 80,
         entries: Iterable[FileSearchEntry] | None = None,
     ) -> tuple[list[FileSearchMatch], tuple[FileSearchEntry, ...]]:
+        if self.native_root is not None and entries is None:
+            native_matches = query_filename_index(self.native_root, query, limit=limit)
+            if native_matches is not None:
+                return (
+                    [
+                        FileSearchMatch(
+                            str(self.native_root / item.rel_path),
+                            item.rel_path,
+                            item.name,
+                            item.score,
+                            item.indices,
+                        )
+                        for item in native_matches
+                    ],
+                    (),
+                )
         source = self.entries if entries is None else tuple(entries)
         with time_operation(
             "file_search.query",
@@ -113,7 +136,7 @@ class FileSearchIndex:
 
 
 _FILE_SEARCH_INDEX_CACHE: dict[
-    tuple[str, int, tuple[str, ...]],
+    tuple[str, int | None, tuple[str, ...]],
     tuple[tuple[int, int, int], float, FileSearchIndex],
 ] = {}
 _FILE_SEARCH_INDEX_CACHE_LOCK = threading.Lock()
@@ -140,14 +163,14 @@ def search_file_names(
     query: str,
     *,
     limit: int = 80,
-    scan_limit: int = 1200,
+    scan_limit: int | None = None,
 ) -> list[FileSearchMatch]:
     return FileSearchIndex.from_root(root, scan_limit=scan_limit).search(query, limit=limit)
 
 
-def list_workspace_files(root: str | Path, *, limit: int = 1200) -> list[str]:
+def list_workspace_files(root: str | Path, *, limit: int | None = None) -> list[str]:
     root_path = Path(root).resolve()
-    key = (str(root_path), int(limit))
+    key = (str(root_path), limit)
     signature = _workspace_root_signature(root_path)
     now = time.monotonic()
     with _WORKSPACE_FILE_CACHE_LOCK:
@@ -167,6 +190,7 @@ def list_workspace_files(root: str | Path, *, limit: int = 1200) -> list[str]:
 
 
 def clear_workspace_file_cache(root: str | Path | None = None) -> None:
+    clear_filename_index(root)
     with _WORKSPACE_FILE_CACHE_LOCK:
         if root is None:
             _WORKSPACE_FILE_CACHE.clear()
@@ -193,15 +217,15 @@ def _workspace_root_signature(root: Path) -> tuple[int, int, int]:
     return (int(stat.st_mtime_ns), int(stat.st_ctime_ns), int(stat.st_size))
 
 
-def _walk_files(dir_path: Path, found: list[str], limit: int) -> None:
-    if len(found) >= limit:
+def _walk_files(dir_path: Path, found: list[str], limit: int | None) -> None:
+    if limit is not None and len(found) >= limit:
         return
     try:
         entries = sorted(dir_path.iterdir(), key=lambda e: e.name.lower())
     except PermissionError:
         return
     for entry in entries:
-        if len(found) >= limit:
+        if limit is not None and len(found) >= limit:
             return
         if entry.name in IGNORED or entry.name.startswith("."):
             continue

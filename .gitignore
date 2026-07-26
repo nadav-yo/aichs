@@ -17,6 +17,9 @@ dist/
 build/
 *.egg-info/
 
+# Rust build output
+rust/aichs-indexer/target/
+
 # Secrets / credentials (user settings live in ~/.aichs/, outside this repo)
 .env
 .env.*

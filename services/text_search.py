@@ -1,10 +1,14 @@
 from dataclasses import dataclass
+import json
 from pathlib import Path
+import subprocess
 from typing import Callable, Iterable
 
-from config import MAX_FILE_PREVIEW_BYTES
+from config import IGNORED, MAX_FILE_PREVIEW_BYTES
 from services.file_search import list_workspace_files
 from services.performance import time_operation
+from services.ripgrep import ripgrep_path
+from services.subprocess_utils import popen_no_window
 
 
 @dataclass(frozen=True)
@@ -22,7 +26,7 @@ def search_file_contents(
     query: str,
     *,
     limit: int = 100,
-    scan_limit: int = 800,
+    scan_limit: int | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> list[TextSearchMatch]:
     with time_operation(
@@ -34,6 +38,9 @@ def search_file_contents(
             return []
 
         root_path = Path(root).resolve()
+        native_matches = _search_with_rg(root_path, q, limit=limit, cancelled=cancelled)
+        if native_matches is not None:
+            return native_matches
         folded_query = q.casefold()
         matches: list[TextSearchMatch] = []
         for file_path in list_workspace_files(root_path, limit=scan_limit):
@@ -60,8 +67,8 @@ def search_file_contents_with_candidates(
     query: str,
     *,
     limit: int = 100,
-    scan_limit: int = 800,
-    candidate_limit: int = 2000,
+    scan_limit: int | None = None,
+    candidate_limit: int | None = None,
     candidates: Iterable[TextSearchMatch] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple[list[TextSearchMatch], tuple[TextSearchMatch, ...]]:
@@ -75,6 +82,12 @@ def search_file_contents_with_candidates(
         q = query.strip()
         if not q:
             return [], ()
+        root_path = Path(root).resolve()
+        # Native search always evaluates the full workspace.  Reusing a previous
+        # result set would turn an ordinary query refinement into a hidden scan cap.
+        native_matches = _search_with_rg(root_path, q, limit=limit, cancelled=cancelled)
+        if native_matches is not None:
+            return native_matches, ()
         if candidates is not None:
             return _filter_text_candidates(
                 q,
@@ -84,7 +97,6 @@ def search_file_contents_with_candidates(
                 cancelled=cancelled,
             )
 
-        root_path = Path(root).resolve()
         folded_query = q.casefold()
         matches: list[TextSearchMatch] = []
         next_candidates: list[TextSearchMatch] = []
@@ -104,7 +116,7 @@ def search_file_contents_with_candidates(
                 next_candidates.append(match)
                 if len(matches) < limit:
                     matches.append(match)
-                if len(next_candidates) >= candidate_limit:
+                if candidate_limit is not None and len(next_candidates) >= candidate_limit:
                     return matches, tuple(next_candidates)
         return matches, tuple(next_candidates)
 
@@ -114,7 +126,7 @@ def _filter_text_candidates(
     candidates: Iterable[TextSearchMatch],
     *,
     limit: int,
-    candidate_limit: int,
+    candidate_limit: int | None,
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple[list[TextSearchMatch], tuple[TextSearchMatch, ...]]:
     matches: list[TextSearchMatch] = []
@@ -137,9 +149,115 @@ def _filter_text_candidates(
         next_candidates.append(match)
         if len(matches) < limit:
             matches.append(match)
-        if len(next_candidates) >= candidate_limit:
+        if candidate_limit is not None and len(next_candidates) >= candidate_limit:
             break
     return matches, tuple(next_candidates)
+
+
+def _search_with_rg(
+    root: Path,
+    query: str,
+    *,
+    limit: int,
+    cancelled: Callable[[], bool] | None,
+) -> list[TextSearchMatch] | None:
+    """Search all eligible workspace files with Ripgrep's structured output.
+
+    ``None`` means Ripgrep is unavailable and callers should use the portable
+    Python fallback.  Returning an empty list is a successful search with no hits.
+    """
+
+    rg = ripgrep_path()
+    if not rg:
+        return None
+    command = [
+        rg,
+        "--json",
+        "--line-number",
+        "--column",
+        "--color",
+        "never",
+        "--no-messages",
+        "--fixed-strings",
+        "--ignore-case",
+    ]
+    for ignored in sorted(IGNORED):
+        command.extend(("--glob", f"!{ignored}/**"))
+    command.extend(("--", query, str(root)))
+    try:
+        process = popen_no_window(
+            command,
+            cwd=str(root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return None
+
+    matches: list[TextSearchMatch] = []
+    try:
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            if cancelled and cancelled():
+                _stop_process(process)
+                return matches
+            try:
+                event = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") != "match":
+                continue
+            data = event.get("data") or {}
+            path_text = str((data.get("path") or {}).get("text") or "")
+            line_text = str((data.get("lines") or {}).get("text") or "").rstrip("\r\n")
+            if not path_text:
+                continue
+            display_line = line_text.strip()
+            start = display_line.casefold().find(query.casefold())
+            if start < 0:
+                continue
+            path = Path(path_text)
+            try:
+                rel_path = str(path.resolve().relative_to(root))
+            except (OSError, ValueError):
+                rel_path = path_text
+            matches.append(
+                TextSearchMatch(
+                    path=str(path),
+                    rel_path=rel_path,
+                    line_no=int(data.get("line_number") or 1),
+                    line_text=display_line,
+                    start=start,
+                    end=start + len(query),
+                )
+            )
+            if len(matches) >= limit:
+                _stop_process(process)
+                return matches
+        process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        _stop_process(process)
+        return None
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+    return matches
+
+
+def _stop_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=1)
 
 
 def _read_preview_bytes(path: Path) -> bytes:

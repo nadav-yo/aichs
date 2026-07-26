@@ -20,6 +20,7 @@ from services.mcp_oauth import (
     has_oauth_tokens,
 )
 from services.tool_registry import ToolContext, ToolDefinition, ToolRegistry
+from services.organization_policy import CapabilityRequest, decide
 
 
 _CACHE_LOCK = threading.RLock()
@@ -185,6 +186,15 @@ def mcp_tool_definitions(cwd: str | None = None) -> list[ToolDefinition]:
         remote_tools = _remote_tools_from_capabilities(capabilities)
         for remote in remote_tools:
             if not server.component_enabled("tools", remote.name):
+                continue
+            decision = decide(CapabilityRequest(
+                kind="mcp_tool",
+                name=remote.name,
+                cwd=str(cwd or ""),
+                source="mcp",
+                owner=server.name,
+            ))
+            if decision.result == "deny":
                 continue
             tool = _remote_tool_definition(server, remote, used_names=used_names)
             tools.append(tool)
@@ -439,6 +449,14 @@ async def _discover_server_capabilities(server: McpServerConfig, *, oauth_intera
 
 
 async def _call_tool(server: McpServerConfig, name: str, arguments: dict) -> str:
+    decision = decide(CapabilityRequest(
+        kind="mcp_tool",
+        name=name,
+        source="mcp",
+        owner=server.name,
+    ))
+    if decision.result == "deny":
+        return f"[tool error] {decision.message}"
     append_mcp_log(server, "tool_started", name)
     try:
         async with _session(server) as session:

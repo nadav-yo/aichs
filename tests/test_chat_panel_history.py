@@ -251,7 +251,7 @@ class _FakeMentionPool:
 class _FakeMentionPicker:
     created = []
 
-    def __init__(self, files, crew=None, parent=None):
+    def __init__(self, files, crew=None, prefiltered=False, parent=None):
         self.files = list(files)
         self.crew = list(crew or [])
         self.parent = parent
@@ -265,7 +265,7 @@ class _FakeMentionPicker:
         self.moves = []
         _FakeMentionPicker.created.append(self)
 
-    def set_files(self, files):
+    def set_files(self, files, *, prefiltered=False):
         self.files = list(files)
 
     def set_crew(self, crew):
@@ -1332,7 +1332,7 @@ def test_mention_files_worker_emits_loaded_files(qapp, tmp_path, monkeypatch):
     import ui.widgets.chat_panel as chat_panel
 
     files = [("src/main.py", str(tmp_path / "src" / "main.py"))]
-    monkeypatch.setattr(chat_panel, "_list_mention_files", lambda cwd, limit=800: files)
+    monkeypatch.setattr(chat_panel, "_list_mention_files", lambda cwd, query="", limit=80: files)
     worker = _MentionFilesWorker(4, str(tmp_path), limit=12)
     done = []
     worker.signals.done.connect(lambda *args: done.append(args))
@@ -1762,22 +1762,25 @@ def test_extension_command_done_applies_directives_before_result_notice(qapp):
     assert resumed == [("resume", False)]
 
 
-def test_list_mention_files_delegates_to_workspace_file_service(tmp_path, monkeypatch):
+def test_list_mention_files_uses_shared_filename_search(tmp_path, monkeypatch):
     import ui.widgets.chat_panel as chat_panel
 
     root = tmp_path / "repo"
     nested = root / "src" / "main.py"
-    outside = tmp_path / "outside.py"
     calls = []
 
-    def fake_list_workspace_files(workspace_root, *, limit):
-        calls.append((workspace_root, limit))
-        return [str(nested), str(outside)]
+    class _Match:
+        rel_path = "src/main.py"
+        path = str(nested)
 
-    monkeypatch.setattr(chat_panel, "list_workspace_files", fake_list_workspace_files)
+    def fake_search_file_names(workspace_root, query, *, limit):
+        calls.append((workspace_root, query, limit))
+        return [_Match()]
 
-    assert _list_mention_files(str(root), limit=17) == [("src/main.py", str(nested))]
-    assert calls == [(root.resolve(), 17)]
+    monkeypatch.setattr(chat_panel, "search_file_names", fake_search_file_names)
+
+    assert _list_mention_files(str(root), "main", limit=17) == [("src/main.py", str(nested))]
+    assert calls == [(root.resolve(), "main", 17)]
 
 
 def test_file_mention_picker_loads_once_and_reuses_latest_query(qapp, tmp_path, monkeypatch):
@@ -1794,6 +1797,7 @@ def test_file_mention_picker_loads_once_and_reuses_latest_query(qapp, tmp_path, 
         _mention_files_generation=0,
         _mention_files_loading=False,
         _mention_files_cwd="",
+        _mention_files_query="",
         _mention_files=[],
         _file_mention_text="",
         _position_file_picker=lambda: positions.append("position"),
@@ -1815,7 +1819,7 @@ def test_file_mention_picker_loads_once_and_reuses_latest_query(qapp, tmp_path, 
     ChatPanel._on_file_mention_changed(panel, "s")
     ChatPanel._on_file_mention_changed(panel, "sr")
 
-    assert len(pool.workers) == 1
+    assert len(pool.workers) == 2
     picker = _FakeMentionPicker.created[0]
     assert picker.files == []
     assert picker.filters == ["s", "sr"]
