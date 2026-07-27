@@ -33,8 +33,9 @@ from ui.theme import (
     palette, ACCENT, git_status_color, icon_button_style, files_header_style,
     WORKBENCH_HEADER_MARGINS, WORKBENCH_HEADER_SPACING,
     file_tree_sidebar_style, mono_font_pt, mono_font,
-    chat_font_pt, current_theme, rail_button_style,
-    sidebar_footer_button_style,
+    chat_font_pt, current_theme, rail_button_style, activity_tab_style,
+    sidebar_footer_button_style, activity_sidebar_surface_style,
+    sidebar_toolbar_add_button_style, sidebar_toolbar_add_icon, sidebar_toolbar_field_style, sidebar_toolbar_style,
 )
 from ui.widgets.conversation_panel import ConversationPanel
 from ui.widgets.git_panel import GitPanel
@@ -438,6 +439,7 @@ class _PathLabel(QLabel):
 
 class _FilesHeader(QWidget):
     refresh_clicked = pyqtSignal()
+    new_clicked = pyqtSignal()
     filter_changed = pyqtSignal(str)
 
     def __init__(
@@ -449,12 +451,16 @@ class _FilesHeader(QWidget):
         filter_enabled: bool = False,
     ):
         super().__init__(parent)
-        self.setObjectName("filesHeader")
+        self.setObjectName("sidebarToolbar" if filter_enabled else "filesHeader")
         self._filter_enabled = filter_enabled
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(*WORKBENCH_HEADER_MARGINS)
-        row.setSpacing(WORKBENCH_HEADER_SPACING)
+        if filter_enabled:
+            row.setContentsMargins(14, 8, 14, 7)
+            row.setSpacing(8)
+        else:
+            row.setContentsMargins(*WORKBENCH_HEADER_MARGINS)
+            row.setSpacing(WORKBENCH_HEADER_SPACING)
 
         self._path = None
         self._filter = None
@@ -475,12 +481,27 @@ class _FilesHeader(QWidget):
         self._trailing.setSpacing(4)
         row.addLayout(self._trailing)
 
+        self._new = None
+        if filter_enabled:
+            self._new = QPushButton()
+            self._new.setObjectName("sidebarToolbarAdd")
+            self._new.setToolTip("New file or folder")
+            self._new.setAccessibleName("New file or folder")
+            self._new.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._new.setFixedSize(22, 22)
+            self._new.setIcon(sidebar_toolbar_add_icon())
+            self._new.setIconSize(QSize(22, 22))
+            self._new.clicked.connect(self.new_clicked.emit)
+            row.addWidget(self._new)
+
         self._refresh = QPushButton("↻")
         self._refresh.setToolTip(refresh_tooltip)
         self._refresh.setCursor(Qt.CursorShape.PointingHandCursor)
         self._refresh.setFixedSize(28, 28)
         self._refresh.clicked.connect(self.refresh_clicked.emit)
         row.addWidget(self._refresh)
+        if filter_enabled:
+            self._refresh.hide()
 
         self.apply_appearance()
 
@@ -505,7 +526,13 @@ class _FilesHeader(QWidget):
             self._path.set_path_hint(hint)
 
     def apply_appearance(self):
-        self.setStyleSheet(files_header_style())
+        if self._filter_enabled:
+            self.setStyleSheet(sidebar_toolbar_style())
+            self._filter.setStyleSheet(sidebar_toolbar_field_style(selector="QLineEdit#filesFilter"))
+            self._new.setStyleSheet(sidebar_toolbar_add_button_style())
+            self._new.setIcon(sidebar_toolbar_add_icon())
+        else:
+            self.setStyleSheet(files_header_style())
         self._refresh.setStyleSheet(icon_button_style())
 
 
@@ -2008,174 +2035,6 @@ def _set_rail_button_icon(button: QPushButton, key: str, *, active: bool = False
     button.setIconSize(QSize(16, 16))
 
 
-def _rail_workspace_text(name: str) -> str:
-    text = str(name or "").strip() or "Workspace"
-    return text if len(text) <= 10 else f"{text[:9]}..."
-
-
-def _workspace_nav_title_style() -> str:
-    p = palette()
-    fs = max(10, chat_font_pt() - 3)
-    return (
-        "background: transparent; color: %s; font-size: %dpx; "
-        "font-weight: bold; padding: 0px 0px 2px 0px;"
-    ) % (p["TEXT_DIM"], fs)
-
-
-def _workspace_nav_empty_style() -> str:
-    p = palette()
-    fs = max(10, chat_font_pt() - 3)
-    return (
-        "background: transparent; color: %s; font-size: %dpx; padding: 4px 0px;"
-    ) % (p["TEXT_DIM"], fs)
-
-
-def _workspace_nav_button_style(*, active: bool = False) -> str:
-    p = palette()
-    fs = max(10, chat_font_pt() - 3)
-    fg = p["TEXT"] if active else p["TEXT_DIM"]
-    bg = p["BG3"] if active else "transparent"
-    return (
-        "QPushButton { background-color: %s; color: %s; border: none; "
-        "border-radius: 7px; padding: 5px 2px; font-size: %dpx; "
-        "font-weight: bold; text-align: left; }"
-        "QPushButton:hover { background-color: %s; color: %s; }"
-    ) % (bg, fg, fs, p["BG3"], p["TEXT"])
-
-
-def _workspace_nav_icon_button_style() -> str:
-    p = palette()
-    return (
-        "QPushButton { background-color: transparent; border: none; border-radius: 6px; "
-        "padding: 3px; }"
-        "QPushButton:hover { background-color: %s; }"
-    ) % p["BG3"]
-
-
-def _workspace_nav_separator_style() -> str:
-    p = palette()
-    return "background-color: %s; border: none;" % p["BORDER_SUBTLE"]
-
-class _WorkspaceNavPanel(QWidget):
-    switch_requested = pyqtSignal(str)
-    add_requested = pyqtSignal()
-
-    def __init__(self, current_workspace: str, parent=None):
-        super().__init__(parent)
-        self._current_workspace = os.path.abspath(current_workspace)
-        self._buttons: list[QPushButton] = []
-        self._empty_label: QLabel | None = None
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 10, 0, 4)
-        layout.setSpacing(5)
-
-        separator = QFrame()
-        separator.setObjectName("railWorkspaceSeparator")
-        separator.setFixedHeight(1)
-        layout.addWidget(separator)
-        self._separator = separator
-
-        header = QWidget()
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(0, 2, 0, 0)
-        header_layout.setSpacing(2)
-        layout.addWidget(header)
-        self._header = header
-
-        title = QLabel("Workspaces")
-        title.setObjectName("railWorkspaceTitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        header_layout.addWidget(title, 1)
-        self._title = title
-
-        self._add_btn = QPushButton("")
-        self._add_btn.setObjectName("railWorkspaceOpen")
-        self._add_btn.setAccessibleName("Open workspace")
-        self._add_btn.setToolTip("Open workspace")
-        self._add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._add_btn.setFixedSize(22, 22)
-        self._add_btn.setIconSize(QSize(15, 15))
-        self._add_btn.setIcon(_rail_button_icon("workspace"))
-        self._add_btn.clicked.connect(self.add_requested.emit)
-        header_layout.addWidget(self._add_btn, 0, Qt.AlignmentFlag.AlignRight)
-
-        self._items = QWidget()
-        self._items_layout = QVBoxLayout(self._items)
-        self._items_layout.setContentsMargins(0, 0, 0, 0)
-        self._items_layout.setSpacing(4)
-        layout.addWidget(self._items)
-        self.refresh()
-
-    def set_current_workspace(self, path: str):
-        self._current_workspace = os.path.abspath(path)
-        self.refresh()
-
-    def refresh(self):
-        self._clear_items()
-        rows = [self._current_workspace_row()]
-        rows.extend(row for row in list_workspaces(limit=8) if self._show_workspace_row(row))
-        for row in rows[:5]:
-            self._add_workspace_row(row)
-        self.apply_appearance()
-
-    def _current_workspace_row(self) -> dict:
-        path = self._current_workspace
-        return {
-            "path": path,
-            "name": Path(path).name or path,
-            "exists": os.path.exists(path),
-            "current": True,
-        }
-
-    def _add_workspace_row(self, row: dict):
-        path = str(row.get("path") or "")
-        name = str(row.get("name") or Path(path).name or path)
-        is_current = bool(row.get("current"))
-        button = QPushButton(_rail_workspace_text(name))
-        button.setObjectName("railWorkspaceButton")
-        button.setToolTip(("Current workspace\n" if is_current else "") + path)
-        button.setCursor(Qt.CursorShape.ArrowCursor if is_current else Qt.CursorShape.PointingHandCursor)
-        button.setIcon(_rail_button_icon("workspace" if is_current else "files", active=is_current))
-        button.setProperty("currentWorkspace", is_current)
-        if is_current:
-            button.setCheckable(True)
-            button.setChecked(True)
-            button.clicked.connect(lambda _checked=False, b=button: b.setChecked(True))
-        else:
-            button.clicked.connect(lambda _checked=False, p=path: self.switch_requested.emit(p))
-        self._buttons.append(button)
-        self._items_layout.addWidget(button)
-
-    def apply_appearance(self):
-        self.setStyleSheet("")
-        self._header.setStyleSheet("")
-        self._items.setStyleSheet("")
-        self._separator.setStyleSheet(_workspace_nav_separator_style())
-        self._title.setStyleSheet(_workspace_nav_title_style())
-        self._add_btn.setStyleSheet(_workspace_nav_icon_button_style())
-        for button in self._buttons:
-            active = bool(button.property("currentWorkspace"))
-            button.setStyleSheet(_workspace_nav_button_style(active=active))
-            button.setIcon(_rail_button_icon("workspace" if active else "files", active=active))
-        if self._empty_label is not None:
-            self._empty_label.setStyleSheet(_workspace_nav_empty_style())
-
-    def _show_workspace_row(self, row: dict) -> bool:
-        path = str(row.get("path") or "")
-        if not path or not row.get("exists", False):
-            return False
-        return os.path.normcase(os.path.abspath(path)) != os.path.normcase(self._current_workspace)
-
-    def _clear_items(self):
-        self._buttons.clear()
-        self._empty_label = None
-        while self._items_layout.count():
-            item = self._items_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-
 class LeftPanel(QWidget):
     selected         = pyqtSignal(str)
     new_chat         = pyqtSignal()
@@ -2190,7 +2049,6 @@ class LeftPanel(QWidget):
     text_search_requested = pyqtSignal()
     extensions_requested  = pyqtSignal()
     mcp_requested         = pyqtSignal()
-    workspace_requested   = pyqtSignal()
     workspace_switch_requested = pyqtSignal(str)
     canvas_requested      = pyqtSignal()
     activity_selected     = pyqtSignal(str)
@@ -2210,30 +2068,34 @@ class LeftPanel(QWidget):
         super().__init__(parent)
         self._settings = settings or SettingsStore()
         self._activity_buttons: dict[str, QPushButton] = {}
+        self._activity_labels: dict[str, str] = {}
         self._activity_widgets: dict[str, QWidget] = {}
         self._activity_attention: dict[str, bool] = {}
         self._active_activity = "chats"
+        self._canvas_enabled = True
         self._collapsed_width = ACTIVITY_RAIL_WIDTH
         self._expanded_min_width = MIN_ACTIVITY_WIDTH
         self._expanded_max_width = MAX_ACTIVITY_WIDTH
         self._stack_panel_width = MAX_ACTIVITY_WIDTH - ACTIVITY_RAIL_WIDTH
         self._defer_refresh = defer_refresh
 
-        root = QHBoxLayout(self)
+        root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         self._rail = QFrame()
         self._rail.setObjectName("activityRail")
-        self._rail.setFixedWidth(ACTIVITY_RAIL_WIDTH)
-        rail_layout = QVBoxLayout(self._rail)
-        rail_layout.setContentsMargins(6, 8, 6, 8)
-        rail_layout.setSpacing(6)
+        rail_layout = QHBoxLayout(self._rail)
+        # Keep the content divider level with the workbench's lower header rule.
+        # The tabs remain visually anchored at the top, with breathing room below.
+        rail_layout.setContentsMargins(8, 2, 8, 9)
+        rail_layout.setSpacing(3)
+        self._rail_layout = rail_layout
 
         self._stack = QStackedWidget()
         self._stack.setObjectName("activityStack")
-        self._stack.setMinimumWidth(ACTIVITY_STACK_MIN_WIDTH)
-        self._stack.setMaximumWidth(MAX_ACTIVITY_WIDTH - ACTIVITY_RAIL_WIDTH)
+        self._stack.setMinimumWidth(MIN_ACTIVITY_WIDTH)
+        self._stack.setMaximumWidth(MAX_ACTIVITY_WIDTH)
 
         self._conv = ConversationPanel(store, settings=self._settings)
         self._conv.selected.connect(self.selected)
@@ -2253,6 +2115,7 @@ class LeftPanel(QWidget):
 
         self._files_header = _FilesHeader(root_path, filter_enabled=True)
         self._files_header.refresh_clicked.connect(self._file_tree.refresh)
+        self._files_header.new_clicked.connect(self._show_file_create_menu)
         self._files_header.filter_changed.connect(self._file_tree.set_filter_text)
         files_layout.addWidget(self._files_header)
         files_layout.addWidget(self._file_tree, 1)
@@ -2284,62 +2147,71 @@ class LeftPanel(QWidget):
         git_layout.addWidget(self._git_header)
         git_layout.addWidget(self._git, 1)
 
-        self._add_activity_action("workspace", "Home", rail_layout, tooltip="Home")
-        self._add_activity_action("canvas", "Canvas", rail_layout, tooltip="Agent Canvas")
         self._add_activity("chats", "Chats", self._conv, rail_layout)
         self._add_activity("files", "Files", files_wrap, rail_layout)
         self._add_activity("git", "Git", git_wrap, rail_layout)
-
-        self._workspace_nav = _WorkspaceNavPanel(root_path)
-        self._workspace_nav.switch_requested.connect(self.workspace_switch_requested.emit)
-        self._workspace_nav.add_requested.connect(self._open_workspace_from_rail)
-        rail_layout.addWidget(self._workspace_nav)
-
+        self._add_activity_action("canvas", "Canvas", rail_layout, tooltip="Agent Canvas")
         rail_layout.addStretch()
 
-        self._search_btn = QPushButton("Search")
+        self._search_btn = QPushButton("")
         self._search_btn.setToolTip("Open search")
         self._search_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._search_btn.clicked.connect(self._show_search_menu)
-        rail_layout.addWidget(self._search_btn)
+        self._footer = QWidget()
+        footer_layout = QHBoxLayout(self._footer)
+        footer_layout.setContentsMargins(8, 4, 8, 6)
+        footer_layout.setSpacing(6)
+        self._workspace_btn = QPushButton("")
+        self._workspace_btn.setObjectName("workspaceSwitcher")
+        self._workspace_btn.setAccessibleName("Switch workspace")
+        self._workspace_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._workspace_btn.setFixedSize(24, 24)
+        self._workspace_btn.clicked.connect(self._show_workspace_switcher)
+        footer_layout.addWidget(self._workspace_btn)
+        footer_layout.addWidget(self._search_btn)
 
-        self._extensions_btn = QPushButton("Ext")
+        self._extensions_btn = QPushButton("")
         self._extensions_btn.setToolTip("Extensions")
         self._extensions_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._extensions_btn.clicked.connect(self.extensions_requested.emit)
-        rail_layout.addWidget(self._extensions_btn)
+        footer_layout.addWidget(self._extensions_btn)
 
-        self._mcp_btn = QPushButton("MCP")
+        self._mcp_btn = QPushButton("")
         self._mcp_btn.setToolTip("MCP servers")
         self._mcp_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._mcp_btn.clicked.connect(self.mcp_requested.emit)
-        rail_layout.addWidget(self._mcp_btn)
+        footer_layout.addWidget(self._mcp_btn)
 
-        self._docs_btn = QPushButton("Docs")
+        self._docs_btn = QPushButton("")
         self._docs_btn.setToolTip("Documentation")
         self._docs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._docs_btn.clicked.connect(self.open_docs)
-        rail_layout.addWidget(self._docs_btn)
+        footer_layout.addWidget(self._docs_btn)
 
-        self._settings_btn = QPushButton("Settings")
+        self._settings_btn = QPushButton("")
         self._settings_btn.setToolTip("Settings (Ctrl+,)")
         self._settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._settings_btn.clicked.connect(self.open_settings)
-        rail_layout.addWidget(self._settings_btn)
+        footer_layout.addWidget(self._settings_btn)
+        footer_layout.addStretch(1)
+
+        self._workspace_path = os.path.abspath(root_path)
 
         root.addWidget(self._rail)
         root.addWidget(self._stack, 1)
+        root.addWidget(self._footer)
         self.set_active_activity("chats")
 
         self._apply_styles()
 
-    def _add_activity(self, key: str, label: str, widget: QWidget, rail_layout: QVBoxLayout):
+    def _add_activity(self, key: str, label: str, widget: QWidget, rail_layout: QHBoxLayout):
         button = QPushButton(label)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setToolTip(label)
         _set_rail_button_icon(button, key)
         button.clicked.connect(lambda _checked=False, k=key: self._on_activity_clicked(k))
         self._activity_buttons[key] = button
+        self._activity_labels[key] = label
         self._activity_widgets[key] = widget
         self._stack.addWidget(widget)
         rail_layout.addWidget(button)
@@ -2348,7 +2220,7 @@ class LeftPanel(QWidget):
         self,
         key: str,
         label: str,
-        rail_layout: QVBoxLayout,
+        rail_layout: QHBoxLayout,
         *,
         tooltip: str | None = None,
     ):
@@ -2358,13 +2230,14 @@ class LeftPanel(QWidget):
         _set_rail_button_icon(button, key)
         button.clicked.connect(lambda _checked=False, k=key: self._on_activity_clicked(k))
         self._activity_buttons[key] = button
+        self._activity_labels[key] = label
         rail_layout.addWidget(button)
 
     def _on_activity_clicked(self, key: str):
-        if key == "workspace":
-            self.show_workspace_activity()
-            return
         if key == "canvas":
+            if key == self._active_activity:
+                self.set_active_activity("chats")
+                return
             self.show_canvas_activity()
             return
         if key == self._active_activity and not self.is_activity_panel_collapsed():
@@ -2372,13 +2245,9 @@ class LeftPanel(QWidget):
             return
         self.set_active_activity(key)
 
-    def show_workspace_activity(self):
-        self._active_activity = "workspace"
-        self.collapse_activity_panel()
-        self._sync_activity_buttons()
-        self.workspace_requested.emit()
-
     def show_canvas_activity(self):
+        if not self._canvas_enabled:
+            return
         self._active_activity = "canvas"
         self.collapse_activity_panel()
         self._sync_activity_buttons()
@@ -2400,6 +2269,23 @@ class LeftPanel(QWidget):
     def active_activity(self) -> str:
         return self._active_activity
 
+    def set_canvas_enabled(self, enabled: bool):
+        self._canvas_enabled = bool(enabled)
+        button = self._activity_buttons.get("canvas")
+        if button is not None:
+            button.setVisible(self._canvas_enabled)
+
+    def set_inspect_panel(self, panel: QWidget):
+        if "inspect" in self._activity_widgets:
+            return
+        self._add_activity("inspect", "Inspect", panel, self._rail_layout)
+        canvas_button = self._activity_buttons.get("canvas")
+        inspect_button = self._activity_buttons["inspect"]
+        if canvas_button is not None:
+            self._rail_layout.removeWidget(inspect_button)
+            self._rail_layout.insertWidget(self._rail_layout.indexOf(canvas_button), inspect_button)
+        self._sync_activity_buttons()
+
     def set_activity_attention(self, key: str, active: bool):
         active = bool(active)
         if self._activity_attention.get(key, False) == active:
@@ -2408,13 +2294,13 @@ class LeftPanel(QWidget):
         self._sync_activity_buttons()
 
     def is_activity_panel_collapsed(self) -> bool:
-        return self._stack.maximumWidth() == 0
+        return self._stack.isHidden()
 
     def collapse_activity_panel(self):
         if self.is_activity_panel_collapsed():
             return
-        self._stack.setMaximumWidth(0)
-        self._stack.setMinimumWidth(0)
+        self._stack.hide()
+        self._footer.hide()
         self.setMinimumWidth(self._collapsed_width)
         self.setMaximumWidth(self._collapsed_width)
         self._sync_activity_buttons()
@@ -2424,8 +2310,8 @@ class LeftPanel(QWidget):
         was_collapsed = self.is_activity_panel_collapsed()
         self.setMinimumWidth(self._expanded_min_width)
         self.setMaximumWidth(self._expanded_max_width)
-        self._stack.setMinimumWidth(ACTIVITY_STACK_MIN_WIDTH)
-        self._stack.setMaximumWidth(self._stack_panel_width)
+        self._stack.show()
+        self._footer.show()
         self._sync_activity_buttons()
         if was_collapsed:
             self.activity_panel_collapsed_changed.emit(False)
@@ -2433,31 +2319,38 @@ class LeftPanel(QWidget):
     def _sync_activity_buttons(self):
         palette()
         fs = max(11, chat_font_pt() - 2)
+        compact = self.is_activity_panel_collapsed()
         for key, button in self._activity_buttons.items():
             has_attention = self._activity_attention.get(key, False)
-            _set_rail_button_icon(button, key, active=(key == self._active_activity))
-            button.setStyleSheet(
-                rail_button_style(
-                    font_size=fs,
-                    active=key == self._active_activity,
-                    attention=has_attention,
+            button.setText("" if compact else self._activity_labels.get(key, ""))
+            button.setVisible((key == self._active_activity) if compact else (key != "canvas" or self._canvas_enabled))
+            if compact:
+                _set_rail_button_icon(button, key, active=(key == self._active_activity))
+                button.setStyleSheet(
+                    rail_button_style(
+                        font_size=fs,
+                        active=key == self._active_activity,
+                        attention=has_attention,
+                    )
                 )
-            )
+            else:
+                button.setIcon(QIcon())
+                button.setStyleSheet(
+                    activity_tab_style(
+                        active=key == self._active_activity,
+                        attention=has_attention,
+                    )
+                )
 
     def _apply_styles(self):
-        p = palette()
-        self._rail.setStyleSheet(
-            f"QFrame#activityRail {{ background:{p['BG2']};"
-            f"border-right:1px solid {p['BORDER_SUBTLE']}; }}"
-        )
-        self._stack.setStyleSheet(
-            f"QStackedWidget#activityStack {{ background:{p['BG2']};"
-            f"border-right:1px solid {p['BORDER_SUBTLE']}; }}"
-        )
+        rail_style, stack_style = activity_sidebar_surface_style()
+        self._rail.setStyleSheet(rail_style)
+        self._stack.setStyleSheet(stack_style)
         self._files_header.apply_appearance()
         self._git_header.apply_appearance()
         footer_style = sidebar_footer_button_style()
         _set_rail_button_icon(self._search_btn, "search")
+        _set_rail_button_icon(self._workspace_btn, "workspace")
         _set_rail_button_icon(self._extensions_btn, "extensions")
         _set_rail_button_icon(self._mcp_btn, "mcp")
         _set_rail_button_icon(self._docs_btn, "docs")
@@ -2465,9 +2358,10 @@ class LeftPanel(QWidget):
         self._extensions_btn.setStyleSheet(footer_style)
         self._mcp_btn.setStyleSheet(footer_style)
         self._search_btn.setStyleSheet(footer_style)
+        self._workspace_btn.setStyleSheet(footer_style)
         self._docs_btn.setStyleSheet(footer_style)
         self._settings_btn.setStyleSheet(footer_style)
-        self._workspace_nav.apply_appearance()
+        self._refresh_workspace_switcher()
         self._sync_activity_buttons()
 
     def apply_appearance(self):
@@ -2477,7 +2371,48 @@ class LeftPanel(QWidget):
         self._file_tree._apply_decorations()
         self._git.apply_appearance()
 
-    def _open_workspace_from_rail(self):
+    def _workspace_rows(self) -> list[dict]:
+        current_path = self._workspace_path
+        rows = [{
+            "path": current_path,
+            "name": Path(current_path).name or current_path,
+            "current": True,
+        }]
+        for row in list_workspaces(limit=8):
+            path = str(row.get("path") or "")
+            if not path or not row.get("exists", False):
+                continue
+            if os.path.normcase(os.path.abspath(path)) == os.path.normcase(current_path):
+                continue
+            rows.append({
+                "path": path,
+                "name": str(row.get("name") or Path(path).name or path),
+                "current": False,
+            })
+        return rows[:5]
+
+    def _refresh_workspace_switcher(self):
+        name = Path(self._workspace_path).name or self._workspace_path
+        self._workspace_btn.setToolTip(f"Switch workspace\n{name}")
+
+    def _show_workspace_switcher(self):
+        menu = QMenu(self)
+        rows = self._workspace_rows()
+        current = rows[0]
+        current_action = menu.addAction(f"Current: {current['name']}")
+        current_action.setEnabled(False)
+        for row in rows[1:]:
+            action = menu.addAction(str(row["name"]))
+            action.setToolTip(str(row["path"]))
+            action.triggered.connect(
+                lambda _checked=False, path=str(row["path"]): self.workspace_switch_requested.emit(path)
+            )
+        menu.addSeparator()
+        open_action = menu.addAction("Open workspace…")
+        open_action.triggered.connect(self._open_workspace_from_switcher)
+        menu.exec(self._workspace_btn.mapToGlobal(self._workspace_btn.rect().topLeft()))
+
+    def _open_workspace_from_switcher(self):
         path = QFileDialog.getExistingDirectory(
             self,
             "Open workspace",
@@ -2505,6 +2440,17 @@ class LeftPanel(QWidget):
         elif chosen == text_action:
             self.text_search_requested.emit()
 
+    def _show_file_create_menu(self):
+        menu = QMenu(self)
+        new_file = menu.addAction("New File")
+        new_folder = menu.addAction("New Folder")
+        anchor = self._files_header._new
+        chosen = menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+        if chosen == new_file:
+            self._file_tree._new_file_dialog(self._file_tree.root_path)
+        elif chosen == new_folder:
+            self._file_tree._new_folder_dialog(self._file_tree.root_path)
+
     def set_workspace(self, path: str, store: ConversationStore | None = None):
         if store is not None:
             self._conv.set_store(store)
@@ -2512,11 +2458,12 @@ class LeftPanel(QWidget):
         self._git.set_repo_path(path)
         self._files_header.set_path(path)
         self._git_header.set_path(path)
-        self._workspace_nav.set_current_workspace(path)
+        self._workspace_path = os.path.abspath(path)
+        self._refresh_workspace_switcher()
 
     def refresh(self):
         self._conv.refresh()
-        self._workspace_nav.refresh()
+        self._refresh_workspace_switcher()
 
     def select_conversation(self, conv_id: str):
         self._conv.select_conversation(conv_id)

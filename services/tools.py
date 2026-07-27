@@ -7,9 +7,13 @@ from pathlib import Path
 
 # PowerShell 7+ colors stderr/stdout; strip before UI and model context.
 _ANSI_ESCAPE_RE = re.compile(
-    r"\x1b\[[0-9;]*[ -/]*[@-~]"
+    # CSI permits private parameter bytes such as '?' (zsh emits
+    # ``ESC[?1h`` while initialising its line editor on macOS).
+    r"\x1b\[[0-?]*[ -/]*[@-~]"
     r"|\x1b\][^\x07]*(?:\x07|\x1b\\)"
-    r"|\x1b[@-Z\\-_]"
+    # Two-byte and intermediate escape sequences, e.g. ``ESC=``.
+    r"|\x1b[ -/]*[@-~]"
+    r"|\x1b[=<>]"
 )
 _ORPHAN_SGR_RE = re.compile(r"(?m)^(?:\[[0-9;]*m)+")
 

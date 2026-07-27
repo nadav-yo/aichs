@@ -623,8 +623,10 @@ def test_file_viewer_opens_formatted_and_save_returns_to_view(qapp, workspace):
     assert tab._toolbar.objectName() == "fileEditorToolbar"
     assert tab._save_btn.maximumHeight() == 24
     assert tab._revert_btn.maximumHeight() == 24
-    assert tab._minimap.minimumWidth() == 64
-    assert tab._minimap.maximumWidth() == 64
+    assert tab._save_btn.parentWidget() is panel._tab_actions
+    assert tab._revert_btn.parentWidget() is panel._tab_actions
+    assert tab._minimap.minimumWidth() == 42
+    assert tab._minimap.maximumWidth() == 42
     assert "max-width:220px" in panel._tabs.styleSheet()
     assert tab._status.text() == ""
     assert tab._status.isHidden()
@@ -1814,7 +1816,7 @@ def test_text_file_tab_minimap_scrolls_editor(qapp):
     tab._minimap.resize(86, 240)
     qapp.processEvents()
 
-    assert tab._minimap.width() == 64
+    assert tab._minimap.width() == 42
     assert tab._editor.toPlainText().startswith("line 0")
 
     scroll = tab._editor.verticalScrollBar()

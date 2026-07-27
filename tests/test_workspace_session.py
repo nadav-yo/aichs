@@ -17,10 +17,11 @@ def test_session_path_uses_workspace_id(workspace):
 
 def test_normalize_session_defaults():
     session = normalize_session({})
-    assert session["version"] == 1
+    assert session["version"] == 2
     assert session["conversation_id"] == ""
     assert session["open_files"] == []
     assert session["viewer_visible"] is False
+    assert session["workbench_mode"] == "chat"
     assert session["context_panel"] == "run_log"
     assert session["context_collapsed"] is True
 
@@ -70,6 +71,7 @@ def test_save_and_load_roundtrip(workspace, isolate_aichs_home):
     assert loaded["open_files"][0]["line"] == 4
     assert loaded["viewer_visible"] is True
     assert loaded["workbench_sizes"] == [640, 420]
+    assert loaded["workbench_mode"] == "review"
     assert loaded["context_panel"] == "language"
     assert loaded["context_collapsed"] is False
     assert loaded["updated_at"]

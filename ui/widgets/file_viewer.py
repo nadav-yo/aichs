@@ -352,7 +352,7 @@ class _FileSaveWorker(QRunnable):
 class _TextMinimap(QWidget):
     """Tiny overview strip that mirrors and controls a plain text editor."""
 
-    _WIDTH = 64
+    _WIDTH = 42
     _MIN_THUMB_HEIGHT = 28
     _MAX_PAINTED_LINES = 1200
 
@@ -814,7 +814,7 @@ class _FileTextEdit(QPlainTextEdit):
     def line_number_area_width(self) -> int:
         digits = len(str(max(1, self.blockCount())))
         marker_width = 12 if self._diagnostics else 0
-        return 12 + marker_width + self.fontMetrics().horizontalAdvance("9") * digits
+        return 8 + marker_width + self.fontMetrics().horizontalAdvance("9") * digits
 
     def line_number_area_paint_event(self, event):
         p = palette()
@@ -2639,6 +2639,14 @@ class FileViewerPanel(QWidget):
         self._tabs.setTabBar(_FileViewerTabBar(lambda: self._repo_root))
         self._tabs.setDocumentMode(True)
         self._tabs.setTabsClosable(True)
+        self._tab_actions = QWidget()
+        self._tab_actions.setObjectName("fileViewerTabActions")
+        self._tab_actions_layout = QHBoxLayout(self._tab_actions)
+        self._tab_actions_layout.setContentsMargins(4, 4, 8, 4)
+        self._tab_actions_layout.setSpacing(6)
+        self._tab_actions_layout.addStretch(1)
+        self._active_tab_actions: _TextFileTab | None = None
+        self._tabs.setCornerWidget(self._tab_actions, Qt.Corner.TopRightCorner)
         tab_bar = self._tabs.tabBar()
         tab_bar.setUsesScrollButtons(True)
         tab_bar.setElideMode(Qt.TextElideMode.ElideRight)
@@ -2908,6 +2916,7 @@ class FileViewerPanel(QWidget):
             )
             self._sync_tab_title(widget)
         self._tabs.setCurrentIndex(idx)
+        self._sync_tab_actions()
         self._emit_language_context_changed()
         if isinstance(widget, _TextFileTab):
             self._emit_markdown_preview_pane_changed()
@@ -3202,6 +3211,7 @@ class FileViewerPanel(QWidget):
         del self._recently_closed_files[:-20]
 
     def _on_current_tab_changed(self, index: int):
+        self._sync_tab_actions()
         self._emit_language_context_changed()
         self._emit_markdown_preview_pane_changed()
         if index < 0:
@@ -3209,6 +3219,24 @@ class FileViewerPanel(QWidget):
         key = str(self._tabs.tabBar().tabData(index) or "")
         if key and not key.startswith("\0"):
             self.active_file_changed.emit(key)
+
+    def _sync_tab_actions(self):
+        previous = self._active_tab_actions
+        if previous is not None:
+            for button in (previous._revert_btn, previous._save_btn):
+                self._tab_actions_layout.removeWidget(button)
+                previous._toolbar.layout().addWidget(button)
+
+        current = self._active_text_tab()
+        self._active_tab_actions = current
+        if current is None:
+            self._tab_actions.hide()
+            return
+
+        for button in (current._revert_btn, current._save_btn):
+            self._tab_actions_layout.addWidget(button)
+            button.show()
+        self._tab_actions.show()
 
     def closeEvent(self, event):
         self.shutdown()

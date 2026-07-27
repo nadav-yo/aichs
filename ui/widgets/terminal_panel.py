@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 
 from PyQt6.QtCore import QSize, Qt, QMimeData, pyqtSignal
 from PyQt6.QtGui import QColor, QDrag, QGuiApplication, QIcon, QKeySequence, QPainter, QPen, QPixmap, QTextCursor
-from PyQt6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QSizePolicy, QVBoxLayout
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QInputDialog,
+    QPlainTextEdit,
+    QPushButton,
+    QSizePolicy,
+    QStackedWidget,
+    QTabBar,
+    QVBoxLayout,
+)
 
 from services.terminal_refs import TERMINAL_REF_MIME, terminal_ref
 from services.terminal_session import TerminalSession
@@ -190,6 +202,15 @@ class TerminalTextEdit(QPlainTextEdit):
         super().keyPressEvent(event)
 
 
+@dataclass
+class _TerminalTab:
+    session: TerminalSession
+    output: TerminalTextEdit
+    name: str = "terminal"
+    finished: bool = False
+    closed: bool = False
+
+
 class IntegratedTerminalPanel(QFrame):
     terminal_finished = pyqtSignal(object)
     close_requested = pyqtSignal()
@@ -197,8 +218,7 @@ class IntegratedTerminalPanel(QFrame):
     def __init__(self, cwd: str, parent=None):
         super().__init__(parent)
         self.cwd = cwd
-        self._session: TerminalSession | None = None
-        self._finished = False
+        self._tabs: list[_TerminalTab] = []
         self.setObjectName("integratedTerminalPanel")
         self.setMinimumHeight(180)
         self.setMaximumHeight(360)
@@ -213,99 +233,200 @@ class IntegratedTerminalPanel(QFrame):
         header = QHBoxLayout(self._header)
         header.setContentsMargins(10, 5, 8, 5)
         header.setSpacing(6)
-        self._shell_label = QLabel("terminal", self._header)
-        self._shell_label.setObjectName("integratedTerminalShell")
+        self._tab_bar = QTabBar(self._header)
+        self._tab_bar.setObjectName("integratedTerminalTabs")
+        self._tab_bar.setDrawBase(False)
+        self._tab_bar.setExpanding(False)
+        self._tab_bar.setElideMode(Qt.TextElideMode.ElideRight)
+        self._tab_bar.setTabsClosable(True)
+        self._tab_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._tab_bar.setMinimumWidth(140)
+        self._tab_bar.currentChanged.connect(self._set_active_tab)
+        self._tab_bar.tabCloseRequested.connect(self.close_terminal)
+        self._tab_bar.tabBarDoubleClicked.connect(self.rename_terminal)
+        self._new_btn = QPushButton("+", self._header)
+        self._new_btn.setFixedSize(30, 30)
+        self._new_btn.setToolTip("New terminal")
+        self._new_btn.clicked.connect(self.new_terminal)
         self._clear_btn = QPushButton("", self._header)
         self._clear_btn.setFixedSize(30, 30)
         self._clear_btn.setIconSize(QSize(14, 14))
         self._clear_btn.setToolTip("Clear terminal")
         self._clear_btn.clicked.connect(self.clear_active)
-        self._close_btn = QPushButton("", self._header)
-        self._close_btn.setFixedSize(30, 30)
-        self._close_btn.setIconSize(QSize(14, 14))
-        self._close_btn.setToolTip("Hide terminal")
-        self._close_btn.clicked.connect(self.close_active)
-        header.addWidget(self._shell_label)
-        header.addStretch(1)
+        header.addWidget(self._tab_bar, 1)
+        header.addWidget(self._new_btn)
         header.addWidget(self._clear_btn)
-        header.addWidget(self._close_btn)
         root.addWidget(self._header)
 
-        self.output = TerminalTextEdit(self)
-        self.output.input_requested.connect(self.write_input)
-        root.addWidget(self.output, 1)
+        self._output_stack = QStackedWidget(self)
+        self.output = self._make_output()
+        self._output_stack.addWidget(self.output)
+        root.addWidget(self._output_stack, 1)
         self.apply_appearance()
 
     def start(self, cwd: str | None = None) -> None:
         if cwd:
             self.cwd = cwd
-        if self._session is not None and not self._finished:
-            self.output.setFocus()
+        if self._tabs:
+            self.active_view().setFocus()
             return
-        self._finished = False
-        self.output.clear()
-        self._session = TerminalSession(self.cwd, self)
-        self._session.started.connect(self._on_started)
-        self._session.output.connect(self.output.append_output)
-        self._session.finished.connect(self._on_finished)
-        self._session.start()
-        self.output.setFocus()
+        self.new_terminal()
+
+    def new_terminal(self) -> None:
+        output = self.output if not self._tabs else self._make_output()
+        if output.parent() is not self._output_stack:
+            self._output_stack.addWidget(output)
+        session = TerminalSession(self.cwd, self)
+        tab = _TerminalTab(session=session, output=output)
+        session.started.connect(lambda tab=tab: self._on_started(tab))
+        session.output.connect(output.append_output)
+        session.finished.connect(lambda result, tab=tab: self._on_finished(tab, result))
+        self._tabs.append(tab)
+        index = self._tab_bar.addTab(tab.name)
+        self._tab_bar.setCurrentIndex(index)
+        self._output_stack.setCurrentWidget(output)
+        session.start()
+        output.setFocus()
 
     def is_running(self) -> bool:
-        return self._session is not None and not self._finished
+        tab = self._active_tab()
+        return tab is not None and not tab.finished and not tab.closed
 
     def active_session(self) -> TerminalSession | None:
-        return self._session
+        tab = self._active_tab()
+        return tab.session if tab is not None else None
 
     def active_view(self) -> TerminalTextEdit:
         return self.output
 
     def write_input(self, text: str) -> None:
-        if self._session is not None:
-            self._session.write(text)
+        session = self.active_session()
+        if session is not None:
+            session.write(text)
 
     def clear_active(self) -> None:
         self.clear()
 
-    def close_active(self) -> None:
-        self.close_requested.emit()
-
     def clear(self) -> None:
-        self.output.clear()
-        if self._session is not None and not self._finished:
-            self._session.write("\x0c")
+        tab = self._active_tab()
+        if tab is None:
+            return
+        tab.output.clear()
+        if not tab.finished:
+            tab.session.write("\x0c")
 
     def stop(self) -> None:
-        if self._session is not None:
-            self._session.terminate()
+        tab = self._active_tab()
+        if tab is not None:
+            tab.session.terminate()
 
     def terminate(self) -> None:
-        self.stop()
+        for tab in list(self._tabs):
+            tab.closed = True
+            tab.session.terminate()
+        self._tabs.clear()
+        while self._tab_bar.count():
+            self._tab_bar.removeTab(0)
+        self._reset_idle_output()
+
+    def close_terminal(self, index: int | None = None) -> None:
+        if index is None:
+            index = self._tab_bar.currentIndex()
+        if index < 0 or index >= len(self._tabs):
+            return
+        tab = self._tabs.pop(index)
+        tab.closed = True
+        tab.session.terminate()
+        self._tab_bar.removeTab(index)
+        self._output_stack.removeWidget(tab.output)
+        if tab.output is not self.output:
+            tab.output.deleteLater()
+        if self._tabs:
+            self._tab_bar.setCurrentIndex(min(index, len(self._tabs) - 1))
+            return
+        self._reset_idle_output()
+        self.close_requested.emit()
+
+    def rename_terminal(self, index: int) -> None:
+        if index < 0 or index >= len(self._tabs):
+            return
+        tab = self._tabs[index]
+        name, accepted = QInputDialog.getText(self, "Rename terminal", "Name", text=tab.name)
+        name = name.strip()
+        if accepted and name:
+            tab.name = name
+            self._tab_bar.setTabText(index, name)
 
     def apply_appearance(self) -> None:
         p = palette()
         self.setStyleSheet(
             surface_frame_style(selector="QFrame#integratedTerminalPanel", border_radius=8)
             + f"QFrame#integratedTerminalHeader {{ background:{p['BG2']}; border:none; border-top-left-radius:8px; border-top-right-radius:8px; }}"
-            + f"QLabel#integratedTerminalShell {{ color:{p['TEXT']}; background:{p['BG3']}; border:1px solid {p['BORDER_SUBTLE']}; border-radius:6px; padding:3px 8px; font-weight:650; }}"
+            + f"QTabBar#integratedTerminalTabs::tab {{ color:{p['TEXT_DIM']}; background:transparent; border:none; min-width:110px; padding:6px 10px; margin-right:2px; }}"
+            + f"QTabBar#integratedTerminalTabs::tab:selected {{ color:{p['TEXT']}; background:{p['BG3']}; border-radius:6px; }}"
         )
-        self.output.setFont(mono_font(mono_font_pt()))
-        self.output.setStyleSheet(code_text_edit_style(selector="QPlainTextEdit", font_pt=mono_font_pt(), padding="8px 10px"))
+        for tab in self._tabs:
+            self._apply_output_appearance(tab.output)
+        self._apply_output_appearance(self.output)
+        self._new_btn.setStyleSheet(icon_button_style(30))
         self._clear_btn.setIcon(_terminal_icon("clear", color=p["TEXT_DIM"]))
-        self._close_btn.setIcon(_terminal_icon("close", color=p["TEXT_DIM"]))
         self._clear_btn.setStyleSheet(icon_button_style(30))
-        self._close_btn.setStyleSheet(icon_button_style(30))
 
-    def _on_started(self) -> None:
-        label = self._session.label if self._session is not None else "terminal"
-        self._shell_label.setText(label)
-        self._shell_label.setToolTip("Terminal")
+    def _make_output(self) -> TerminalTextEdit:
+        output = TerminalTextEdit(self)
+        output.input_requested.connect(self.write_input)
+        return output
 
-    def _on_finished(self, result: dict) -> None:
-        self._finished = True
-        exit_code = int(result.get("exit_code") or 0)
-        self._shell_label.setToolTip(f"Terminal exited with code {exit_code}")
+    def _reset_idle_output(self) -> None:
+        while self._output_stack.count():
+            widget = self._output_stack.widget(0)
+            self._output_stack.removeWidget(widget)
+            widget.deleteLater()
+        self.output = self._make_output()
+        self._apply_output_appearance(self.output)
+        self._output_stack.addWidget(self.output)
+
+    def _apply_output_appearance(self, output: TerminalTextEdit) -> None:
+        output.setFont(mono_font(mono_font_pt()))
+        output.setStyleSheet(code_text_edit_style(selector="QPlainTextEdit", font_pt=mono_font_pt(), padding="8px 10px"))
+
+    def _active_tab(self) -> _TerminalTab | None:
+        index = self._tab_bar.currentIndex()
+        return self._tabs[index] if 0 <= index < len(self._tabs) else None
+
+    def _set_active_tab(self, index: int) -> None:
+        if 0 <= index < len(self._tabs):
+            self.output = self._tabs[index].output
+            self._output_stack.setCurrentWidget(self.output)
+
+    def _on_started(self, tab: _TerminalTab) -> None:
+        if tab.closed:
+            return
+        tab.name = self._default_tab_name(tab.session.label)
+        index = self._tabs.index(tab)
+        self._tab_bar.setTabText(index, tab.name)
+        self._tab_bar.setTabToolTip(index, "Double-click to rename")
+
+    def _on_finished(self, tab: _TerminalTab, result: dict) -> None:
+        tab.finished = True
+        # Closing a tab is deliberate UI cleanup, not terminal output worth
+        # adding to the conversation.  Natural shell exits remain recorded.
+        if tab.closed:
+            return
+        if not tab.closed and tab in self._tabs:
+            index = self._tabs.index(tab)
+            exit_code = int(result.get("exit_code") or 0)
+            self._tab_bar.setTabToolTip(index, f"Terminal exited with code {exit_code}")
         self.terminal_finished.emit(result)
+
+    def _default_tab_name(self, shell: str) -> str:
+        titles = {tab.name for tab in self._tabs}
+        if shell not in titles:
+            return shell
+        suffix = 2
+        while f"{shell} {suffix}" in titles:
+            suffix += 1
+        return f"{shell} {suffix}"
 
 
 def _cursor_line_range(text: str, cursor: QTextCursor) -> tuple[int, int]:

@@ -1,9 +1,15 @@
 import sys
+import types
 
 from PyQt6.QtCore import QProcess
 
 import services.terminal_session as terminal_session
-from services.terminal_session import TerminalSession, apply_terminal_output_controls, interactive_shell_command
+from services.terminal_session import (
+    TerminalSession,
+    apply_terminal_output_controls,
+    integrated_terminal_env,
+    interactive_shell_command,
+)
 
 
 class _FakeProcess:
@@ -82,6 +88,66 @@ class _FakeSignal:
             callback(*args)
 
 
+class _PtyNotifier:
+    class Type:
+        Read = "read"
+
+    def __init__(self, fd, mode, parent):
+        self.fd = fd
+        self.mode = mode
+        self.parent = parent
+        self.activated = _FakeSignal()
+        self.enabled = True
+        self.deleted = False
+
+    def setEnabled(self, enabled):
+        self.enabled = enabled
+
+    def deleteLater(self):
+        self.deleted = True
+
+
+class _PtyTimer:
+    def __init__(self, parent):
+        self.parent = parent
+        self.timeout = _FakeSignal()
+        self.interval = None
+        self.running = False
+        self.deleted = False
+
+    def setInterval(self, interval):
+        self.interval = interval
+
+    def start(self):
+        self.running = True
+
+    def stop(self):
+        self.running = False
+
+    def deleteLater(self):
+        self.deleted = True
+
+
+class _PtyProcess:
+    def __init__(self, _args, **kwargs):
+        self.kwargs = kwargs
+        self.pid = 1234
+        self.returncode = None
+        self.running = True
+        self.wait_results = []
+
+    def poll(self):
+        return None if self.running else self.returncode
+
+    def wait(self, timeout=None):
+        result = self.wait_results.pop(0) if self.wait_results else self.returncode
+        if isinstance(result, Exception):
+            raise result
+        self.returncode = result
+        self.running = False
+        return result
+
+
 class _StartProcess:
     class ProcessChannelMode:
         MergedChannels = "merged"
@@ -152,6 +218,73 @@ def test_terminal_session_start_wires_process(monkeypatch, qapp):
     assert session.args == ["-i"]
     assert session.label == "fake"
     assert started == [True]
+
+
+def test_terminal_session_macos_pty_echoes_input_and_drains_output(monkeypatch, qapp):
+    monkeypatch.setattr(terminal_session, "_uses_macos_pty", lambda: True)
+    monkeypatch.setattr(terminal_session, "interactive_shell_command", lambda: ("/bin/zsh", ["-i"], "zsh"))
+    monkeypatch.setattr(terminal_session, "QSocketNotifier", _PtyNotifier)
+    monkeypatch.setattr(terminal_session, "QTimer", _PtyTimer)
+    monkeypatch.setattr(terminal_session.subprocess, "Popen", _PtyProcess)
+    monkeypatch.setattr(terminal_session.os, "set_blocking", lambda *_args: None, raising=False)
+    closed = []
+    written = []
+    monkeypatch.setattr(terminal_session.os, "close", closed.append)
+    monkeypatch.setattr(terminal_session.os, "write", lambda fd, data: written.append((fd, data)))
+    reads = iter([b"\x1b[?1h\x1b=ready\r\n", BlockingIOError()])
+
+    def fake_read(*_args):
+        item = next(reads)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    monkeypatch.setattr(terminal_session.os, "read", fake_read)
+    monkeypatch.setitem(sys.modules, "pty", types.SimpleNamespace(openpty=lambda: (41, 42)))
+    session = TerminalSession("/repo")
+    started = []
+    emitted = []
+    session.started.connect(lambda: started.append(True))
+    session.output.connect(emitted.append)
+
+    session.start()
+    session.write("echo ok\r\n")
+    session._read_pty_output()
+
+    assert started == [True]
+    assert session._pty_process.kwargs["stdin"] == 42
+    assert session._pty_process.kwargs["start_new_session"] is True
+    assert written == [(41, b"echo ok\r")]
+    assert emitted == ["ready\r\n"]
+    assert 42 in closed
+    process = session._pty_process
+    process.returncode = 0
+    process.running = False
+    session._poll_pty_process()
+    assert session._pty_process is None
+    assert 41 in closed
+
+
+def test_terminal_session_macos_pty_terminate_kills_the_process_group(monkeypatch, qapp):
+    session = TerminalSession("/repo")
+    process = _PtyProcess([], cwd="/repo")
+    process.wait_results = [terminal_session.subprocess.TimeoutExpired("zsh", 0.2), -9]
+    session._pty_process = process
+    session._pty_master_fd = 41
+    signals = []
+    monkeypatch.setattr(terminal_session.signal, "SIGTERM", 15, raising=False)
+    monkeypatch.setattr(terminal_session.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(terminal_session.os, "killpg", lambda pid, sig: signals.append((pid, sig)), raising=False)
+    monkeypatch.setattr(terminal_session.os, "read", lambda *_args: (_ for _ in ()).throw(BlockingIOError()))
+    monkeypatch.setattr(terminal_session.os, "close", lambda _fd: None)
+
+    session.terminate()
+
+    assert signals == [
+        (1234, terminal_session.signal.SIGTERM),
+        (1234, terminal_session.signal.SIGKILL),
+    ]
+    assert session._pty_process is None
 
 
 def test_terminal_session_write_encodes_running_process(qapp):
@@ -313,6 +446,20 @@ def test_interactive_shell_command_uses_posix_custom_shell(monkeypatch):
     monkeypatch.setenv("SHELL", "/opt/shells/custom")
 
     assert interactive_shell_command() == ("/opt/shells/custom", [], "custom")
+
+
+def test_integrated_terminal_env_uses_dumb_terminal_on_macos(monkeypatch):
+    monkeypatch.setattr(terminal_session.sys, "platform", "darwin")
+    monkeypatch.setattr(terminal_session, "_shell_env", lambda: {"TERM": "xterm-256color", "A": "1"})
+
+    assert integrated_terminal_env() == {"TERM": "dumb", "A": "1"}
+
+
+def test_integrated_terminal_env_preserves_other_platform_term(monkeypatch):
+    monkeypatch.setattr(terminal_session.sys, "platform", "linux")
+    monkeypatch.setattr(terminal_session, "_shell_env", lambda: {"TERM": "xterm-256color"})
+
+    assert integrated_terminal_env() == {"TERM": "xterm-256color"}
 
 
 def test_apply_terminal_output_controls_handles_backspace():

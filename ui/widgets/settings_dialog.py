@@ -43,6 +43,7 @@ from storage.settings import (
     COMPACTION_SUMMARY_GUIDANCE_KEY,
     COMMIT_MESSAGE_PROMPT_ADDITION_KEY,
     CANVAS_ACTION_AUTO_APPROVE_KEY,
+    CANVAS_ENABLED_KEY,
     CANVAS_PARALLEL_LIMIT_KEY,
     CANVAS_RUN_MODE_KEY,
     DEFAULT_ARCHIVIST_PROMPT,
@@ -75,6 +76,7 @@ from storage.settings import (
     archivist_prompt,
     auto_title_prompt_instructions,
     canvas_action_auto_approve,
+    canvas_enabled,
     canvas_parallel_limit,
     canvas_run_mode,
     compact_resume_prompt,
@@ -1685,6 +1687,17 @@ class SettingsDialog(QDialog):
             "Intent graph generation and run behavior.",
         )
 
+        self.canvas_enabled_check = QCheckBox("Enabled")
+        self.canvas_enabled_check.setStyleSheet(self._checkbox_style)
+        layout.addWidget(self.canvas_enabled_check)
+
+        enabled_hint = QLabel("Show Canvas in the activity rail.")
+        enabled_hint.setWordWrap(True)
+        enabled_hint.setStyleSheet(self._hint_style)
+        layout.addWidget(enabled_hint)
+
+        layout.addWidget(self._section_separator())
+
         self.canvas_generation_strategy_combo = QComboBox()
         self.canvas_generation_strategy_combo.addItem("Prefer parallelism", "parallelism")
         self.canvas_generation_strategy_combo.addItem("Prefer atomicity", "atomicity")
@@ -2423,6 +2436,7 @@ class SettingsDialog(QDialog):
         self.file_editor_tab_spaces_spin.setValue(file_editor_tab_spaces(saved))
 
     def _load_canvas_values(self, saved: dict):
+        self.canvas_enabled_check.setChecked(canvas_enabled(saved))
         strategy_index = self.canvas_generation_strategy_combo.findData(graph_generation_strategy(saved))
         if strategy_index < 0:
             strategy_index = self.canvas_generation_strategy_combo.findData(DEFAULT_GRAPH_GENERATION_STRATEGY)
@@ -2855,6 +2869,7 @@ class SettingsDialog(QDialog):
             RESUME_SESSION_KEY: str(self.resume_session_combo.currentData() or DEFAULT_RESUME_SESSION),
             FILE_EDITOR_AUTO_SAVE_KEY: self.file_editor_auto_save_check.isChecked(),
             FILE_EDITOR_TAB_SPACES_KEY: self.file_editor_tab_spaces_spin.value(),
+            CANVAS_ENABLED_KEY: self.canvas_enabled_check.isChecked(),
             GRAPH_GENERATION_STRATEGY_KEY: str(
                 self.canvas_generation_strategy_combo.currentData() or DEFAULT_GRAPH_GENERATION_STRATEGY
             ),

@@ -26,7 +26,7 @@ _CREW_TONES = {
 
 _PALETTES = {
     "dark": {
-        "BG": "#0b0f16",
+        "BG": "#121921",
         "BG2": "#111720",
         "BG3": "#181f2a",
         "BORDER": "#30384a",
@@ -118,6 +118,35 @@ def current_theme() -> str:
 def palette(theme: str | None = None) -> dict:
     name = theme or current_theme()
     return _PALETTES.get(name, _PALETTES[DEFAULT_THEME])
+
+
+def sidebar_toolbar_add_icon(theme: str | None = None):
+    """A crisp, centered plus-in-circle icon for the shared New control."""
+    from PyQt6.QtCore import QLineF, QRectF, Qt
+    from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+
+    resolved = theme or current_theme()
+    p = palette(resolved)
+
+    def _paint(color: str) -> QPixmap:
+        pixmap = QPixmap(22, 22)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(QColor(color), 1.8)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawEllipse(QRectF(2.5, 2.5, 17, 17))
+        painter.drawLine(QLineF(7.5, 11, 14.5, 11))
+        painter.drawLine(QLineF(11, 7.5, 11, 14.5))
+        painter.end()
+        return pixmap
+
+    normal = "#bac4d4" if resolved == "dark" else p["TEXT_DIM"]
+    icon = QIcon(_paint(normal))
+    icon.addPixmap(_paint(ACCENT_HOVER), QIcon.Mode.Active)
+    icon.addPixmap(_paint(p["SELECTION_TEXT"]), QIcon.Mode.Selected)
+    return icon
 
 
 def git_status_color(code: str) -> str:
@@ -718,9 +747,7 @@ def center_notice_style() -> str:
 
 def input_bar_style() -> str:
     p = palette()
-    return (
-        f"QFrame {{ background:{p['BG']}; border-top:1px solid {separator_color()}; }}"
-    )
+    return f"QFrame {{ background:{p['BG']}; border:0; }}"
 
 
 def _pill_button_style(
@@ -916,6 +943,60 @@ def rail_button_style(
     )
 
 
+def activity_tab_style(
+    *,
+    active: bool = False,
+    attention: bool = False,
+    theme: str | None = None,
+) -> str:
+    """Text-first section tab used across the expanded sidebar."""
+    p = palette(theme)
+    color = p["SELECTION_TEXT"] if active else p["TEXT_DIM"]
+    marker = "#f59e0b" if attention else (ACCENT if active else "transparent")
+    return (
+        f"QPushButton {{ background:transparent; color:{color}; border:0;"
+        f"border-bottom:2px solid {marker}; border-radius:0;"
+        "padding:8px 9px 6px; font-weight:600; }"
+        f"QPushButton:hover {{ color:{p['TEXT']}; background:transparent; }}"
+    )
+
+
+def activity_sidebar_surface_style() -> tuple[str, str]:
+    """Styles for the unified activity rail and its content surface."""
+    p = palette()
+    return (
+        f"QFrame#activityRail {{ background:{p['BG']}; border:0; }}",
+        f"QStackedWidget#activityStack {{ background:{p['BG']};"
+        f" border-right:1px solid {p['BORDER_SUBTLE']}; }}",
+    )
+
+
+def workbench_mode_bar_style(theme: str | None = None) -> str:
+    p = palette(theme)
+    return f"QWidget#workbenchModeBar {{ background:{p['BG']}; border-bottom:1px solid {p['BORDER_SUBTLE']}; }}"
+
+
+def workbench_mode_group_style(theme: str | None = None) -> str:
+    p = palette(theme)
+    return (
+        f"QFrame#workbenchModeGroup {{ background:{p['BG2']};"
+        f"border:1px solid {p['BORDER']}; border-radius:7px; }}"
+    )
+
+
+def workbench_mode_button_style(*, active: bool, theme: str | None = None) -> str:
+    p = palette(theme)
+    background = p["SELECTION"] if active else "transparent"
+    color = p["SELECTION_TEXT"] if active else p["TEXT_DIM"]
+    return (
+        f"QPushButton {{ background:{background}; color:{color}; border:0; border-radius:5px;"
+        "padding:5px 13px; font-weight:600; }"
+        f"QPushButton:hover:!disabled {{ color:{p['TEXT']}; background:{p['BG3']}; }}"
+        f"QPushButton:checked {{ background:{p['SELECTION']}; color:{p['SELECTION_TEXT']}; }}"
+        f"QPushButton:disabled {{ color:{p['TEXT_DIM']}; background:transparent; }}"
+    )
+
+
 def git_action_button_style(
     accent_color: str = ACCENT,
     theme: str | None = None,
@@ -969,6 +1050,30 @@ def context_panel_title_button_style(
         "padding:4px 2px; text-align:left;"
         f"font-size:{max(13, chat_font_pt())}px; font-weight:700; }}"
         f"{selector}:hover {{ background:{p['BG3']}; border-color:{p['BORDER_SUBTLE']}; }}"
+    )
+
+
+def context_panel_title_style(
+    *,
+    selector: str = "QLabel#contextPanelTitle",
+    theme: str | None = None,
+) -> str:
+    p = palette(theme)
+    return (
+        f"{selector} {{ color:{p['TEXT']}; font-size:{max(13, chat_font_pt())}px;"
+        f"font-weight:700; padding:2px 0; }}"
+    )
+
+
+def context_empty_state_style(
+    *,
+    selector: str = "QLabel#contextRunEmptyState",
+    theme: str | None = None,
+) -> str:
+    p = palette(theme)
+    return (
+        f"{selector} {{ color:{p['TEXT_DIM']}; background:transparent;"
+        f"font-size:{meta_font_pt()}px; padding:6px 2px; }}"
     )
 
 
@@ -1345,17 +1450,19 @@ def git_log_list_style() -> str:
 
 
 def git_mode_button_style(*, active: bool = False, theme: str | None = None) -> str:
-    """Segmented mode control for the git panel (Changes / History / Sync)."""
+    """Underline mode control for the Git panel (Changes / History)."""
     p = palette(theme)
     if active:
         return (
-            f"QPushButton {{ background:{p['BG3']}; color:{p['TEXT']}; border:none;"
-            f"border-radius:{FIELD_BORDER_RADIUS}px; padding:7px 12px; font-weight:600; }}"
+            f"QPushButton {{ background:transparent; color:{p['TEXT']}; border:0;"
+            f"border-bottom:2px solid {ACCENT}; border-radius:0;"
+            "padding:7px 12px 5px; font-weight:600; }"
         )
     return (
-        f"QPushButton {{ background:transparent; color:{p['TEXT_DIM']}; border:none;"
-        f"border-radius:{FIELD_BORDER_RADIUS}px; padding:7px 12px; font-weight:500; }}"
-        f"QPushButton:hover {{ color:{p['TEXT']}; background:{p['BG3']}; }}"
+        f"QPushButton {{ background:transparent; color:{p['TEXT_DIM']}; border:0;"
+        "border-bottom:2px solid transparent; border-radius:0;"
+        "padding:7px 12px 5px; font-weight:500; }"
+        f"QPushButton:hover {{ color:{p['TEXT']}; background:transparent; }}"
     )
 
 
@@ -1579,6 +1686,35 @@ def files_header_style() -> str:
     )
 
 
+def sidebar_toolbar_style(theme: str | None = None) -> str:
+    p = palette(theme)
+    return f"QWidget#sidebarToolbar {{ background:{p['BG2']}; border:0; }}"
+
+
+def sidebar_toolbar_field_style(
+    *,
+    selector: str,
+    theme: str | None = None,
+) -> str:
+    p = palette(theme)
+    fs = max(11, chat_font_pt() - 1)
+    return (
+        f"{selector} {{ background:{p['BG3']}; color:{p['TEXT']};"
+        f"border:1px solid {p['BORDER_SUBTLE']}; border-radius:7px;"
+        f"padding:6px 10px; font-size:{fs}px; }}"
+        f"{selector}:focus {{ border-color:{ACCENT}; }}"
+    )
+
+
+def sidebar_toolbar_add_button_style(theme: str | None = None) -> str:
+    p = palette(theme)
+    return (
+        "QPushButton { background:transparent; border:0; border-radius:11px; padding:0; }"
+        f"QPushButton:hover {{ background:{p['SELECTION']}; }}"
+        f"QPushButton:pressed {{ background:{p['SELECTION']}; }}"
+    )
+
+
 def search_field_style() -> str:
     p = palette()
     fs = max(12, chat_font_pt() - 1)
@@ -1647,11 +1783,23 @@ def flat_tab_style(object_name: str) -> str:
 
 def file_tab_style(object_name: str = "fileViewerTabs") -> str:
     p = palette()
+    prefix = f"QTabWidget#{object_name}"
     return (
-        flat_tab_style(object_name)
-        + f"QTabWidget#{object_name} QTabBar::tab {{ padding:2px 10px;"
-        f"min-width:88px; max-width:220px; background:{p['BG2']}; }}"
-        f"QTabWidget#{object_name} QTabBar::close-button {{ margin-left:6px; }}"
+        f"{prefix} {{ background:{p['BG3']}; border:0; }}"
+        f"{prefix}::pane {{ background:{p['BG3']}; border:0; border-top:1px solid {p['BORDER_SUBTLE']}; }}"
+        f"{prefix} QTabBar {{ background:{p['BG2']}; padding:4px 6px 0; }}"
+        f"{prefix} QTabBar::base {{ background:{p['BG2']}; border:0; }}"
+        f"{prefix} QTabBar::tab {{ background:transparent; color:{p['TEXT_DIM']};"
+        "padding:7px 12px; min-width:88px; max-width:220px; margin:0 2px;"
+        "border:1px solid transparent; border-bottom:0;"
+        "border-top-left-radius:7px; border-top-right-radius:7px; }"
+        f"{prefix} QTabBar::tab:selected {{ background:{p['BG3']}; color:{p['TEXT']};"
+        f"border-color:{p['BORDER']}; border-bottom-color:{p['BG3']};"
+        "margin-bottom:-1px; font-weight:600; }"
+        f"{prefix} QTabBar::tab:hover:!selected {{ background:{p['BG3']};"
+        "border-top-left-radius:7px; border-top-right-radius:7px; }"
+        f"{prefix} QTabBar::close-button {{ margin-left:6px; }}"
+        f"{prefix} QWidget#fileViewerTabActions {{ background:{p['BG2']}; border:0; }}"
     )
 
 
@@ -2390,6 +2538,8 @@ QMainWindow      {{ background:{p["BG"]}; }}
 QSplitter        {{ background:{p["BG"]}; }}
 QSplitter::handle {{ background:{p["BORDER_SUBTLE"]}; width:1px; }}
 QSplitter::handle:hover {{ background:{p["BORDER"]}; }}
+QSplitter#activityRootSplitter::handle {{ background:transparent; }}
+QSplitter#activityRootSplitter::handle:hover {{ background:transparent; }}
 QScrollArea      {{ background:{p["BG"]}; border:none; }}
 QScrollBar:vertical {{
     background:transparent; width:6px; border:none; margin:2px 0;

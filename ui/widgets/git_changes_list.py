@@ -291,6 +291,7 @@ class GitChangesList(QWidget):
         super().__init__(parent)
         self.repo_path = repo_path
         self._staged_count = 0
+        self._unstaged_count = 0
         self._settings = settings or SettingsStore()
         self._current_model_getter = current_model_getter or (lambda: "")
         self._message_thread: CommitMessageThread | None = None
@@ -305,32 +306,6 @@ class GitChangesList(QWidget):
         layout.setContentsMargins(6, 0, 6, 0)
         layout.setSpacing(4)
 
-        message_row = QHBoxLayout()
-        message_row.setContentsMargins(0, 0, 0, 0)
-        message_row.setSpacing(4)
-        self.message = QTextEdit()
-        self.message.setPlaceholderText("Commit message")
-        self.message.setMaximumHeight(76)
-        self.message.textChanged.connect(self._update_action_state)
-        message_row.addWidget(self.message, 1)
-        self._generate_btn = QToolButton()
-        self._generate_btn.setIcon(self._generate_icon)
-        self._generate_btn.setToolTip("Generate commit message from staged files")
-        self._generate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._generate_btn.clicked.connect(self._generate_commit_message)
-        message_row.addWidget(self._generate_btn, 0, Qt.AlignmentFlag.AlignTop)
-        layout.addLayout(message_row)
-
-        commit_actions = QHBoxLayout()
-        commit_actions.setContentsMargins(0, 0, 0, 0)
-        self._commit_btn = QPushButton("Commit")
-        self._commit_btn.setToolTip("Stage files and enter a commit message")
-        self._commit_btn.clicked.connect(self._commit)
-        self._commit_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._commit_btn.customContextMenuRequested.connect(self._commit_context_menu)
-        commit_actions.addWidget(self._commit_btn, 1)
-        layout.addLayout(commit_actions)
-
         self._generate_timer = QTimer(self)
         self._generate_timer.setInterval(180)
         self._generate_timer.timeout.connect(self._advance_generate_animation)
@@ -339,6 +314,7 @@ class GitChangesList(QWidget):
         self._lists_splitter.setChildrenCollapsible(False)
 
         staged_wrap = QWidget()
+        self._staged_wrap = staged_wrap
         staged_layout = QVBoxLayout(staged_wrap)
         staged_layout.setContentsMargins(0, 0, 0, 0)
         staged_layout.setSpacing(4)
@@ -348,7 +324,6 @@ class GitChangesList(QWidget):
         self.staged_list = _GitChangeList(staged=True)
         self._configure_list(self.staged_list)
         staged_layout.addWidget(self.staged_list, 1)
-        self._lists_splitter.addWidget(staged_wrap)
 
         unstaged_wrap = QWidget()
         unstaged_layout = QVBoxLayout(unstaged_wrap)
@@ -376,12 +351,56 @@ class GitChangesList(QWidget):
         self._configure_list(self.unstaged_list)
         unstaged_layout.addWidget(self.unstaged_list, 1)
         self._lists_splitter.addWidget(unstaged_wrap)
+        self._lists_splitter.addWidget(staged_wrap)
 
         layout.addWidget(self._lists_splitter, 1)
+
+        self._commit_trigger = QPushButton("Commit changes…")
+        self._commit_trigger.setToolTip("Stage files before committing")
+        self._commit_trigger.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._commit_trigger.clicked.connect(self._show_commit_composer)
+        layout.addWidget(self._commit_trigger)
+
+        self._commit_composer = QWidget()
+        composer_layout = QVBoxLayout(self._commit_composer)
+        composer_layout.setContentsMargins(0, 0, 0, 0)
+        composer_layout.setSpacing(4)
+        message_row = QHBoxLayout()
+        message_row.setContentsMargins(0, 0, 0, 0)
+        message_row.setSpacing(4)
+        self.message = QTextEdit()
+        self.message.setPlaceholderText("Commit message")
+        self.message.setMaximumHeight(76)
+        self.message.textChanged.connect(self._update_action_state)
+        message_row.addWidget(self.message, 1)
+        self._generate_btn = QToolButton()
+        self._generate_btn.setIcon(self._generate_icon)
+        self._generate_btn.setToolTip("Generate commit message from staged files")
+        self._generate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._generate_btn.clicked.connect(self._generate_commit_message)
+        message_row.addWidget(self._generate_btn, 0, Qt.AlignmentFlag.AlignTop)
+        composer_layout.addLayout(message_row)
+
+        commit_actions = QHBoxLayout()
+        commit_actions.setContentsMargins(0, 0, 0, 0)
+        self._cancel_commit_btn = QPushButton("Cancel")
+        self._cancel_commit_btn.setToolTip("Hide commit message")
+        self._cancel_commit_btn.clicked.connect(self._hide_commit_composer)
+        commit_actions.addWidget(self._cancel_commit_btn)
+        self._commit_btn = QPushButton("Commit")
+        self._commit_btn.setToolTip("Stage files and enter a commit message")
+        self._commit_btn.clicked.connect(self._commit)
+        self._commit_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._commit_btn.customContextMenuRequested.connect(self._commit_context_menu)
+        commit_actions.addWidget(self._commit_btn, 1)
+        composer_layout.addLayout(commit_actions)
+        layout.addWidget(self._commit_composer)
+        self._commit_composer.hide()
         self._lists_splitter.splitterMoved.connect(self._on_lists_split_moved)
 
         self.apply_appearance()
         self._restore_lists_split()
+        self._sync_staged_visibility()
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self.refresh)
         if defer_refresh:
@@ -415,8 +434,25 @@ class GitChangesList(QWidget):
         if len(split) == 2 and sum(split) > 0:
             self._lists_splitter.setSizes(split)
         else:
-            self._lists_splitter.setSizes([120, 220])
+            self._lists_splitter.setSizes([220, 120])
         self._lists_split_restored = True
+
+    def _sync_staged_visibility(self):
+        self._staged_wrap.show()
+        if self._lists_splitter.sizes()[1] <= 0:
+            self._lists_splitter.setSizes([220, 120])
+
+    def _show_commit_composer(self):
+        if self._staged_count + self._unstaged_count <= 0:
+            return
+        self._commit_trigger.hide()
+        self._commit_composer.show()
+        self.message.setFocus()
+        self._update_action_state()
+
+    def _hide_commit_composer(self):
+        self._commit_composer.hide()
+        self._commit_trigger.show()
 
     def _on_lists_split_moved(self, _pos: int, _index: int):
         if not self._lists_split_restored:
@@ -430,11 +466,15 @@ class GitChangesList(QWidget):
         for widget in (self.staged_list, self.unstaged_list):
             widget.setStyleSheet(git_changes_list_style())
         self.message.setFont(app_font())
+        self._cancel_commit_btn.setStyleSheet(git_change_button_style())
         self._apply_field_styles()
         self._update_action_state()
 
     def _apply_field_styles(self):
-        ready = self._staged_count > 0 and bool(self._commit_summary().strip())
+        ready = (
+            self._staged_count + self._unstaged_count > 0
+            and bool(self._commit_summary().strip())
+        )
         self.message.setStyleSheet(git_commit_field_style(ready=ready))
 
     def _commit_summary(self) -> str:
@@ -477,9 +517,11 @@ class GitChangesList(QWidget):
             self.staged_list.clear()
             self.unstaged_list.clear()
             self._staged_count = 0
+            self._unstaged_count = 0
             self._staged_label.setText("Staged")
             self._unstaged_label.setText("Unstaged")
             self._add_disabled(self.unstaged_list, "(not a git repository)")
+            self._sync_staged_visibility()
             self._update_action_state()
             return
         self.set_changes(changes)
@@ -488,6 +530,7 @@ class GitChangesList(QWidget):
         self.staged_list.clear()
         self.unstaged_list.clear()
         self._staged_count = 0
+        self._unstaged_count = 0
 
         staged_items: list[GitFileChange] = []
         unstaged_items: list[GitFileChange] = []
@@ -507,11 +550,13 @@ class GitChangesList(QWidget):
             if not self.unstaged_list.item(i).data(_ROLE_IS_HEADER)
         )
         self._staged_count = staged_count
+        self._unstaged_count = unstaged_count
         self._staged_label.setText(f"Staged ({staged_count})" if staged_count else "Staged")
         self._unstaged_label.setText(
             f"Unstaged ({unstaged_count})" if unstaged_count else "Unstaged — clean"
         )
         self.unstaged_list.set_filter_text(self._filter_edit.text())
+        self._sync_staged_visibility()
         self._update_action_state()
 
     def _populate_unstaged(self, items: list[GitFileChange]):
@@ -566,9 +611,11 @@ class GitChangesList(QWidget):
         self.staged_list.clear()
         self.unstaged_list.clear()
         self._staged_count = 0
+        self._unstaged_count = 0
         self._staged_label.setText("Staged")
         self._unstaged_label.setText("Unstaged")
         self._add_disabled(self.unstaged_list, "(loading git status)")
+        self._sync_staged_visibility()
         self._update_action_state()
 
     def _add_change(
@@ -709,12 +756,26 @@ class GitChangesList(QWidget):
         if not paths:
             return
         menu = QMenu(self)
+        menu.addAction(
+            "Unstage selected" if widget.staged else "Stage selected",
+            lambda: self._stage_or_unstage_selected(widget),
+        )
+        menu.addSeparator()
         menu.addAction("Stash selected...", lambda: self._stash_selected(widget))
         menu.addAction("Discard changes...", lambda: self._discard_selected(widget))
         menu.exec(widget.viewport().mapToGlobal(pos))
 
+    def _stage_or_unstage_selected(self, widget: _GitChangeList):
+        paths = self._selected_rel_paths(widget)
+        if not paths:
+            return
+        if widget.staged:
+            self._run_change_action("Unstage", unstage_files(self.repo_path, paths))
+        else:
+            self._run_change_action("Stage", stage_files(self.repo_path, paths))
+
     def _commit_context_menu(self, pos):
-        if self._staged_count <= 0 or not self._commit_summary().strip():
+        if self._staged_count + self._unstaged_count <= 0 or not self._commit_summary().strip():
             return
         menu = QMenu(self)
         menu.addAction(
@@ -766,11 +827,24 @@ class GitChangesList(QWidget):
     def _commit(self, *, summarize_in_chat: bool = False):
         summary, body = split_commit_message(self.message.toPlainText())
         staged_count = self._staged_count
+        staged_all = False
+        if staged_count <= 0:
+            paths = self._all_rel_paths(self.unstaged_list)
+            stage_result = stage_files(self.repo_path, paths)
+            if not stage_result.ok:
+                self._run_change_action("Stage", stage_result)
+                return
+            staged_count = len(paths)
+            staged_all = True
         result = commit_staged(self.repo_path, summary, body)
         if result.ok:
             if summarize_in_chat:
                 self.commit_summarized.emit(_commit_chat_summary(summary, body, staged_count))
             self.message.clear()
+            self._hide_commit_composer()
+        elif staged_all:
+            clear_git_snapshot_cache(self.repo_path)
+            self.refresh()
         self._run_change_action("Commit", result, refresh_history=True)
 
     def _run_change_action(
@@ -790,11 +864,31 @@ class GitChangesList(QWidget):
 
     def _update_action_state(self):
         has_summary = bool(self._commit_summary().strip())
-        ready = self._staged_count > 0 and has_summary
+        has_changes = self._staged_count + self._unstaged_count > 0
+        ready = has_changes and has_summary
+        has_staged = self._staged_count > 0
+        self._commit_trigger.setEnabled(has_changes)
+        if has_staged:
+            noun = "file" if self._staged_count == 1 else "files"
+            self._commit_trigger.setToolTip(f"Commit {self._staged_count} staged {noun}")
+            self._commit_trigger.setStyleSheet(primary_button_style())
+        elif has_changes:
+            noun = "file" if self._unstaged_count == 1 else "files"
+            self._commit_trigger.setToolTip(
+                f"Stage all {self._unstaged_count} {noun} and enter a commit message"
+            )
+            self._commit_trigger.setStyleSheet(primary_button_style())
+        else:
+            self._commit_trigger.setToolTip("Stage files before committing")
+            self._commit_trigger.setStyleSheet(git_change_button_style())
         self._commit_btn.setEnabled(ready)
         if ready:
-            noun = "file" if self._staged_count == 1 else "files"
-            self._commit_btn.setToolTip(f"Commit {self._staged_count} staged {noun}")
+            if has_staged:
+                noun = "file" if self._staged_count == 1 else "files"
+                self._commit_btn.setToolTip(f"Commit {self._staged_count} staged {noun}")
+            else:
+                noun = "file" if self._unstaged_count == 1 else "files"
+                self._commit_btn.setToolTip(f"Stage all {self._unstaged_count} {noun} and commit")
             self._commit_btn.setStyleSheet(primary_button_style())
         else:
             self._commit_btn.setToolTip("Stage files and enter a commit message")

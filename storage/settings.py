@@ -46,6 +46,8 @@ GRAPH_AGENT_PROMPT_KEY = "graph_agent_prompt"
 GRAPH_GENERATION_STRATEGY_KEY = "graph_generation_strategy"
 DEFAULT_GRAPH_GENERATION_STRATEGY = "parallelism"
 _VALID_GRAPH_GENERATION_STRATEGIES = frozenset({"parallelism", "atomicity"})
+CANVAS_ENABLED_KEY = "canvas_enabled"
+DEFAULT_CANVAS_ENABLED = True
 CANVAS_RUN_MODE_KEY = "canvas_run_mode"
 DEFAULT_CANVAS_RUN_MODE = "sequential"
 _VALID_CANVAS_RUN_MODES = frozenset({"sequential", "parallel"})
@@ -167,6 +169,14 @@ def graph_generation_strategy(data: dict | None) -> str:
     data = data if isinstance(data, dict) else {}
     value = str(data.get(GRAPH_GENERATION_STRATEGY_KEY, DEFAULT_GRAPH_GENERATION_STRATEGY) or "").strip().lower()
     return value if value in _VALID_GRAPH_GENERATION_STRATEGIES else DEFAULT_GRAPH_GENERATION_STRATEGY
+
+
+def canvas_enabled(data: dict | None) -> bool:
+    data = data if isinstance(data, dict) else {}
+    value = data.get(CANVAS_ENABLED_KEY, DEFAULT_CANVAS_ENABLED)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
 
 
 def canvas_run_mode(data: dict | None) -> str:

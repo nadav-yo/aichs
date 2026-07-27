@@ -59,6 +59,9 @@ class TestStripAnsi:
     def test_strips_orphan_sgr_prefix(self):
         assert _strip_ansi("[31;1mGet-Content: error") == "Get-Content: error"
 
+    def test_strips_terminal_mode_sequences(self):
+        assert _strip_ansi("\x1b[?1h\x1b=ready") == "ready"
+
 
 class TestTrimOutput:
     def test_short_text_unchanged(self):

@@ -38,6 +38,21 @@ def test_normalize_title_collapses_newlines():
     )
 
 
+def test_conversation_toolbar_uses_search_and_plus(qapp, store):
+    panel = ConversationPanel(store)
+    created = []
+    panel.new_chat.connect(lambda: created.append(True))
+
+    assert panel.search.parent() is panel._toolbar
+    assert panel._new_btn.text() == ""
+    assert not panel._new_btn.icon().isNull()
+    assert panel._new_btn.toolTip() == "New chat"
+
+    panel._new_btn.click()
+
+    assert created == [True]
+
+
 def test_conversation_item_cancel_edit_tolerates_deleted_widget(qapp, monkeypatch):
     item = ConversationItem("Demo", "12:00")
     item._start_edit()

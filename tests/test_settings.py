@@ -6,6 +6,7 @@ from storage.settings import (
     DEFAULT_ARCHIVIST_PROMPT,
     DEFAULT_AUTO_TITLE_PROMPT_INSTRUCTIONS,
     DEFAULT_CANVAS_ACTION_AUTO_APPROVE,
+    DEFAULT_CANVAS_ENABLED,
     DEFAULT_CANVAS_PARALLEL_LIMIT,
     DEFAULT_CANVAS_RUN_MODE,
     DEFAULT_COMPACT_RESUME_PROMPT,
@@ -19,6 +20,7 @@ from storage.settings import (
     archivist_prompt,
     auto_title_prompt_instructions,
     canvas_action_auto_approve,
+    canvas_enabled,
     canvas_parallel_limit,
     canvas_run_mode,
     compact_resume_prompt,
@@ -164,6 +166,10 @@ def test_project_memory_scope_defaults_and_validate():
 
 
 def test_canvas_settings_defaults_and_validate():
+    assert canvas_enabled({}) is DEFAULT_CANVAS_ENABLED
+    assert canvas_enabled({"canvas_enabled": False}) is False
+    assert canvas_enabled({"canvas_enabled": "false"}) is False
+    assert canvas_enabled({"canvas_enabled": "yes"}) is True
     assert graph_generation_strategy({}) == DEFAULT_GRAPH_GENERATION_STRATEGY
     assert graph_generation_strategy({"graph_generation_strategy": "atomicity"}) == "atomicity"
     assert graph_generation_strategy({"graph_generation_strategy": "bogus"}) == DEFAULT_GRAPH_GENERATION_STRATEGY

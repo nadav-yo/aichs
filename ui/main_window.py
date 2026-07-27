@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QApplication,
     QPushButton,
+    QFrame,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -19,11 +20,13 @@ from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QShortcut, QKeyS
 from storage.repository import ConversationStore
 from storage.agent_canvas import CanvasSaveRefused, load_agent_canvas, save_agent_canvas
 from storage.settings import (
+    CANVAS_ENABLED_KEY,
     DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY,
     FILE_EDITOR_AUTO_SAVE_KEY,
     FILE_EDITOR_TAB_SPACES_KEY,
     FILE_REVIEW_PROMPT_TEMPLATE_KEY,
     SettingsStore,
+    canvas_enabled,
     resume_session,
 )
 from storage.workspace_session import (
@@ -37,7 +40,16 @@ from services.mcp_tools import start_mcp_capability_warmup
 from services.palette import PaletteContext, build_palette_items
 from services.processes import get_process_manager
 from services.tool_registry import disable_unreviewed_extensions
-from ui.theme import apply_app_theme, current_theme, mono_font, palette, toggle_tab_button_style
+from ui.theme import (
+    apply_app_theme,
+    current_theme,
+    mono_font,
+    palette,
+    toggle_tab_button_style,
+    workbench_mode_bar_style,
+    workbench_mode_button_style,
+    workbench_mode_group_style,
+)
 from ui.widgets.left_panel import LeftPanel
 from ui.widgets.chat_panel import ChatPanel
 from ui.widgets.file_viewer import FileViewerPanel
@@ -212,6 +224,7 @@ class MainWindow(QMainWindow):
             current_model_getter=lambda: self._chat.current_model(),
             defer_refresh=True,
         )
+        self._left.set_canvas_enabled(canvas_enabled(self._settings.load()))
         self._left.setMinimumWidth(MIN_ACTIVITY_WIDTH)
         self._left.setMaximumWidth(MAX_ACTIVITY_WIDTH)
 
@@ -349,6 +362,35 @@ class MainWindow(QMainWindow):
         self._workbench.setCollapsible(0, True)
         self._workbench.setCollapsible(1, True)
 
+        self._workbench_mode = "chat"
+        self._workbench_mode_buttons: dict[str, QPushButton] = {}
+        self._workbench_host = QWidget()
+        workbench_host_layout = QVBoxLayout(self._workbench_host)
+        workbench_host_layout.setContentsMargins(0, 0, 0, 0)
+        workbench_host_layout.setSpacing(0)
+        self._workbench_mode_bar = QWidget()
+        self._workbench_mode_bar.setObjectName("workbenchModeBar")
+        mode_layout = QHBoxLayout(self._workbench_mode_bar)
+        mode_layout.setContentsMargins(10, 5, 10, 5)
+        mode_layout.setSpacing(0)
+        mode_layout.addStretch(1)
+        self._workbench_mode_group = QFrame()
+        self._workbench_mode_group.setObjectName("workbenchModeGroup")
+        mode_group_layout = QHBoxLayout(self._workbench_mode_group)
+        mode_group_layout.setContentsMargins(3, 3, 3, 3)
+        mode_group_layout.setSpacing(2)
+        for key, label in (("chat", "Chat Focus"), ("review", "Review"), ("editor", "Editor Focus")):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setObjectName(f"workbenchMode{key.title()}")
+            button.clicked.connect(lambda _checked=False, mode=key: self._set_workbench_mode(mode))
+            self._workbench_mode_buttons[key] = button
+            mode_group_layout.addWidget(button)
+        mode_layout.addWidget(self._workbench_mode_group)
+        mode_layout.addStretch(1)
+        workbench_host_layout.addWidget(self._workbench_mode_bar)
+        workbench_host_layout.addWidget(self._workbench, 1)
+
         self._workbench_restore_chat_btn = QPushButton("Chat", self._workbench_left)
         self._workbench_restore_chat_btn.setObjectName("workbenchRestoreChat")
         self._workbench_restore_chat_btn.setToolTip("Show chat")
@@ -376,18 +418,18 @@ class MainWindow(QMainWindow):
         self._workspace_dashboard.new_chat_requested.connect(self._new_conversation)
         self._workspace_dashboard.file_search_requested.connect(self._open_file_search)
         self._workspace_dashboard.text_search_requested.connect(self._open_text_search)
+        self._left.set_inspect_panel(self._context)
 
         self._center_stack = QStackedWidget()
-        self._center_stack.addWidget(self._workbench)
+        self._center_stack.addWidget(self._workbench_host)
         self._center_stack.addWidget(self._workspace_dashboard)
 
         self._root_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._root_splitter.setObjectName("activityRootSplitter")
         self._root_splitter.addWidget(self._left)
         self._root_splitter.addWidget(self._center_stack)
-        self._root_splitter.addWidget(self._context_shell)
         self._root_splitter.setStretchFactor(0, 0)
         self._root_splitter.setStretchFactor(1, 1)
-        self._root_splitter.setStretchFactor(2, 0)
         self._root_splitter.setCollapsible(0, False)
 
         self._left.selected.connect(self._load_conversation)
@@ -405,7 +447,6 @@ class MainWindow(QMainWindow):
         self._left.text_search_requested.connect(self._open_text_search)
         self._left.extensions_requested.connect(self._chat.show_extensions)
         self._left.mcp_requested.connect(self._chat.show_mcp)
-        self._left.workspace_requested.connect(self._show_workspace_dashboard)
         self._left.workspace_switch_requested.connect(self._switch_workspace)
         self._left.canvas_requested.connect(self._show_agent_canvas)
         self._left.activity_selected.connect(self._on_activity_selected)
@@ -535,8 +576,8 @@ class MainWindow(QMainWindow):
 
     def _show_workbench(self):
         self._restore_context_after_workspace()
-        self._center_stack.setCurrentWidget(self._workbench)
-        if self._left.active_activity() == "canvas":
+        self._center_stack.setCurrentWidget(self._workbench_host)
+        if self._left.active_activity() == "canvas" and self._canvas_is_enabled():
             self._ensure_agent_canvas_restored()
             self._workbench_left.setCurrentWidget(self._agent_canvas)
             self._hide_context_for_workspace()
@@ -547,14 +588,11 @@ class MainWindow(QMainWindow):
         self._sync_chat_width_mode()
         self._apply_pending_workspace_session()
 
-    def _show_workspace_dashboard(self):
-        self._workspace_dashboard.refresh(git_snapshot=self._initial_git_snapshot)
-        self._center_stack.setCurrentWidget(self._workspace_dashboard)
-        self._hide_context_for_workspace()
-
     def _show_agent_canvas(self):
+        if not self._canvas_is_enabled():
+            return
         self._ensure_agent_canvas_restored()
-        self._center_stack.setCurrentWidget(self._workbench)
+        self._center_stack.setCurrentWidget(self._workbench_host)
         self._workbench_left.setCurrentWidget(self._agent_canvas)
         self._hide_context_for_workspace()
         self._sync_chat_width_mode()
@@ -563,8 +601,17 @@ class MainWindow(QMainWindow):
         self._left.set_activity_attention("canvas", bool(active))
 
     def _sync_selected_activity_view(self):
-        if self._left.active_activity() == "canvas":
+        if self._left.active_activity() == "canvas" and self._canvas_is_enabled():
             self._show_agent_canvas()
+
+    def _canvas_is_enabled(self) -> bool:
+        return canvas_enabled(self._settings.load())
+
+    def _sync_canvas_enabled(self):
+        enabled = self._canvas_is_enabled()
+        self._left.set_canvas_enabled(enabled)
+        if not enabled and self._left.active_activity() == "canvas":
+            self._left.set_active_activity("chats")
 
     def _on_activity_selected(self, key: str):
         if key == "canvas":
@@ -592,11 +639,13 @@ class MainWindow(QMainWindow):
     def _new_conversation(self):
         self._show_workbench()
         self._left.set_active_activity("chats")
+        self._set_workbench_mode("chat", schedule_save=False)
         self._chat.new_conversation()
         self._left.clear_conversation_selection()
 
     def _load_conversation(self, path: str):
         self._show_workbench()
+        self._set_workbench_mode("chat", schedule_save=False)
         self._chat.load_conversation(path)
 
     def _open_canvas_conversation(self, conv_id: str):
@@ -694,14 +743,16 @@ class MainWindow(QMainWindow):
         self.resize(1360, 820)
 
         activity = saved.get("activity_sizes")
-        has_saved_activity = bool(activity and len(activity) == 3)
+        if isinstance(activity, list) and len(activity) == 3:
+            activity = [activity[0], activity[1] + activity[2]]
+        has_saved_activity = bool(activity and len(activity) == 2)
         activity_collapsed = bool(saved.get("activity_collapsed", False))
         if has_saved_activity and activity[0] <= COLLAPSED_ACTIVITY_WIDTH:
             activity_collapsed = True
         if has_saved_activity:
             self._root_splitter.setSizes(activity)
         else:
-            self._root_splitter.setSizes([DEFAULT_ACTIVITY_WIDTH, 700, 260])
+            self._root_splitter.setSizes([DEFAULT_ACTIVITY_WIDTH, 960])
             self._pending_default_activity_width = True
 
         workbench = saved.get("workbench_sizes")
@@ -711,32 +762,23 @@ class MainWindow(QMainWindow):
             self._workbench_user_split = True
         else:
             self._ensure_file_viewer_space()
+        self._set_workbench_mode(str(saved.get("workbench_mode") or "chat"), schedule_save=False)
 
         active_activity = str(saved.get("active_activity") or "chats")
-        if active_activity == "canvas":
+        if active_activity == "workspace":
+            active_activity = "chats"
+        if active_activity == "canvas" and self._canvas_is_enabled():
             self._left.show_canvas_activity()
         else:
             self._left.set_active_activity(active_activity)
         if activity_collapsed:
             self._left.collapse_activity_panel()
-        if bool(saved.get("context_collapsed", True)):
-            self._collapse_context()
-        else:
-            context_width = None
-            context_sizes = saved.get("context_sizes")
-            if isinstance(context_sizes, list) and context_sizes:
-                try:
-                    context_width = min(420, max(220, int(context_sizes[0])))
-                except (TypeError, ValueError):
-                    context_width = None
-            self._expand_context(width=context_width)
         if not has_saved_activity and not activity_collapsed:
             sizes = self._root_splitter.sizes()
-            if len(sizes) == 3:
+            if len(sizes) == 2:
                 total = max(1, sum(sizes))
-                right = 30 if self._is_context_collapsed() else min(300, max(240, total // 5))
-                left = min(DEFAULT_ACTIVITY_WIDTH, max(MIN_ACTIVITY_WIDTH, total - right - 1))
-                self._root_splitter.setSizes([left, max(1, total - left - right), right])
+                left = min(DEFAULT_ACTIVITY_WIDTH, max(MIN_ACTIVITY_WIDTH, total - 1))
+                self._root_splitter.setSizes([left, max(1, total - left)])
         self._sync_selected_activity_view()
 
     def closeEvent(self, event):
@@ -744,15 +786,13 @@ class MainWindow(QMainWindow):
         self._restore_context_after_workspace()
         self._save_workspace_session()
         self._save_agent_canvas()
-        context_collapsed = self._is_context_collapsed()
         activity_collapsed = self._left.is_activity_panel_collapsed()
         self._settings.update({
             "workspace_path": os.getcwd(),
             "window_geometry": self.saveGeometry().toHex().data().decode(),
             "activity_sizes": self._root_splitter.sizes(),
             "workbench_sizes": self._workbench.sizes(),
-            "context_sizes": [self._context.width()],
-            "context_collapsed": context_collapsed,
+            "workbench_mode": self._workbench_mode,
             "active_activity": self._left.active_activity(),
             "activity_collapsed": activity_collapsed,
         })
@@ -791,6 +831,7 @@ class MainWindow(QMainWindow):
         }
         refresh_models = changed is None or bool(changed & model_keys)
         reload_editor_settings = changed is None or bool(changed & editor_keys)
+        sync_canvas_enabled = changed is None or CANVAS_ENABLED_KEY in changed
 
         app = QApplication.instance()
         previous_updates = self.updatesEnabled()
@@ -801,6 +842,8 @@ class MainWindow(QMainWindow):
             if reload_editor_settings:
                 self._viewer.reload_settings()
             self._left.apply_appearance()
+            if sync_canvas_enabled:
+                self._sync_canvas_enabled()
             if refresh_models:
                 self._chat.refresh_models()
             self._chat.apply_appearance()
@@ -810,9 +853,7 @@ class MainWindow(QMainWindow):
             self._agent_canvas.apply_appearance(refresh_models=refresh_models)
             if self._window_chrome is not None:
                 self._window_chrome.apply_appearance()
-            tab_style = toggle_tab_button_style()
-            self._context_tab.setStyleSheet(tab_style)
-            self._language_context_tab.setStyleSheet(tab_style)
+            self._sync_workbench_mode_buttons()
             self._apply_workbench_restore_tab_style()
             self._sync_context_tab_icons()
             self._sync_workbench_restore_tabs()
@@ -838,7 +879,10 @@ class MainWindow(QMainWindow):
         self._left.reveal_file(path, activate=activate_files)
         self._viewer.show()
         self._sync_chat_width_mode()
-        self._ensure_file_viewer_space()
+        if activate_files:
+            self._set_workbench_mode("editor", schedule_save=False)
+        else:
+            self._ensure_file_viewer_space()
         self._schedule_session_save()
 
     def _open_file_from_canvas(self, path: str):
@@ -852,6 +896,50 @@ class MainWindow(QMainWindow):
         if total > 0:
             return total
         return max(1, self._workbench.width())
+
+    def _set_workbench_mode(self, mode: str, *, schedule_save: bool = True):
+        mode = mode if mode in {"chat", "review", "editor"} else "chat"
+        if mode != "chat" and not self._viewer.has_open_tabs():
+            mode = "chat"
+        current = getattr(self, "_workbench_mode", "chat")
+        if current == "review":
+            self._remember_workbench_split()
+        self._workbench_mode = mode
+        total = max(1, self._workbench_total_width())
+        if mode == "review":
+            self._viewer.show()
+            sizes = list(self._last_open_workbench_sizes or self._default_workbench_sizes())
+            if len(sizes) != 2 or sum(sizes) <= 0:
+                sizes = self._default_workbench_sizes()
+            ratio = sizes[0] / max(1, sum(sizes))
+            left = max(1, int(total * ratio))
+            self._workbench.setSizes([left, max(1, total - left)])
+            self._workbench_user_split = True
+            self._sync_workbench_markdown_preview_pane(force_chat=True)
+        elif mode == "chat":
+            self._restore_preview_to_host_tab()
+            self._workbench_left.setCurrentWidget(self._chat)
+            self._workbench.setSizes([total, 0])
+        else:
+            self._restore_preview_to_host_tab()
+            self._viewer.show()
+            self._workbench.setSizes([0, total])
+        self._sync_workbench_mode_buttons()
+        self._sync_workbench_restore_tabs()
+        if schedule_save:
+            self._schedule_session_save()
+
+    def _sync_workbench_mode_buttons(self):
+        has_file = self._viewer.has_open_tabs()
+        for key, button in self._workbench_mode_buttons.items():
+            active = key == self._workbench_mode
+            available = key == "chat" or has_file
+            button.setEnabled(available)
+            button.setToolTip("" if available else "Open a file to use this view")
+            button.setChecked(active)
+            button.setStyleSheet(workbench_mode_button_style(active=active))
+        self._workbench_mode_bar.setStyleSheet(workbench_mode_bar_style())
+        self._workbench_mode_group.setStyleSheet(workbench_mode_group_style())
 
     def _default_workbench_sizes(self) -> list[int]:
         total = max(1, self._workbench_total_width())
@@ -901,6 +989,9 @@ class MainWindow(QMainWindow):
             self._last_open_workbench_sizes = [int(sizes[0]), int(sizes[1])]
 
     def _on_workbench_splitter_moved(self, *_args):
+        if self._workbench_mode != "review":
+            self._workbench_mode = "review"
+            self._sync_workbench_mode_buttons()
         self._workbench_user_split = True
         self._snap_workbench_collapsed_side()
         self._remember_workbench_split()
@@ -930,6 +1021,8 @@ class MainWindow(QMainWindow):
         self._schedule_session_save()
 
     def _restore_workbench_side(self, side: str):
+        self._workbench_mode = "review"
+        self._sync_workbench_mode_buttons()
         total = max(1, self._workbench_total_width())
         base = list(self._last_open_workbench_sizes or self._default_workbench_sizes())
         if len(base) != 2 or sum(base) <= 0:
@@ -951,6 +1044,10 @@ class MainWindow(QMainWindow):
 
     def _sync_workbench_restore_tabs(self):
         if not hasattr(self, "_workbench_restore_chat_btn"):
+            return
+        if self._workbench_mode != "review":
+            self._workbench_restore_chat_btn.hide()
+            self._workbench_restore_files_btn.hide()
             return
         sizes = self._workbench.sizes()
         left_collapsed = len(sizes) == 2 and sizes[0] <= WORKBENCH_COLLAPSED_WIDTH and sizes[1] > WORKBENCH_COLLAPSED_WIDTH
@@ -1055,7 +1152,7 @@ class MainWindow(QMainWindow):
         self._viewer.open_content(content, title)
         self._viewer.show()
         self._sync_chat_width_mode()
-        self._ensure_file_viewer_space()
+        self._set_workbench_mode("editor", schedule_save=False)
 
     def _refresh_open_file(self, path: str):
         self._viewer.refresh_file(path, repo_root=os.getcwd())
@@ -1068,6 +1165,7 @@ class MainWindow(QMainWindow):
             self._workbench_left.setCurrentWidget(self._agent_canvas)
             self._hide_context_for_workspace()
         else:
+            self._set_workbench_mode("chat", schedule_save=False)
             self._sync_workbench_markdown_preview_pane(force_chat=True)
         self._sync_chat_width_mode()
         self._schedule_session_save()
@@ -1157,6 +1255,7 @@ class MainWindow(QMainWindow):
             "open_files": self._viewer.open_file_states(),
             "viewer_visible": self._viewer.isVisible() and self._viewer.has_open_tabs(),
             "workbench_sizes": sizes,
+            "workbench_mode": self._workbench_mode,
             "context_panel": self._context.active_panel(),
             "context_collapsed": self._is_context_collapsed(),
         }
@@ -1265,6 +1364,7 @@ class MainWindow(QMainWindow):
                 self._workbench.setSizes(normalized)
             except (TypeError, ValueError):
                 pass
+        self._set_workbench_mode(str(session.get("workbench_mode") or "chat"), schedule_save=False)
         self._sync_workbench_markdown_preview_pane()
 
         panel = str(session.get("context_panel") or "run_log")
@@ -1284,7 +1384,7 @@ class MainWindow(QMainWindow):
 
         if os.path.normcase(target) == os.path.normcase(os.getcwd()):
             self._workspace_dashboard.set_current_workspace(target)
-            self._show_workspace_dashboard()
+            self._show_workbench()
             return True
 
         if not self._confirm_workspace_switch():
@@ -1316,7 +1416,7 @@ class MainWindow(QMainWindow):
         self._context.set_current_conversation("")
         start_mcp_capability_warmup(target)
         self._queue_workspace_session_restore(target)
-        self._show_workspace_dashboard()
+        self._show_workbench()
         self._extension_review_prompt_shown = False
         self._review_new_extensions()
         return True
@@ -1383,128 +1483,52 @@ class MainWindow(QMainWindow):
         return result == QMessageBox.StandardButton.Yes
 
     def _show_context_panel(self, panel: str):
-        self._restore_context_after_workspace()
         self._context.set_active_panel(panel)
-        self._sync_context_tab_icons()
-        self._expand_context()
+        self._left.set_active_activity("inspect")
 
     def _sync_context_tab_icons(self):
-        active = getattr(self._context, "_active_panel", "run_log")
-        run_active = active == "run_log"
-        language_active = active == "language"
-        self._context_tab.setChecked(run_active)
-        self._language_context_tab.setChecked(language_active)
-        self._context_tab.setIcon(_right_rail_icon("run_log", active=run_active))
-        self._language_context_tab.setIcon(_right_rail_icon("language", active=language_active))
+        return
 
     def _hide_context_for_workspace(self):
-        if self._workspace_context_state is not None:
-            return
-        sizes = self._root_splitter.sizes()
-        context_width = sizes[2] if len(sizes) == 3 else self._context_shell.width()
-        self._workspace_context_state = {
-            "collapsed": self._is_context_collapsed(),
-            "width": max(30, context_width),
-            "hidden": self._context_shell.isHidden(),
-        }
-        self._collapse_context()
-        self._context_shell.hide()
-        self._context_shell.setMinimumWidth(0)
-        self._context_shell.setMaximumWidth(0)
-        sizes = self._root_splitter.sizes()
-        if len(sizes) == 3:
-            self._root_splitter.setSizes([sizes[0], sizes[1] + sizes[2], 0])
+        return
 
     def _restore_context_after_workspace(self):
-        state = self._workspace_context_state
-        if state is None:
-            return
-        self._workspace_context_state = None
-        collapsed = bool(state["collapsed"])
-        target_width = 30
-        if collapsed:
-            self._context_stack.setCurrentIndex(1)
-            self._context_shell.setMinimumWidth(30)
-            self._context_shell.setMaximumWidth(30)
-        else:
-            target_width = min(420, max(220, int(state["width"])))
-            self._context_stack.setCurrentIndex(0)
-            self._context_shell.setMinimumWidth(220)
-            self._context_shell.setMaximumWidth(420)
-        self._context_shell.setHidden(bool(state["hidden"]))
-        sizes = self._root_splitter.sizes()
-        if len(sizes) == 3 and not bool(state["hidden"]):
-            total = max(1, sum(sizes))
-            left_width = sizes[0]
-            self._root_splitter.setSizes([
-                left_width,
-                max(1, total - left_width - target_width),
-                target_width,
-            ])
+        return
 
     def _collapse_context(self):
-        self._context_stack.setCurrentIndex(1)
-        self._sync_context_tab_icons()
-        self._context_shell.setMinimumWidth(30)
-        self._context_shell.setMaximumWidth(30)
-        sizes = self._root_splitter.sizes()
-        if len(sizes) == 3:
-            self._root_splitter.setSizes([
-                sizes[0],
-                sizes[1] + max(0, sizes[2] - 30),
-                30,
-            ])
+        if self._left.active_activity() == "inspect":
+            self._left.set_active_activity("chats")
 
     def _expand_context(self, *, width: int | None = None):
-        self._context_shell.setMinimumWidth(220)
-        self._context_shell.setMaximumWidth(420)
-        self._context_stack.setCurrentIndex(0)
-        self._sync_context_tab_icons()
-        sizes = self._root_splitter.sizes()
-        if len(sizes) == 3:
-            total = max(1, sum(sizes))
-            context_width = width if width is not None else min(300, max(240, total // 5))
-            context_width = min(420, max(220, context_width))
-            left_width = sizes[0]
-            self._root_splitter.setSizes([
-                left_width,
-                max(1, total - left_width - context_width),
-                context_width,
-            ])
+        self._left.set_active_activity("inspect")
 
     def _is_context_collapsed(self) -> bool:
-        return self._context_stack.currentIndex() == 1
+        return self._left.active_activity() != "inspect"
 
     def _set_activity_panel_width(self, width: int):
         sizes = self._root_splitter.sizes()
-        if len(sizes) != 3:
+        if len(sizes) != 2:
             return
         total = max(1, sum(sizes))
-        right_width = sizes[2]
-        available = max(1, total - right_width - 1)
+        available = max(1, total - 1)
         left_width = min(max(width, MIN_ACTIVITY_WIDTH), available)
         self._root_splitter.setSizes([
             left_width,
-            max(1, total - left_width - right_width),
-            right_width,
+            max(1, total - left_width),
         ])
 
     def _prepare_splitters_for_close(self):
-        self._context_stack.setCurrentIndex(0)
-        self._context_shell.setMinimumWidth(0)
-        self._context_shell.setMaximumWidth(16777215)
+        return
 
     def _on_activity_panel_collapsed(self, collapsed: bool):
         sizes = self._root_splitter.sizes()
-        if len(sizes) != 3:
+        if len(sizes) != 2:
             return
         total = max(1, sum(sizes))
-        right_width = sizes[2]
         if not collapsed:
             self._set_activity_panel_width(DEFAULT_ACTIVITY_WIDTH)
             return
         self._root_splitter.setSizes([
             COLLAPSED_ACTIVITY_WIDTH,
-            max(1, total - COLLAPSED_ACTIVITY_WIDTH - right_width),
-            right_width,
+            max(1, total - COLLAPSED_ACTIVITY_WIDTH),
         ])

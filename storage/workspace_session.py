@@ -11,7 +11,7 @@ from pathlib import Path
 from config import AICHS_HOME
 from storage.repository import workspace_id
 
-SESSION_VERSION = 1
+SESSION_VERSION = 2
 
 
 def session_path(workspace: str | Path) -> Path:
@@ -66,12 +66,16 @@ def normalize_session(data: dict | None) -> dict:
     panel = str(data.get("context_panel") or "run_log").strip().lower()
     if panel not in {"run_log", "language"}:
         panel = "run_log"
+    workbench_mode = str(data.get("workbench_mode") or "").strip().lower()
+    if workbench_mode not in {"chat", "review", "editor"}:
+        workbench_mode = "review" if sizes else "chat"
     return {
         "version": SESSION_VERSION,
         "conversation_id": conversation_id,
         "open_files": open_files,
         "viewer_visible": bool(data.get("viewer_visible")),
         "workbench_sizes": sizes,
+        "workbench_mode": workbench_mode,
         "context_panel": panel,
         "context_collapsed": bool(data.get("context_collapsed", True)),
         "updated_at": str(data.get("updated_at") or ""),

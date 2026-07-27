@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QDialog, QLabel, QMessageBox, QMenu
 
 from services.workspace_snapshot import RecentChat, RecentWorkspace, WorkspaceSnapshot
 from storage.repository import ConversationStore, register_workspace
+from storage.settings import CANVAS_ENABLED_KEY
 from ui.main_window import (
     DEFAULT_ACTIVITY_WIDTH,
     MAX_ACTIVITY_WIDTH,
@@ -17,7 +18,6 @@ from ui.main_window import (
     _ExtensionReviewThread,
 )
 from ui.theme import FONT_FAMILY, palette
-from ui.widgets.left_panel import _WorkspaceNavPanel
 from ui.widgets.window_chrome import _resize_edges_for_pos, chromed_dialog_layout
 from ui.widgets.workspace_dashboard import WorkspaceDashboard, _empty_html
 
@@ -350,7 +350,7 @@ def test_main_window_open_file_defaults_to_editor_favored_split(
         qapp.setStyleSheet(app_style)
 
 
-def test_main_window_open_file_preserves_user_workbench_split(
+def test_main_window_open_file_enters_editor_focus(
     qapp, workspace, quiet_file_language
 ):
     cwd = os.getcwd()
@@ -372,17 +372,75 @@ def test_main_window_open_file_preserves_user_workbench_split(
         window._workbench.setSizes([chat_width, viewer_width])
         qapp.processEvents()
         window._on_workbench_splitter_moved(chat_width, 1)
-        expected_ratio = window._workbench.sizes()[0] / sum(window._workbench.sizes())
-
         window._open_file(str(second))
         qapp.processEvents()
 
         sizes = window._workbench.sizes()
-        actual_ratio = sizes[0] / sum(sizes)
-        assert abs(actual_ratio - expected_ratio) < 0.05
-        assert sizes[0] > sizes[1]
+        assert window._workbench_mode == "editor"
+        assert sizes[0] <= 64
+        assert sizes[1] > sizes[0]
     finally:
         _settle_file_viewer_workers(qapp)
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
+def test_main_window_focus_modes_keep_chat_and_editor_readable(qapp, workspace):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    window = MainWindow(startup_workspace=str(workspace))
+    try:
+        window.resize(1400, 860)
+        window.show()
+        qapp.processEvents()
+
+        assert window._workbench_mode == "chat"
+        assert window._workbench_mode_buttons["chat"].isChecked()
+        assert not window._workbench_mode_buttons["review"].isEnabled()
+        assert not window._workbench_mode_buttons["editor"].isEnabled()
+        assert window._workbench.sizes()[0] > window._workbench.sizes()[1]
+
+        window._set_workbench_mode("review")
+        assert window._workbench_mode == "chat"
+
+        window._open_file(str(workspace / "src" / "main.py"))
+        qapp.processEvents()
+        assert window._workbench_mode_buttons["review"].isEnabled()
+        assert window._workbench_mode_buttons["editor"].isEnabled()
+
+        window._set_workbench_mode("review")
+        review_sizes = window._workbench.sizes()
+        assert window._workbench_mode_buttons["review"].isChecked()
+        assert review_sizes[0] > 0 and review_sizes[1] > 0
+
+        window._set_workbench_mode("editor")
+        assert window._workbench_mode_buttons["editor"].isChecked()
+        assert window._workbench.sizes()[1] > window._workbench.sizes()[0]
+    finally:
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
+def test_main_window_inspect_lives_in_unified_sidebar(qapp, workspace):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    window = MainWindow(startup_workspace=str(workspace))
+    try:
+        assert "inspect" in window._left._activity_buttons
+        assert len(window._root_splitter.sizes()) == 2
+
+        window._show_context_panel("language")
+
+        assert window._left.active_activity() == "inspect"
+        assert window._context.active_panel() == "language"
+        assert window._context._language_tab.isChecked()
+    finally:
         window.close()
         os.chdir(cwd)
         qapp.setFont(app_font)
@@ -435,6 +493,7 @@ def test_main_window_collapsed_workbench_sides_have_restore_tabs(
         window.show()
         qapp.processEvents()
         window._open_file(str(opened))
+        window._set_workbench_mode("review")
         total = sum(window._workbench.sizes())
 
         window._workbench.setSizes([0, total])
@@ -483,6 +542,36 @@ def test_main_window_close_canvas_opened_file_keeps_canvas(
         assert window._viewer.isHidden()
         assert window._left.active_activity() == "canvas"
         assert window._workbench_left.currentWidget() is window._agent_canvas
+    finally:
+        _settle_file_viewer_workers(qapp)
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
+def test_main_window_hides_canvas_activity_when_disabled(qapp, workspace):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    window = MainWindow(startup_workspace=str(workspace))
+    try:
+        window.show()
+        qapp.processEvents()
+        canvas_button = window._left._activity_buttons["canvas"]
+        window._left.show_canvas_activity()
+        assert window._left.active_activity() == "canvas"
+
+        window._settings.update({CANVAS_ENABLED_KEY: False})
+        window._apply_appearance({CANVAS_ENABLED_KEY})
+
+        assert canvas_button.isHidden()
+        assert window._left.active_activity() == "chats"
+
+        window._settings.update({CANVAS_ENABLED_KEY: True})
+        window._apply_appearance({CANVAS_ENABLED_KEY})
+
+        assert not canvas_button.isHidden()
     finally:
         _settle_file_viewer_workers(qapp)
         window.close()
@@ -672,37 +761,18 @@ def test_main_window_restores_zero_width_left_panel_as_activity_rail(qapp, works
         qapp.setStyleSheet(app_style)
 
 
-def test_main_window_workspace_rail_shows_dashboard(qapp, workspace):
+def test_main_window_has_no_home_navigation(qapp, workspace):
     cwd = os.getcwd()
     app_style = qapp.styleSheet()
     app_font = qapp.font()
     window = MainWindow(startup_workspace=str(workspace))
     try:
-        assert window._center_stack.currentWidget() is window._workbench
+        assert window._center_stack.currentWidget() is window._workbench_host
 
-        window._left._activity_buttons["workspace"].click()
-
-        assert window._left.active_activity() == "workspace"
-        assert window._left._activity_buttons["workspace"].text() == "Home"
-        assert window._left._activity_buttons["workspace"].toolTip() == "Home"
-        assert not window._left._activity_buttons["workspace"].icon().isNull()
-        assert window._left.is_activity_panel_collapsed()
-        assert window._center_stack.currentWidget() is window._workspace_dashboard
-        dashboard_style = window._workspace_dashboard.styleSheet()
-        assert "}}" not in dashboard_style
-        assert "QWidget {" not in dashboard_style
-        assert "QLabel { background:transparent; }" in dashboard_style
-        assert "QPushButton#workspaceOpenFolder" not in dashboard_style
-        assert window._is_context_collapsed()
-        assert window._context_shell.isHidden()
-        assert window._context_shell.maximumWidth() == 0
-
-        window._left._activity_buttons["files"].click()
-
-        assert window._center_stack.currentWidget() is window._workbench
-        assert window._left.active_activity() == "files"
-        assert not window._context_shell.isHidden()
-        assert window._context_shell.maximumWidth() == 30
+        assert "workspace" not in window._left._activity_buttons
+        assert not window._left.is_activity_panel_collapsed()
+        assert window._center_stack.currentWidget() is window._workbench_host
+        assert len(window._root_splitter.sizes()) == 2
     finally:
         window.close()
         os.chdir(cwd)
@@ -716,27 +786,21 @@ def test_workspace_dashboard_empty_html_uses_app_font_family():
     assert f"font-family:{FONT_FAMILY}" in html
 
 
-def test_main_window_workspace_restores_expanded_context_rail(qapp, workspace):
+def test_main_window_workspace_keeps_two_region_layout(qapp, workspace):
     cwd = os.getcwd()
     app_style = qapp.styleSheet()
     app_font = qapp.font()
     window = MainWindow(startup_workspace=str(workspace))
     try:
         window._expand_context()
-        expanded_width = window._root_splitter.sizes()[2]
+        assert window._left.active_activity() == "inspect"
 
-        window._left._activity_buttons["workspace"].click()
-
-        assert window._context_shell.isHidden()
-        assert window._root_splitter.sizes()[2] == 0
+        assert len(window._root_splitter.sizes()) == 2
 
         window._left._activity_buttons["chats"].click()
 
-        assert window._center_stack.currentWidget() is window._workbench
-        assert not window._context_shell.isHidden()
-        assert not window._is_context_collapsed()
-        assert window._context_shell.minimumWidth() >= 220
-        assert window._root_splitter.sizes()[2] >= min(220, expanded_width)
+        assert window._center_stack.currentWidget() is window._workbench_host
+        assert len(window._root_splitter.sizes()) == 2
     finally:
         window.close()
         os.chdir(cwd)
@@ -827,14 +891,11 @@ def test_main_window_recent_workspace_switch_retargets_panels(qapp, workspace, t
     register_workspace(other)
     window = MainWindow(startup_workspace=str(workspace))
     try:
-        window._left._activity_buttons["workspace"].click()
-        window._left._workspace_nav.refresh()
         target = next(
-            button for button in window._left._workspace_nav._buttons
-            if button.toolTip() == str(other.resolve())
+            row for row in window._left._workspace_rows()
+            if row["path"] == str(other.resolve())
         )
-
-        target.click()
+        window._left.workspace_switch_requested.emit(target["path"])
         qapp.processEvents()
 
         assert os.getcwd() == str(other.resolve())
@@ -843,7 +904,7 @@ def test_main_window_recent_workspace_switch_retargets_panels(qapp, workspace, t
         assert window._left._git.repo_path == str(other.resolve())
         assert window._chat.store.workspace == other.resolve()
         assert window._left._conv.store is window._chat.store
-        assert window._center_stack.currentWidget() is window._workspace_dashboard
+        assert window._center_stack.currentWidget() is window._workbench_host
     finally:
         window.close()
         os.chdir(cwd)
@@ -863,11 +924,10 @@ def test_main_window_workspace_open_folder_switches(qapp, workspace, tmp_path, m
     )
     window = MainWindow(startup_workspace=str(workspace))
     try:
-        window._left._activity_buttons["workspace"].click()
-        assert window._left._workspace_nav._add_btn.text() == ""
-        assert window._left._workspace_nav._add_btn.width() <= 24
+        assert window._left._workspace_btn.text() == ""
+        assert window._left._workspace_btn.width() <= 30
 
-        window._left._workspace_nav._add_btn.click()
+        window._left._open_workspace_from_switcher()
         qapp.processEvents()
 
         assert os.getcwd() == str(other.resolve())
@@ -880,50 +940,39 @@ def test_main_window_workspace_open_folder_switches(qapp, workspace, tmp_path, m
         qapp.setStyleSheet(app_style)
 
 
-def test_workspace_nav_keeps_current_workspace_first_and_selected(qapp, workspace, tmp_path):
+def test_workspace_switcher_keeps_current_workspace_first(qapp, workspace, tmp_path):
     missing = tmp_path / "missing"
     register_workspace(missing)
     register_workspace(workspace)
-    panel = _WorkspaceNavPanel(str(workspace))
+    window = MainWindow(startup_workspace=str(workspace))
     try:
-        panel.refresh()
+        rows = window._left._workspace_rows()
 
-        assert len(panel._buttons) == 1
-        current = panel._buttons[0]
-        assert current.toolTip() == f"Current workspace\n{str(workspace.resolve())}"
-        assert current.property("currentWorkspace") is True
-        assert current.isCheckable() is True
-        assert current.isChecked() is True
-        assert panel._empty_label is None
+        assert len(rows) == 1
+        assert rows[0] == {
+            "path": str(workspace.resolve()),
+            "name": workspace.name,
+            "current": True,
+        }
     finally:
-        panel.close()
+        window.close()
 
 
-def test_workspace_nav_switches_existing_recent_workspace(qapp, workspace, tmp_path):
+def test_workspace_switcher_includes_existing_recent_workspace(qapp, workspace, tmp_path):
     other = tmp_path / "old-work"
     other.mkdir()
     register_workspace(other)
-    panel = _WorkspaceNavPanel(str(workspace))
-    calls = []
+    window = MainWindow(startup_workspace=str(workspace))
     try:
-        panel.switch_requested.connect(calls.append)
-        panel.refresh()
-
-        current = panel._buttons[0]
-        assert current.property("currentWorkspace") is True
-        current.click()
-        assert current.isChecked() is True
-        assert calls == []
-
-        button = next(button for button in panel._buttons if button.toolTip() == str(other.resolve()))
-
-        assert panel._buttons.index(button) == 1
-        assert not button.icon().isNull()
-        button.click()
-
-        assert calls == [str(other.resolve())]
+        rows = window._left._workspace_rows()
+        assert rows[1] == {
+            "path": str(other.resolve()),
+            "name": other.name,
+            "current": False,
+        }
+        assert not window._left._workspace_btn.icon().isNull()
     finally:
-        panel.close()
+        window.close()
 
 def test_workspace_dashboard_apply_snapshot_is_timed(qapp, workspace, monkeypatch):
     import ui.widgets.workspace_dashboard as workspace_dashboard
@@ -1025,7 +1074,8 @@ def test_main_window_activity_shelf_tracks_tool_activity(qapp, workspace):
     window = MainWindow(startup_workspace=str(workspace))
     try:
         assert window._is_context_collapsed()
-        assert window._context._tool_activity.item(0).text() == "No run log for this chat"
+        assert window._context._tool_activity.count() == 0
+        assert window._context._empty_run_state.text().startswith("No activity for this chat yet.")
         assert window._context._copy_btn.isEnabled() is False
         assert window._context._copy_details_btn.isEnabled() is False
         assert window._context._clear_btn.isEnabled() is False
@@ -1066,7 +1116,8 @@ def test_main_window_activity_shelf_tracks_tool_activity(qapp, workspace):
 
         window._context.clear_activity()
 
-        assert window._context._tool_activity.item(0).text() == "No run log for this chat"
+        assert window._context._tool_activity.count() == 0
+        assert window._context._empty_run_state.text().startswith("No activity for this chat yet.")
         assert window._context._copy_btn.isEnabled() is False
         assert window._context._copy_details_btn.isEnabled() is False
         assert window._context._clear_btn.isEnabled() is True
@@ -1161,8 +1212,9 @@ def test_main_window_language_section_tracks_supported_active_file(qapp, workspa
         assert not window._is_context_collapsed()
         assert window._context._active_panel == "language"
         assert window._context._pages.currentIndex() == 1
-        assert window._context._title.text() == "Language"
-        assert window._context._tool_activity.item(0).text() == "No run log for this chat"
+        assert window._context._title.text() == "Inspect"
+        assert window._context._tool_activity.count() == 0
+        assert window._context._empty_run_state.text().startswith("No activity for this chat yet.")
         assert window._context._language_icon.text() == "Py"
         assert window._context._language_type.text() == "Python"
         assert window._context._language_file.text() == "src/main.py"
@@ -1224,7 +1276,7 @@ def test_main_window_language_section_tracks_supported_active_file(qapp, workspa
         assert not window._language_context_tab.isHidden()
         assert window._context._active_panel == "language"
         assert window._context._pages.currentIndex() == 1
-        assert window._context._title.text() == "Language"
+        assert window._context._title.text() == "Inspect"
         assert window._context._language_icon.text() == "--"
         assert window._context._language_type.text() == "No language"
         assert window._context._language_file.text() == "notes.txt"
@@ -1245,8 +1297,9 @@ def test_main_window_language_section_tracks_supported_active_file(qapp, workspa
 
         assert window._context._active_panel == "run_log"
         assert window._context._pages.currentIndex() == 0
-        assert window._context._title.text() == "Run Log"
-        assert window._context._tool_activity.item(0).text() == "No run log for this chat"
+        assert window._context._title.text() == "Inspect"
+        assert window._context._tool_activity.count() == 0
+        assert window._context._empty_run_state.text().startswith("No activity for this chat yet.")
     finally:
         _settle_file_viewer_workers(qapp)
         window.close()
@@ -1255,33 +1308,21 @@ def test_main_window_language_section_tracks_supported_active_file(qapp, workspa
         qapp.setStyleSheet(app_style)
 
 
-def test_main_window_context_panel_can_collapse_and_reopen(qapp, workspace):
+def test_main_window_inspect_panel_is_left_via_activity_navigation(qapp, workspace):
     cwd = os.getcwd()
     app_style = qapp.styleSheet()
     app_font = qapp.font()
     window = MainWindow(startup_workspace=str(workspace))
     try:
         assert window._is_context_collapsed()
-        assert window._context_shell.maximumWidth() == 30
-        assert window._root_splitter.sizes()[2] <= 36
-        assert window._context_tab.text() == ""
-        assert window._context_tab.toolTip() == "Show run log"
-        assert window._context_tab.accessibleName() == "Run Log"
-        assert not window._context_tab.icon().isNull()
-        assert window._language_context_tab.text() == ""
-        assert window._language_context_tab.accessibleName() == "Language"
-        assert not window._language_context_tab.icon().isNull()
 
         window._expand_context()
 
         assert not window._is_context_collapsed()
-        assert window._context_shell.minimumWidth() >= 220
-        assert window._root_splitter.sizes()[2] >= 200
-        assert window._context._collapse_btn.text() == ">"
-        assert window._context._collapse_btn.accessibleName() == "Collapse run log"
-        assert window._context._collapse_btn.toolTip() == "Collapse run log"
+        assert window._left.active_activity() == "inspect"
+        assert not hasattr(window._context, "_collapse_btn")
 
-        window._context._collapse_btn.click()
+        window._left.set_active_activity("chats")
 
         assert window._is_context_collapsed()
     finally:
@@ -1306,6 +1347,7 @@ def test_main_window_shows_markdown_preview_in_chat_slot(
         window.show()
         qapp.processEvents()
         window._open_file(str(path))
+        window._set_workbench_mode("review")
         _settle_file_viewer_workers(qapp)
         tab = window._viewer.active_text_tab()
         assert tab is not None

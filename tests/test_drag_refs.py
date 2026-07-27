@@ -588,6 +588,20 @@ def test_files_header_filter_replaces_path_label(qapp, workspace):
     assert values == ["main"]
 
 
+def test_files_header_plus_emits_new_action(qapp, workspace):
+    header = _FilesHeader(str(workspace), filter_enabled=True)
+    created = []
+    header.new_clicked.connect(lambda: created.append(True))
+
+    assert header._new.text() == ""
+    assert not header._new.icon().isNull()
+    assert header._new.toolTip() == "New file or folder"
+
+    header._new.click()
+
+    assert created == [True]
+
+
 def test_files_tree_uses_icons_for_folders_and_known_files(qapp, workspace):
     tree = FileTree(str(workspace))
     src = tree.topLevelItem(0)

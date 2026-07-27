@@ -26,9 +26,10 @@ from ui.theme import (
     chat_font_pt,
     compact_combo_box_style,
     contained_list_style,
+    context_empty_state_style,
     context_panel_title_button_style,
+    context_panel_title_style,
     hint_label_style,
-    icon_button_style,
     meta_font_pt,
     palette,
     section_label_style,
@@ -112,23 +113,23 @@ class WorkbenchContextPanel(QWidget):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(6)
+        self._title = QLabel("Inspect")
+        self._title.setObjectName("contextPanelTitle")
+        layout.addWidget(self._title)
 
-        self._title = QPushButton("Run Log")
-        self._title.setObjectName("contextPanelTitleButton")
-        self._title.setToolTip("Collapse run log")
-        self._title.clicked.connect(self.collapse_requested.emit)
-        header.addWidget(self._title, 1)
-
-        self._collapse_btn = QPushButton(">")
-        self._collapse_btn.setAccessibleName("Collapse run log")
-        self._collapse_btn.setToolTip("Collapse run log")
-        self._collapse_btn.setFixedSize(28, 28)
-        self._collapse_btn.clicked.connect(self.collapse_requested.emit)
-        header.addWidget(self._collapse_btn)
-        layout.addLayout(header)
+        tabs = QHBoxLayout()
+        tabs.setContentsMargins(0, 0, 0, 0)
+        tabs.setSpacing(6)
+        self._run_log_tab = QPushButton("Run Log")
+        self._run_log_tab.setCheckable(True)
+        self._run_log_tab.clicked.connect(lambda: self.set_active_panel("run_log"))
+        tabs.addWidget(self._run_log_tab)
+        self._language_tab = QPushButton("Language")
+        self._language_tab.setCheckable(True)
+        self._language_tab.clicked.connect(lambda: self.set_active_panel("language"))
+        tabs.addWidget(self._language_tab)
+        tabs.addStretch(1)
+        layout.addLayout(tabs)
 
         self._pages = QStackedWidget()
         layout.addWidget(self._pages, 1)
@@ -137,6 +138,7 @@ class WorkbenchContextPanel(QWidget):
         run_layout = QVBoxLayout(self._run_log_widget)
         run_layout.setContentsMargins(0, 0, 0, 0)
         run_layout.setSpacing(10)
+        run_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         scope_row = QHBoxLayout()
         scope_row.setContentsMargins(0, 0, 0, 0)
@@ -150,6 +152,14 @@ class WorkbenchContextPanel(QWidget):
         self._scope_combo.currentIndexChanged.connect(self._on_scope_changed)
         scope_row.addWidget(self._scope_combo, 0)
         run_layout.addLayout(scope_row)
+
+        self._empty_run_state = QLabel()
+        self._empty_run_state.setObjectName("contextRunEmptyState")
+        self._empty_run_state.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        self._empty_run_state.setWordWrap(True)
+        run_layout.addWidget(self._empty_run_state)
 
         self._tool_activity = QListWidget()
         self._tool_activity.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -324,11 +334,8 @@ class WorkbenchContextPanel(QWidget):
         self._active_panel = panel if panel in {"run_log", "language"} else "run_log"
         is_language = self._active_panel == "language"
         self._pages.setCurrentIndex(1 if is_language else 0)
-        title = "Language" if is_language else "Run Log"
-        self._title.setText(title)
-        self._title.setToolTip(f"Collapse {title.lower()}")
-        self._collapse_btn.setAccessibleName(f"Collapse {title.lower()}")
-        self._collapse_btn.setToolTip(f"Collapse {title.lower()}")
+        self._run_log_tab.setChecked(not is_language)
+        self._language_tab.setChecked(is_language)
 
     def _start_language_status_refresh(self, generation: int, context: dict):
         self._language_status_inflight_key = _language_context_key(context)
@@ -531,7 +538,13 @@ class WorkbenchContextPanel(QWidget):
         self._sync_empty_state()
 
     def _sync_empty_state(self):
-        if self._tool_activity.count():
+        has_entries = bool(self._tool_activity.count())
+        self._tool_activity.setVisible(has_entries)
+        self._empty_run_state.setVisible(not has_entries)
+        self._copy_btn.setVisible(has_entries)
+        self._copy_details_btn.setVisible(has_entries)
+        self._clear_btn.setVisible(has_entries)
+        if has_entries:
             self._copy_btn.setEnabled(True)
             self._copy_details_btn.setEnabled(True)
             self._clear_btn.setEnabled(True)
@@ -539,10 +552,13 @@ class WorkbenchContextPanel(QWidget):
                 "Clear this chat log" if self._scope == "chat" else "Clear workspace run log"
             )
             return
-        text = "No run log for this chat" if self._scope == "chat" else "No run log yet"
-        item = QListWidgetItem(text)
-        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-        self._tool_activity.addItem(item)
+        text = (
+            "No activity for this chat yet.\n"
+            "Tool calls and run details will appear here."
+            if self._scope == "chat"
+            else "No workspace activity yet.\nTool calls and run details will appear here."
+        )
+        self._empty_run_state.setText(text)
         self._copy_btn.setEnabled(False)
         self._copy_details_btn.setEnabled(False)
         self._clear_btn.setEnabled(bool(self._tool_items))
@@ -606,7 +622,6 @@ class WorkbenchContextPanel(QWidget):
         list_style = contained_list_style(item_padding="4px 6px", item_margin="0px")
         self._tool_activity.setStyleSheet(list_style)
         self._language_diagnostics.setStyleSheet(list_style)
-        self._collapse_btn.setStyleSheet(icon_button_style(28))
         action_style = secondary_button_style(
             padding="5px 8px",
             font_size=meta_font_pt(),
@@ -646,7 +661,8 @@ class WorkbenchContextPanel(QWidget):
             f"font-size:{meta_font_pt()}px; font-weight:700;"
         )
         self._language_summary.setStyleSheet(hint_label_style(padding="0 0 2px 0"))
-        self._title.setStyleSheet(context_panel_title_button_style())
+        self._title.setStyleSheet(context_panel_title_style())
+        self._empty_run_state.setStyleSheet(context_empty_state_style())
         for label in self.findChildren(QLabel, "contextPanelSection"):
             label.setStyleSheet(
                 section_label_style(

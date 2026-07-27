@@ -402,7 +402,7 @@ class GitPanel(QWidget):
 
         mode_bar = QWidget()
         mode_layout = QHBoxLayout(mode_bar)
-        mode_layout.setContentsMargins(10, 8, 10, 4)
+        mode_layout.setContentsMargins(10, 6, 10, 2)
         mode_layout.setSpacing(6)
         self._mode_group = QButtonGroup(self)
         self._mode_group.setExclusive(True)
@@ -414,7 +414,8 @@ class GitPanel(QWidget):
             btn.clicked.connect(lambda checked, mode=key: self._select_mode(mode, manual=True))
             self._mode_group.addButton(btn)
             self._mode_buttons[key] = btn
-            mode_layout.addWidget(btn, 1)
+            mode_layout.addWidget(btn)
+        mode_layout.addStretch(1)
         root.addWidget(mode_bar)
 
         self._git_action_status = QLabel()

@@ -68,19 +68,36 @@ def test_git_changes_list_populates_staged_and_unstaged(qapp, git_repo):
     assert widget._unstaged_label.text() == "Unstaged (2)"
 
 
-def test_git_changes_list_commit_controls_are_first_and_only_button(qapp, workspace):
+def test_git_changes_list_uses_an_on_demand_commit_composer(qapp, workspace):
     widget = GitChangesList(str(workspace))
     margins = widget.layout().contentsMargins()
 
-    assert widget.layout().itemAt(0).layout() is not None
-    assert widget.message is widget.layout().itemAt(0).layout().itemAt(0).widget()
     assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (6, 0, 6, 0)
+    assert widget.layout().itemAt(0).widget() is widget._lists_splitter
+    assert widget.layout().itemAt(1).widget() is widget._commit_trigger
+    assert widget.layout().itemAt(2).widget() is widget._commit_composer
     assert widget.message.placeholderText() == "Commit message"
-    assert widget.layout().itemAt(1).layout() is not None
-    assert widget.layout().itemAt(2).widget() is widget._lists_splitter
     assert widget._staged_label.text() == "Staged"
     assert widget._unstaged_label.text() == "Unstaged"
+    assert not widget._staged_wrap.isHidden()
+    assert widget._commit_composer.isHidden()
+    assert not widget._commit_trigger.isEnabled()
     assert widget._commit_btn.text() == "Commit"
+
+
+def test_git_changes_list_reveals_staged_and_commit_composer_when_ready(qapp, workspace):
+    widget = GitChangesList(str(workspace))
+    widget._staged_count = 1
+    widget._sync_staged_visibility()
+    widget._update_action_state()
+
+    assert not widget._staged_wrap.isHidden()
+    assert widget._commit_trigger.isEnabled()
+
+    widget._show_commit_composer()
+
+    assert widget._commit_trigger.isHidden()
+    assert not widget._commit_composer.isHidden()
 
 
 def test_git_changes_list_commit_requires_staged_files_and_summary(qapp, workspace):
@@ -108,6 +125,63 @@ def test_git_changes_list_commit_splits_first_line_and_body(qapp, workspace, mon
     widget._commit()
 
     assert captured == [("subject line", "more detail")]
+
+
+def test_git_changes_list_commit_stages_all_when_nothing_is_staged(qapp, workspace, monkeypatch):
+    widget = GitChangesList(str(workspace))
+    widget._unstaged_count = 1
+    widget._add_change(
+        widget.unstaged_list,
+        GitFileChange(" M", "M", "src/main.py", str(workspace / "src" / "main.py")),
+        "M",
+    )
+    widget.message.setPlainText("commit all changes")
+    assert widget._commit_trigger.isEnabled()
+    assert widget._commit_btn.isEnabled()
+    captured = []
+
+    monkeypatch.setattr(
+        "ui.widgets.git_changes_list.stage_files",
+        lambda repo_path, paths: captured.append(("stage", repo_path, paths))
+        or GitCommandResult(0, "", ""),
+    )
+    monkeypatch.setattr(
+        "ui.widgets.git_changes_list.commit_staged",
+        lambda repo_path, summary, body: captured.append(("commit", summary, body))
+        or GitCommandResult(0, "", ""),
+    )
+    monkeypatch.setattr(widget, "_run_change_action", lambda *args, **kwargs: None)
+
+    widget._commit()
+
+    assert captured == [
+        ("stage", str(workspace), ["src/main.py"]),
+        ("commit", "commit all changes", ""),
+    ]
+
+
+def test_git_changes_list_context_action_stages_or_unstages_selected(qapp, workspace, monkeypatch):
+    widget = GitChangesList(str(workspace))
+    calls = []
+    for changes_list, staged in ((widget.unstaged_list, False), (widget.staged_list, True)):
+        widget._add_change(
+            changes_list,
+            GitFileChange(" M", "M", "src/main.py", str(workspace / "src" / "main.py")),
+            "M",
+        )
+        changes_list.item(0).setSelected(True)
+        monkeypatch.setattr(
+            "ui.widgets.git_changes_list.stage_files" if not staged else "ui.widgets.git_changes_list.unstage_files",
+            lambda repo_path, paths, s=staged: calls.append((s, repo_path, paths))
+            or GitCommandResult(0, "", ""),
+        )
+        widget._stage_or_unstage_selected(changes_list)
+        changes_list.clear()
+
+    assert calls == [
+        (False, str(workspace), ["src/main.py"]),
+        (True, str(workspace), ["src/main.py"]),
+    ]
 
 
 def test_git_changes_list_generate_action_tracks_staged_files(qapp, workspace, monkeypatch):

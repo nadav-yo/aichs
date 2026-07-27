@@ -8,6 +8,7 @@ from storage.settings import (
     ARCHIVIST_PROMPT_KEY,
     AUTO_TITLE_PROMPT_INSTRUCTIONS_KEY,
     CANVAS_ACTION_AUTO_APPROVE_KEY,
+    CANVAS_ENABLED_KEY,
     CANVAS_PARALLEL_LIMIT_KEY,
     CANVAS_RUN_MODE_KEY,
     COMPACT_RESUME_PROMPT_KEY,
@@ -537,6 +538,7 @@ def test_basic_settings_are_saved_and_reloaded(qapp):
     assert dialog.trash_retention_spin.value() == 14
     assert dialog._nav.item(2).text() == "Canvas"
     assert dialog._nav.item(3).text() == "Prompts"
+    assert dialog.canvas_enabled_check.isChecked() is True
     assert dialog.canvas_generation_strategy_combo.currentData() == "parallelism"
     assert dialog.canvas_run_mode_combo.currentData() == "sequential"
     assert dialog.canvas_parallel_limit_spin.value() == 2
@@ -555,6 +557,7 @@ def test_basic_settings_are_saved_and_reloaded(qapp):
     dialog.file_editor_auto_save_check.setChecked(True)
     dialog.file_editor_tab_spaces_spin.setValue(2)
     dialog.trash_retention_spin.setValue(30)
+    dialog.canvas_enabled_check.setChecked(False)
     dialog.canvas_generation_strategy_combo.setCurrentIndex(dialog.canvas_generation_strategy_combo.findData("atomicity"))
     dialog.canvas_run_mode_combo.setCurrentIndex(dialog.canvas_run_mode_combo.findData("parallel"))
     dialog.canvas_parallel_limit_spin.setValue(4)
@@ -575,6 +578,7 @@ def test_basic_settings_are_saved_and_reloaded(qapp):
     assert saved[FILE_EDITOR_AUTO_SAVE_KEY] is True
     assert saved[FILE_EDITOR_TAB_SPACES_KEY] == 2
     assert saved[TRASH_RETENTION_DAYS_KEY] == 30
+    assert saved[CANVAS_ENABLED_KEY] is False
     assert saved[GRAPH_GENERATION_STRATEGY_KEY] == "atomicity"
     assert saved[CANVAS_RUN_MODE_KEY] == "parallel"
     assert saved[CANVAS_PARALLEL_LIMIT_KEY] == 4
@@ -597,6 +601,7 @@ def test_basic_settings_are_saved_and_reloaded(qapp):
     assert reloaded.file_editor_auto_save_check.isChecked() is True
     assert reloaded.file_editor_tab_spaces_spin.value() == 2
     assert reloaded.trash_retention_spin.value() == 30
+    assert reloaded.canvas_enabled_check.isChecked() is False
     assert reloaded.canvas_generation_strategy_combo.currentData() == "atomicity"
     assert reloaded.canvas_run_mode_combo.currentData() == "parallel"
     assert reloaded.canvas_parallel_limit_spin.value() == 4

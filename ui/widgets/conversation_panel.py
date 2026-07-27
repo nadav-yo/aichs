@@ -17,7 +17,8 @@ from services.relative_time import format_relative_ago
 from ui.theme import (
     palette, chat_font_pt, app_font, hint_label_style,
     conversation_caption_pt, conversation_title_pt,
-    new_chat_button_style, search_field_style, conversation_list_style,
+    sidebar_toolbar_add_button_style, sidebar_toolbar_field_style,
+    sidebar_toolbar_add_icon, sidebar_toolbar_style, conversation_list_style,
     conversation_row_title_style, conversation_row_inline_edit_style,
     conversation_row_icon_label_style, conversation_row_restore_button_style,
     conversation_trash_header_style, title_label_style,
@@ -493,15 +494,29 @@ class ConversationPanel(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self._new_btn = QPushButton("+  New Chat")
-        self._new_btn.clicked.connect(self.new_chat)
-        root.addWidget(self._new_btn)
+        self._toolbar = QWidget()
+        self._toolbar.setObjectName("sidebarToolbar")
+        toolbar_layout = QHBoxLayout(self._toolbar)
+        toolbar_layout.setContentsMargins(14, 8, 14, 7)
+        toolbar_layout.setSpacing(8)
 
         self.search = QLineEdit()
+        self.search.setObjectName("conversationSearch")
         self.search.setPlaceholderText("Search conversations…")
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._apply_filter)
-        root.addWidget(self.search)
+        toolbar_layout.addWidget(self.search, 1)
+
+        self._new_btn = QPushButton()
+        self._new_btn.setObjectName("sidebarToolbarAdd")
+        self._new_btn.setToolTip("New chat")
+        self._new_btn.setAccessibleName("New chat")
+        self._new_btn.setFixedSize(22, 22)
+        self._new_btn.setIcon(sidebar_toolbar_add_icon())
+        self._new_btn.setIconSize(QSize(22, 22))
+        self._new_btn.clicked.connect(self.new_chat)
+        toolbar_layout.addWidget(self._new_btn)
+        root.addWidget(self._toolbar)
 
         self.no_results = QLabel("No results")
         self.no_results.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -520,8 +535,10 @@ class ConversationPanel(QWidget):
     def _apply_styles(self):
         p = palette()
         fs = chat_font_pt()
-        self._new_btn.setStyleSheet(new_chat_button_style())
-        self.search.setStyleSheet(search_field_style())
+        self._toolbar.setStyleSheet(sidebar_toolbar_style())
+        self._new_btn.setStyleSheet(sidebar_toolbar_add_button_style())
+        self._new_btn.setIcon(sidebar_toolbar_add_icon())
+        self.search.setStyleSheet(sidebar_toolbar_field_style(selector="QLineEdit#conversationSearch"))
         self.no_results.setStyleSheet(
             hint_label_style(font_pt=fs, padding="24px", background=p["BG2"])
         )

@@ -5132,8 +5132,15 @@ def test_main_window_canvas_rail_keeps_file_editor_on_right(
 
         assert window._left.active_activity() == "canvas"
         assert window._workbench_left.currentWidget() is window._agent_canvas
-        assert window._center_stack.currentWidget() is window._workbench
-        assert window._context_shell.isHidden()
+        assert window._center_stack.currentWidget() is window._workbench_host
+        assert len(window._root_splitter.sizes()) == 2
+
+        window._left._activity_buttons["canvas"].click()
+        assert window._left.active_activity() == "chats"
+        assert window._workbench_left.currentWidget() is window._chat
+
+        window._left._activity_buttons["canvas"].click()
+        assert window._left.active_activity() == "canvas"
 
         window._agent_canvas.open_file_requested.emit(str(opened))
         _settle_file_viewer_workers(qapp)
@@ -5167,7 +5174,7 @@ def test_main_window_restore_canvas_activity_shows_canvas(
         window._restore_layout({"active_activity": "canvas", "activity_collapsed": True})
 
         assert window._left.active_activity() == "canvas"
-        assert window._center_stack.currentWidget() is window._workbench
+        assert window._center_stack.currentWidget() is window._workbench_host
         assert window._workbench_left.currentWidget() is window._agent_canvas
     finally:
         _settle_file_viewer_workers(qapp)

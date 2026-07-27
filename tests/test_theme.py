@@ -580,10 +580,55 @@ def test_file_tab_style_defines_closable_editor_tab_contract():
 
     assert "QTabWidget#fileViewerTabs" in style
     assert "QTabWidget#fileViewerTabs QTabBar::tab" in style
-    assert "padding:2px 10px" in style
+    assert "padding:7px 12px" in style
     assert "min-width:88px" in style
     assert "max-width:220px" in style
+    assert "border-bottom-color" in style
     assert "QTabWidget#fileViewerTabs QTabBar::close-button" in style
+
+
+def test_activity_tabs_use_an_understated_selection_marker():
+    active = theme_module.activity_tab_style(active=True)
+    inactive = theme_module.activity_tab_style()
+
+    assert f"border-bottom:2px solid {theme_module.ACCENT}" in active
+    assert "background:transparent" in active
+    assert theme_module.palette()["SELECTION"] not in active
+    assert "border-radius:0" in active
+    assert "border-bottom:2px solid transparent" in inactive
+
+
+def test_sidebar_add_button_is_a_compact_outline_control():
+    style = theme_module.sidebar_toolbar_add_button_style()
+
+    assert "border-radius:11px" in style
+    assert "border:0" in style
+    assert "background:transparent" in style
+
+    icon = theme_module.sidebar_toolbar_add_icon()
+    assert not icon.isNull()
+    from PyQt6.QtGui import QIcon
+
+    assert icon.availableSizes(QIcon.Mode.Active)
+
+
+def test_context_empty_state_uses_a_compact_theme_style():
+    title = theme_module.context_panel_title_style()
+    empty = theme_module.context_empty_state_style()
+
+    assert "QLabel#contextPanelTitle" in title
+    assert "font-weight:700" in title
+    assert "QLabel#contextRunEmptyState" in empty
+    assert "background:transparent" in empty
+
+
+def test_activity_surface_separator_starts_below_the_tab_strip():
+    _rail, stack = theme_module.activity_sidebar_surface_style()
+    sheet = build_stylesheet("dark")
+
+    assert "QStackedWidget#activityStack" in stack
+    assert "border-right:1px solid" in stack
+    assert "QSplitter#activityRootSplitter::handle { background:transparent; }" in sheet
 
 
 def test_navigation_list_style_defines_vertical_section_nav_contract():
