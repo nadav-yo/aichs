@@ -47,7 +47,9 @@ from ui.theme import (
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _REFERENCE_RE = re.compile(r'(?<!\S)@(?:"[^"]+"|[^\s@]*[^\s@.,:;!?)\]}])')
-_TERMINAL_REFERENCE_RE = re.compile(r"(?<!\S)#term\[\d+\s*:\s*\d+\]")
+_TERMINAL_REFERENCE_RE = re.compile(
+    r"(?<!\S)#term\[[A-Za-z0-9][A-Za-z0-9_-]*:\d+\s*:\s*\d+\]"
+)
 _INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 _INPUT_MIN_HEIGHT = 46
 _INPUT_MAX_LINES = 8

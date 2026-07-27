@@ -21,6 +21,7 @@ native_binaries = []
 for relative in (
     Path("ripgrep") / ("windows" if sys.platform == "win32" else "macos" if sys.platform == "darwin" else "linux") / ("rg.exe" if sys.platform == "win32" else "rg"),
     Path("aichs-indexer") / ("windows" if sys.platform == "win32" else "macos" if sys.platform == "darwin" else "linux") / ("aichs-indexer.exe" if sys.platform == "win32" else "aichs-indexer"),
+    Path("aichs-terminal") / ("windows" if sys.platform == "win32" else "macos" if sys.platform == "darwin" else "linux") / ("aichs-terminal.exe" if sys.platform == "win32" else "aichs-terminal"),
 ):
     source = VENDOR / relative
     if source.is_file():

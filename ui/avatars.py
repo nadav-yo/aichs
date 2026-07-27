@@ -13,6 +13,7 @@ from storage.settings import SettingsStore
 AVATAR_SIZE = 28
 _ASSETS = Path(__file__).resolve().parents[1] / "assets" / "avatars"
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
+_MIN_RASTER_IMAGE_BYTES = 67  # Smallest valid PNG is 67 bytes.
 _cache: dict[str, QPixmap] = {}
 
 
@@ -38,6 +39,8 @@ def persist_portrait(source: str, role: str) -> str:
         return role
     AVATARS_DIR.mkdir(parents=True, exist_ok=True)
     dest = AVATARS_DIR / f"{role}{src.suffix.lower()}"
+    if dest.exists() and src.samefile(dest):
+        return str(dest)
     shutil.copy2(src, dest)
     return str(dest)
 
@@ -62,17 +65,27 @@ def avatar_pixmap(source: str, size: int = AVATAR_SIZE, accent_color: str = "") 
         painter.setBrush(QColor(accent))
         painter.drawEllipse(0, 0, size, size)
 
+    rendered_custom = False
     if path.is_file():
         if path.suffix.lower() == ".svg":
-            QSvgRenderer(str(path)).render(painter)
-        else:
-            pix = QPixmap(str(path)).scaled(
-                size, size,
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            painter.drawPixmap(0, 0, pix)
-    else:
+            renderer = QSvgRenderer(str(path))
+            if renderer.isValid():
+                renderer.render(painter)
+                rendered_custom = True
+        elif path.stat().st_size >= _MIN_RASTER_IMAGE_BYTES:
+            pix = QPixmap(str(path))
+            if not pix.isNull():
+                painter.drawPixmap(
+                    0,
+                    0,
+                    pix.scaled(
+                        size, size,
+                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                        Qt.TransformationMode.SmoothTransformation,
+                    ),
+                )
+                rendered_custom = True
+    if not rendered_custom:
         svg = _ASSETS / f"{source}.svg"
         if not svg.exists():
             svg = _ASSETS / "human.svg"

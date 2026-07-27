@@ -6,9 +6,9 @@ import sys
 from pathlib import Path
 
 try:
-    from tools.native_search_tools import stage_native_search_tools
+    from tools.native_search_tools import stage_native_search_tools, stage_native_terminal
 except ModuleNotFoundError:  # Direct ``python tools/build_package.py`` execution.
-    from native_search_tools import stage_native_search_tools
+    from native_search_tools import stage_native_search_tools, stage_native_terminal
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "assets"
@@ -57,12 +57,16 @@ def _prepare_native_search_tools() -> None:
 
     platform = _platform_name()
     rg_src, indexer_src = stage_native_search_tools(ROOT / "aichs_native" / "bin")
+    terminal_src = stage_native_terminal(ROOT / "aichs_native" / "bin")
     rg_dest = VENDOR_DIR / "ripgrep" / platform / rg_src.name
     indexer_dest = VENDOR_DIR / "aichs-indexer" / platform / indexer_src.name
+    terminal_dest = VENDOR_DIR / "aichs-terminal" / platform / terminal_src.name
     rg_dest.parent.mkdir(parents=True, exist_ok=True)
     indexer_dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(rg_src, rg_dest)
     shutil.copy2(indexer_src, indexer_dest)
+    terminal_dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(terminal_src, terminal_dest)
 
 
 def _platform_name() -> str:

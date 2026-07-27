@@ -116,3 +116,4 @@ def test_user_terminal_thread_run_emits_summary(monkeypatch, qapp):
     assert thread._cancel.is_set()
     assert lines == ["ok"]
     assert done[0]["summary"].startswith("Terminal")
+    assert done[0]["terminal_id"] == thread.terminal_id

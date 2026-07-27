@@ -15,6 +15,7 @@ from services.file_editor_refs import AICHS_EDITOR_REF_MIME, editor_ref_payload
 from services.terminal_refs import TERMINAL_REF_MIME
 from ui.widgets.message_input import (
     ComposerWidget,
+    _TERMINAL_REFERENCE_RE,
     _images_from_mime,
     _slash_has_args,
     _with_visible_file_mentions,
@@ -141,11 +142,15 @@ def test_paste_terminal_ref_prefers_hidden_reference(qapp):
     composer = ComposerWidget()
     mime = QMimeData()
     mime.setText("d----          27/05/2026    23:59                .aichs")
-    mime.setData(TERMINAL_REF_MIME, b"#term[27:27]")
+    mime.setData(TERMINAL_REF_MIME, b"#term[abc123:27:27]")
 
     composer.input.insertFromMimeData(mime)
 
-    assert composer.input.toPlainText() == "#term[27:27] "
+    assert composer.input.toPlainText() == "#term[abc123:27:27] "
+
+
+def test_terminal_reference_highlighter_accepts_tab_specific_refs():
+    assert _TERMINAL_REFERENCE_RE.fullmatch("#term[a1b2c3d4:2:5]")
 
 
 def test_paste_aichs_message_adds_visible_file_mention_and_records_refs(qapp):
@@ -162,26 +167,15 @@ def test_paste_aichs_message_adds_visible_file_mention_and_records_refs(qapp):
     assert composer.take_pasted_file_refs() == []
 
 
-def test_paste_legacy_bang_terminal_ref_normalizes_visible_text(qapp):
-    composer = ComposerWidget()
-    mime = QMimeData()
-    mime.setText("alpha")
-    mime.setData(TERMINAL_REF_MIME, b"!term[7:8]")
-
-    composer.input.insertFromMimeData(mime)
-
-    assert composer.input.toPlainText() == "#term[7:8] "
-
-
 def test_drop_terminal_ref_inserts_hidden_reference(qapp):
     composer = ComposerWidget()
     mime = QMimeData()
     mime.setText("alpha")
-    mime.setData(TERMINAL_REF_MIME, b"#term[1:1]")
+    mime.setData(TERMINAL_REF_MIME, b"#term[abc123:1:1]")
 
     composer.input.dropEvent(_drop_event(mime))
 
-    assert composer.input.toPlainText() == "#term[1:1] "
+    assert composer.input.toPlainText() == "#term[abc123:1:1] "
 
 
 def test_drop_plain_text_without_custom_mime_is_ignored(qapp):

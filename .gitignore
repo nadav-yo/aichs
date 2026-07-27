@@ -18,7 +18,7 @@ build/
 *.egg-info/
 
 # Rust build output
-rust/aichs-indexer/target/
+rust/*/target/
 tools/vendor/
 aichs_native/bin/*
 !aichs_native/bin/.gitkeep

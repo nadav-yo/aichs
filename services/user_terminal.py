@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
+import uuid
 from typing import Callable
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -24,6 +25,7 @@ class UserTerminalThread(QThread):
         super().__init__(parent)
         self.command = command
         self.cwd = cwd
+        self.terminal_id = uuid.uuid4().hex[:8]
         self._cancel = threading.Event()
 
     def cancel(self) -> None:
@@ -36,6 +38,7 @@ class UserTerminalThread(QThread):
             on_line=self.line.emit,
             cancel=self._cancel,
         )
+        result.setdefault("terminal_id", self.terminal_id)
         result["summary"] = build_terminal_summary(result)
         self.done.emit(result)
 

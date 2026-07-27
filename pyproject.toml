@@ -66,6 +66,8 @@ aichs_native = [
   "bin/rg.exe",
   "bin/aichs-indexer",
   "bin/aichs-indexer.exe",
+  "bin/aichs-terminal",
+  "bin/aichs-terminal.exe",
 ]
 assets = [
   "*.png",

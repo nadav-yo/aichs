@@ -5,7 +5,7 @@ from PyQt6.QtGui import QAction, QDrag, QGuiApplication, QKeySequence, QTextCurs
 from config import MAX_TERMINAL_BLOCKS
 
 MAX_TERMINAL_CARD_PREVIEW_CHARS = 256 * 1024
-from services.terminal_refs import TERMINAL_REF_MIME, terminal_ref
+from services.terminal_refs import TERMINAL_REF_MIME, terminal_ref, terminal_ref_id
 from ui.theme import (
     palette,
     card_frame_style,
@@ -129,12 +129,11 @@ class _TerminalOutput(QTextEdit):
         return text.replace("\u2029", "\n").strip()
 
     def _copied_ref(self, cursor: QTextCursor) -> str:
-        if not self._ref_getter():
-            return ""
-        if cursor.hasSelection() and not _selection_covers_full_lines(self.toPlainText(), cursor):
+        source_ref = str(self._ref_getter() or "")
+        if not source_ref:
             return ""
         start, end = _cursor_line_range(self.toPlainText(), cursor)
-        return terminal_ref(start, end)
+        return terminal_ref(start, end, terminal_ref_id(source_ref))
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -453,17 +452,3 @@ def _cursor_line_range(text: str, cursor: QTextCursor) -> tuple[int, int]:
     start_line = max(1, min(start_line, line_count))
     end_line = max(start_line, min(end_line, line_count))
     return start_line, end_line
-
-
-def _selection_covers_full_lines(text: str, cursor: QTextCursor) -> bool:
-    start = min(cursor.selectionStart(), cursor.selectionEnd())
-    end = max(cursor.selectionStart(), cursor.selectionEnd())
-    if start == end:
-        return False
-    starts_on_line_boundary = start == 0 or text[start - 1] == "\n"
-    ends_on_line_boundary = (
-        end >= len(text)
-        or text[end] == "\n"
-        or text[end - 1] == "\n"
-    )
-    return starts_on_line_boundary and ends_on_line_boundary

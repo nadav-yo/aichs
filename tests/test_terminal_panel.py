@@ -1,11 +1,11 @@
 import sys
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtCore import QMimeData, QUrl, Qt
+from PyQt6.QtGui import QGuiApplication, QKeyEvent, QTextCursor
 
-from services.terminal_refs import TERMINAL_REF_MIME
 import ui.widgets.terminal_panel as terminal_panel
-from ui.widgets.terminal_panel import IntegratedTerminalPanel, TerminalTextEdit
+from services.terminal_refs import TERMINAL_REF_MIME
+from ui.widgets.terminal_panel import IntegratedTerminalPanel, TerminalTextEdit, _terminal_input_from_mime
 
 
 def _press(widget, key, text="", modifiers=Qt.KeyboardModifier.NoModifier):
@@ -27,6 +27,75 @@ def test_terminal_text_edit_maps_basic_keys(qapp):
     assert sent == ["a", "\r\n", expected_backspace, "\x1b[A"]
 
 
+def test_terminal_text_edit_keeps_tab_for_shell_completion(qapp):
+    edit = TerminalTextEdit()
+    sent = []
+    edit.input_requested.connect(sent.append)
+
+    assert not edit.focusNextPrevChild(True)
+    _press(edit, Qt.Key.Key_Tab, "\t")
+
+    assert sent == ["\t"]
+
+
+def test_terminal_text_edit_renders_ansi_foreground_colors(qapp):
+    edit = TerminalTextEdit()
+
+    edit.append_output("\x1b[31mred\x1b[0m plain")
+
+    assert edit.toPlainText() == "red plain"
+    cursor = QTextCursor(edit.document())
+    cursor.setPosition(1)
+    assert cursor.charFormat().foreground().color().name() == "#e06c75"
+    cursor.setPosition(5)
+    assert cursor.charFormat().foreground().color().name() != "#e06c75"
+
+
+def test_terminal_text_edit_keeps_split_ansi_sequences(qapp):
+    edit = TerminalTextEdit()
+
+    edit.append_output("\x1b[3")
+    edit.append_output("2mgreen")
+
+    assert edit.toPlainText() == "green"
+    cursor = QTextCursor(edit.document())
+    cursor.setPosition(1)
+    assert cursor.charFormat().foreground().color().name() == "#98c379"
+
+
+def test_terminal_text_edit_renders_native_terminal_frame(qapp):
+    edit = TerminalTextEdit()
+    edit.render_frame({
+        "columns": 3,
+        "lines": 2,
+        "text": "RG \nok ",
+        "cursor_row": 1,
+        "cursor_column": 2,
+        "spans": [
+            {"start": 0, "length": 1, "foreground": {"kind": "named", "value": 1}, "background": {"kind": "named", "value": 257}, "flags": 2},
+            {"start": 1, "length": 1, "foreground": {"kind": "rgb", "value": [10, 200, 30]}, "background": {"kind": "named", "value": 257}, "flags": 0},
+        ],
+    })
+
+    assert edit.toPlainText() == "RG \nok "
+    cursor = QTextCursor(edit.document())
+    cursor.setPosition(0)
+    assert cursor.charFormat().foreground().color().name() == "#e06c75"
+    assert cursor.charFormat().fontWeight() == 700
+    cursor.setPosition(2)
+    assert cursor.charFormat().foreground().color().name() == "#0ac81e"
+
+
+def test_terminal_text_edit_coalesces_native_frames(qapp):
+    edit = TerminalTextEdit()
+    edit.queue_frame({"columns": 1, "lines": 1, "text": "a", "spans": [], "cursor_row": 0, "cursor_column": 0})
+    edit.queue_frame({"columns": 1, "lines": 1, "text": "b", "spans": [], "cursor_row": 0, "cursor_column": 0})
+
+    edit._flush_frame()
+
+    assert edit.toPlainText() == "b"
+
+
 def test_terminal_text_edit_ctrl_c_sends_interrupt_without_selection(qapp):
     edit = TerminalTextEdit()
     sent = []
@@ -37,8 +106,29 @@ def test_terminal_text_edit_ctrl_c_sends_interrupt_without_selection(qapp):
     assert sent == ["\x03"]
 
 
-def test_terminal_text_edit_copy_adds_hidden_reference_for_full_line_selection(qapp):
+def test_terminal_text_edit_pastes_clipboard_text_to_terminal(qapp):
     edit = TerminalTextEdit()
+    sent = []
+    edit.input_requested.connect(sent.append)
+    mime = QMimeData()
+    mime.setText("echo pasted")
+    QGuiApplication.clipboard().setMimeData(mime)
+
+    _press(edit, Qt.Key.Key_V, "v", Qt.KeyboardModifier.ControlModifier)
+
+    assert sent == ["echo pasted"]
+
+
+def test_terminal_input_mime_accepts_and_quotes_dropped_files(qapp):
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile("C:/my folder/file.txt")])
+
+    assert _terminal_input_from_mime(mime) == '"C:/my folder/file.txt"'
+
+
+def test_terminal_text_edit_copy_keeps_plain_text_and_composer_reference(qapp):
+    edit = TerminalTextEdit()
+    edit.set_terminal_id("a1b2c3d4")
     edit.append_output("alpha\nbeta")
     cursor = edit.textCursor()
     cursor.setPosition(6)
@@ -48,11 +138,12 @@ def test_terminal_text_edit_copy_adds_hidden_reference_for_full_line_selection(q
     mime = edit.copy_mime()
 
     assert mime.text() == "beta"
-    assert bytes(mime.data(TERMINAL_REF_MIME)).decode("utf-8") == "#term[2:2]"
+    assert bytes(mime.data(TERMINAL_REF_MIME)).decode("utf-8") == "#term[a1b2c3d4:2:2]"
 
 
-def test_terminal_text_edit_drag_mime_is_reference_link(qapp):
+def test_terminal_text_edit_drag_mime_is_tab_specific_reference(qapp):
     edit = TerminalTextEdit()
+    edit.set_terminal_id("a1b2c3d4")
     edit.append_output("alpha\nbeta")
     cursor = edit.textCursor()
     cursor.setPosition(6)
@@ -62,8 +153,8 @@ def test_terminal_text_edit_drag_mime_is_reference_link(qapp):
     mime = edit.drag_mime()
 
     assert mime is not None
-    assert mime.text() == "#term[2:2]"
-    assert bytes(mime.data(TERMINAL_REF_MIME)).decode("utf-8") == "#term[2:2]"
+    assert mime.text() == "#term[a1b2c3d4:2:2]"
+    assert bytes(mime.data(TERMINAL_REF_MIME)).decode("utf-8") == "#term[a1b2c3d4:2:2]"
 
 
 def test_terminal_text_edit_drag_requires_selection(qapp):
@@ -73,8 +164,9 @@ def test_terminal_text_edit_drag_requires_selection(qapp):
     assert edit.drag_mime() is None
 
 
-def test_terminal_text_edit_partial_line_copy_has_no_hidden_reference(qapp):
+def test_terminal_text_edit_partial_line_copy_uses_containing_line_reference(qapp):
     edit = TerminalTextEdit()
+    edit.set_terminal_id("a1b2c3d4")
     edit.append_output("alpha\nbeta")
     cursor = edit.textCursor()
     cursor.setPosition(7)
@@ -84,7 +176,22 @@ def test_terminal_text_edit_partial_line_copy_has_no_hidden_reference(qapp):
     mime = edit.copy_mime()
 
     assert mime.text() == "eta"
-    assert not mime.hasFormat(TERMINAL_REF_MIME)
+    assert bytes(mime.data(TERMINAL_REF_MIME)).decode("utf-8") == "#term[a1b2c3d4:2:2]"
+
+
+def test_terminal_text_edit_partial_line_drag_uses_containing_line_reference(qapp):
+    edit = TerminalTextEdit()
+    edit.set_terminal_id("a1b2c3d4")
+    edit.append_output("alpha\nbeta")
+    cursor = edit.textCursor()
+    cursor.setPosition(7)
+    cursor.setPosition(10, cursor.MoveMode.KeepAnchor)
+    edit.setTextCursor(cursor)
+
+    mime = edit.drag_mime()
+
+    assert mime is not None
+    assert mime.text() == "#term[a1b2c3d4:2:2]"
 
 
 class _FakeSignal:
@@ -119,8 +226,26 @@ class _FakeSession:
         self.terminated = True
 
 
+class _NativeFakeSession(_FakeSession):
+    @staticmethod
+    def available():
+        return True
+
+    def __init__(self, *_args):
+        super().__init__()
+        self.frame = _FakeSignal()
+        self.size = None
+        self.resizes = []
+
+    def set_size(self, columns, lines):
+        self.size = (columns, lines)
+
+    def resize(self, columns, lines):
+        self.resizes.append((columns, lines))
+
+
 def _new_panel_with_fake_sessions(monkeypatch):
-    monkeypatch.setattr(terminal_panel, "TerminalSession", _FakeSession)
+    monkeypatch.setattr(terminal_panel, "NativeTerminalSession", _FakeSession)
     return IntegratedTerminalPanel("C:/work")
 
 
@@ -131,6 +256,26 @@ def test_integrated_terminal_header_shows_shell_without_cwd(monkeypatch, qapp, t
 
     assert panel._tab_bar.tabText(0) == "pwsh"
     assert str(tmp_path) not in panel._tab_bar.tabText(0)
+
+
+def test_integrated_terminal_uses_native_frame_without_losing_tab_ui(monkeypatch, qapp):
+    monkeypatch.setattr(terminal_panel, "NativeTerminalSession", _NativeFakeSession)
+    panel = IntegratedTerminalPanel("C:/work")
+
+    panel.new_terminal()
+    session = panel.active_session()
+    session.output.emit("raw terminal bytes")
+    session.frame.emit({
+        "columns": 2, "lines": 1, "text": "ok", "spans": [], "cursor_row": 0, "cursor_column": 1,
+    })
+    panel.output._flush_frame()
+
+    assert isinstance(session, _NativeFakeSession)
+    assert session.size is not None
+    assert panel.output.toPlainText() == "ok"
+
+    _press(panel.output, Qt.Key.Key_Return)
+    assert session.writes == ["\r"]
 
 
 def test_integrated_terminal_clear_redraws_active_prompt(monkeypatch, qapp):
@@ -171,6 +316,7 @@ def test_integrated_terminal_creates_switches_renames_and_closes_tabs(monkeypatc
     second = panel.active_session()
 
     assert panel._tab_bar.count() == 2
+    assert panel.active_view().styleSheet() == panel._tabs[0].output.styleSheet()
     assert [panel._tab_bar.tabText(index) for index in range(2)] == ["pwsh", "pwsh 2"]
     assert panel.active_session() is second
 

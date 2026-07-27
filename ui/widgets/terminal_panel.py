@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import sys
+import re
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QSize, Qt, QMimeData, pyqtSignal
-from PyQt6.QtGui import QColor, QDrag, QGuiApplication, QIcon, QKeySequence, QPainter, QPen, QPixmap, QTextCursor
+from PyQt6.QtCore import QSize, Qt, QMimeData, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QDrag, QFont, QGuiApplication, QIcon, QKeySequence, QPainter, QPen, QPixmap, QTextCharFormat, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -18,8 +19,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from services.native_terminal import NativeTerminalSession
 from services.terminal_refs import TERMINAL_REF_MIME, terminal_ref
-from services.terminal_session import TerminalSession
 from ui.theme import (
     code_text_edit_style,
     icon_button_style,
@@ -42,6 +43,82 @@ _KEY_SEQUENCES = {
     Qt.Key.Key_PageUp: "\x1b[5~",
     Qt.Key.Key_PageDown: "\x1b[6~",
 }
+
+_ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
+_INCOMPLETE_ANSI_SGR_RE = re.compile(r"\x1b(?:\[[0-9;]*)?")
+_ANSI_FOREGROUND_COLORS = {
+    30: "#5c6370", 31: "#e06c75", 32: "#98c379", 33: "#e5c07b",
+    34: "#61afef", 35: "#c678dd", 36: "#56b6c2", 37: "#c9d2e6",
+    90: "#7f8799", 91: "#ff7b88", 92: "#b4dc8e", 93: "#f4d27a",
+    94: "#81b8ff", 95: "#df9cff", 96: "#75d9e8", 97: "#f2f5fb",
+}
+
+
+def _trailing_ansi_escape(text: str) -> str:
+    """Retain an ANSI SGR sequence split between process output chunks."""
+    start = text.rfind("\x1b")
+    if start < 0:
+        return ""
+    suffix = text[start:]
+    return suffix if _INCOMPLETE_ANSI_SGR_RE.fullmatch(suffix) else ""
+
+
+def _ansi_256_color(index: int) -> QColor:
+    index = max(0, min(int(index), 255))
+    if index < 16:
+        code = (30 + index) if index < 8 else (90 + index - 8)
+        return QColor(_ANSI_FOREGROUND_COLORS[code])
+    if index < 232:
+        value = index - 16
+        levels = (0, 95, 135, 175, 215, 255)
+        return QColor(levels[value // 36], levels[(value // 6) % 6], levels[value % 6])
+    level = 8 + (index - 232) * 10
+    return QColor(level, level, level)
+
+
+def _frame_color(color: object, *, background: bool = False) -> QColor | None:
+    if not isinstance(color, dict):
+        return None
+    kind = color.get("kind")
+    value = color.get("value")
+    if kind == "rgb" and isinstance(value, list) and len(value) == 3:
+        return QColor(*[max(0, min(int(component), 255)) for component in value])
+    if kind == "indexed":
+        return _ansi_256_color(int(value))
+    if kind != "named":
+        return None
+    named = int(value)
+    # Alacritty's first sixteen named colors are the standard ANSI palette.
+    # Foreground/background defaults intentionally inherit the app palette.
+    if named < 16:
+        return _ansi_256_color(named)
+    if background and named == 257:
+        return None
+    if not background and named == 256:
+        return None
+    return None
+
+
+def _frame_format(cell: dict) -> QTextCharFormat:
+    format_ = QTextCharFormat()
+    foreground = _frame_color(cell.get("foreground"))
+    background = _frame_color(cell.get("background"), background=True)
+    flags = int(cell.get("flags") or 0)
+    if flags & 1:
+        foreground, background = background, foreground
+    # QTextCharFormat defaults to Qt's black document brush rather than the
+    # QPlainTextEdit stylesheet color.  Native default-color cells must set
+    # the app foreground explicitly or they disappear on our dark canvas.
+    format_.setForeground(foreground or QColor(palette()["TEXT"]))
+    if background is not None:
+        format_.setBackground(background)
+    if flags & 2:
+        format_.setFontWeight(QFont.Weight.Bold)
+    if flags & 4:
+        format_.setFontItalic(True)
+    if flags & 8:
+        format_.setFontUnderline(True)
+    return format_
 
 
 def _terminal_icon(kind: str, *, size: int = 14, color: str = "#c9d2e6") -> QIcon:
@@ -67,38 +144,147 @@ def _terminal_icon(kind: str, *, size: int = 14, color: str = "#c9d2e6") -> QIco
 
 class TerminalTextEdit(QPlainTextEdit):
     input_requested = pyqtSignal(str)
+    terminal_size_changed = pyqtSignal(int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._drag_start_pos = None
         self._drag_start_in_selection = False
+        self._ansi_format = QTextCharFormat()
+        self._ansi_pending = ""
+        self._terminal_id = ""
+        self._enter_sequence = "\r\n"
+        self._pending_frame: dict | None = None
+        self._frame_timer = QTimer(self)
+        self._frame_timer.setSingleShot(True)
+        self._frame_timer.setInterval(16)
+        self._frame_timer.timeout.connect(self._flush_frame)
         self.setReadOnly(True)
         self.setUndoRedoEnabled(False)
+        self.setAcceptDrops(True)
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def append_output(self, text: str) -> None:
+        text = self._ansi_pending + str(text or "")
+        self._ansi_pending = _trailing_ansi_escape(text)
+        if self._ansi_pending:
+            text = text[:-len(self._ansi_pending)]
         cursor = self.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.setTextCursor(cursor)
-        normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
-        for ch in normalized:
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        position = 0
+        for match in _ANSI_SGR_RE.finditer(normalized):
+            self._insert_terminal_text(cursor, normalized[position:match.start()])
+            self._apply_sgr(match.group(1))
+            position = match.end()
+        self._insert_terminal_text(cursor, normalized[position:])
+        self.setTextCursor(cursor)
+        self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
+
+    def record_output(self, _text: str) -> None:
+        """Keep native-terminal transcript ownership in the session, not the view."""
+
+    def set_terminal_id(self, terminal_id: str) -> None:
+        self._terminal_id = str(terminal_id or "").strip()
+
+    def set_pseudo_terminal_input(self, enabled: bool) -> None:
+        self._enter_sequence = "\r" if enabled else "\r\n"
+
+    def render_frame(self, frame: dict) -> None:
+        """Render the native engine's authoritative screen grid."""
+        columns = max(1, int(frame.get("columns") or 1))
+        lines = max(1, int(frame.get("lines") or 1))
+        text = frame.get("text")
+        if not isinstance(text, str):
+            return
+        cursor = QTextCursor(self.document())
+        cursor.select(QTextCursor.SelectionType.Document)
+        cursor.insertText(text, _frame_format({}))
+        for span in frame.get("spans") or []:
+            if not isinstance(span, dict):
+                continue
+            start = max(0, int(span.get("start") or 0))
+            end = min(len(text), start + max(0, int(span.get("length") or 0)))
+            if start >= end:
+                continue
+            styled = QTextCursor(self.document())
+            styled.setPosition(start)
+            styled.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            styled.mergeCharFormat(_frame_format(span))
+        row = max(0, min(int(frame.get("cursor_row") or 0), lines - 1))
+        column = max(0, min(int(frame.get("cursor_column") or 0), columns - 1))
+        cursor_position = min(len(text), row * (columns + 1) + column)
+        cursor.setPosition(cursor_position)
+        self.setTextCursor(cursor)
+        self.ensureCursorVisible()
+
+    def queue_frame(self, frame: dict) -> None:
+        """Render at most once per display frame, always using the newest grid."""
+        self._pending_frame = frame
+        if not self._frame_timer.isActive():
+            self._frame_timer.start()
+
+    def _flush_frame(self) -> None:
+        frame, self._pending_frame = self._pending_frame, None
+        if frame is not None:
+            self.render_frame(frame)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        metrics = self.fontMetrics()
+        columns = max(10, self.viewport().width() // max(1, metrics.horizontalAdvance("M")))
+        lines = max(2, self.viewport().height() // max(1, metrics.height()))
+        self.terminal_size_changed.emit(columns, lines)
+
+    def focusNextPrevChild(self, _next: bool) -> bool:
+        """Keep Tab inside the terminal instead of using Qt's focus traversal."""
+        return False
+
+    def _insert_terminal_text(self, cursor: QTextCursor, text: str) -> None:
+        for ch in text:
             if ch == "\b":
-                cursor = self.textCursor()
                 cursor.movePosition(QTextCursor.MoveOperation.End)
                 cursor.deletePreviousChar()
-                self.setTextCursor(cursor)
                 continue
-            self.insertPlainText(ch)
-        self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
+            cursor.insertText(ch, self._ansi_format)
+
+    def _apply_sgr(self, params: str) -> None:
+        codes = [int(value) if value else 0 for value in params.split(";")]
+        index = 0
+        while index < len(codes):
+            code = codes[index]
+            if code == 0:
+                self._ansi_format = QTextCharFormat()
+            elif code == 1:
+                self._ansi_format.setFontWeight(QFont.Weight.Bold)
+            elif code == 22:
+                self._ansi_format.setFontWeight(QFont.Weight.Normal)
+            elif code == 4:
+                self._ansi_format.setFontUnderline(True)
+            elif code == 24:
+                self._ansi_format.setFontUnderline(False)
+            elif code in _ANSI_FOREGROUND_COLORS:
+                self._ansi_format.setForeground(QColor(_ANSI_FOREGROUND_COLORS[code]))
+            elif code == 39:
+                self._ansi_format.clearForeground()
+            elif code == 38 and index + 1 < len(codes):
+                mode = codes[index + 1]
+                if mode == 5 and index + 2 < len(codes):
+                    self._ansi_format.setForeground(_ansi_256_color(codes[index + 2]))
+                    index += 2
+                elif mode == 2 and index + 4 < len(codes):
+                    self._ansi_format.setForeground(QColor(codes[index + 2], codes[index + 3], codes[index + 4]))
+                    index += 4
+            index += 1
 
     def copy_mime(self) -> QMimeData:
         cursor = self.textCursor()
         mime = QMimeData()
         mime.setText(self._copied_plain_text(cursor))
-        ref = self._copied_ref(cursor)
-        if ref:
+        if ref := self._copied_ref(cursor):
             mime.setData(TERMINAL_REF_MIME, ref.encode("utf-8"))
         return mime
 
@@ -117,17 +303,16 @@ class TerminalTextEdit(QPlainTextEdit):
         return mime
 
     def _copied_plain_text(self, cursor: QTextCursor) -> str:
-        text = cursor.selectedText() if cursor.hasSelection() else self.toPlainText()
-        return text.replace("\u2029", "\n").strip()
+        if cursor.hasSelection():
+            return cursor.selectedText().replace("\u2029", "\n")
+        return self.toPlainText().rstrip()
 
     def _copied_ref(self, cursor: QTextCursor) -> str:
+        if not self._terminal_id:
+            return ""
         text = self.toPlainText()
-        if not text.strip():
-            return ""
-        if cursor.hasSelection() and not _selection_covers_full_lines(text, cursor):
-            return ""
         start, end = _cursor_line_range(text, cursor)
-        return terminal_ref(start, end)
+        return terminal_ref(start, end, self._terminal_id)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -164,6 +349,26 @@ class TerminalTextEdit(QPlainTextEdit):
         self._drag_start_in_selection = False
         super().mouseReleaseEvent(event)
 
+    def dragEnterEvent(self, event):
+        if _terminal_input_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        if _terminal_input_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event):
+        text = _terminal_input_from_mime(event.mimeData())
+        if not text:
+            event.ignore()
+            return
+        self.input_requested.emit(text)
+        event.acceptProposedAction()
+
     def _pos_in_selection(self, pos) -> bool:
         cursor = self.textCursor()
         if not cursor.hasSelection():
@@ -176,6 +381,11 @@ class TerminalTextEdit(QPlainTextEdit):
     def keyPressEvent(self, event):
         if event.matches(QKeySequence.StandardKey.Copy) and self.textCursor().hasSelection():
             self.copy()
+            return
+        if event.matches(QKeySequence.StandardKey.Paste):
+            text = _terminal_input_from_mime(QGuiApplication.clipboard().mimeData())
+            if text:
+                self.input_requested.emit(text)
             return
         modifiers = event.modifiers()
         key = event.key()
@@ -190,7 +400,7 @@ class TerminalTextEdit(QPlainTextEdit):
                 self.input_requested.emit("\x0c")
                 return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.input_requested.emit("\r\n")
+            self.input_requested.emit(self._enter_sequence)
             return
         if key in _KEY_SEQUENCES:
             self.input_requested.emit(_KEY_SEQUENCES[key])
@@ -204,7 +414,7 @@ class TerminalTextEdit(QPlainTextEdit):
 
 @dataclass
 class _TerminalTab:
-    session: TerminalSession
+    session: object
     output: TerminalTextEdit
     name: str = "terminal"
     finished: bool = False
@@ -274,12 +484,22 @@ class IntegratedTerminalPanel(QFrame):
 
     def new_terminal(self) -> None:
         output = self.output if not self._tabs else self._make_output()
+        self._apply_output_appearance(output)
         if output.parent() is not self._output_stack:
             self._output_stack.addWidget(output)
-        session = TerminalSession(self.cwd, self)
+        session = self._make_session()
+        output.set_terminal_id(getattr(session, "terminal_id", ""))
         tab = _TerminalTab(session=session, output=output)
+        if hasattr(session, "set_size"):
+            session.set_size(*self._output_size(output))
         session.started.connect(lambda tab=tab: self._on_started(tab))
-        session.output.connect(output.append_output)
+        if hasattr(session, "frame"):
+            output.set_pseudo_terminal_input(True)
+            session.output.connect(output.record_output)
+            session.frame.connect(output.queue_frame)
+            output.terminal_size_changed.connect(session.resize)
+        else:
+            session.output.connect(output.append_output)
         session.finished.connect(lambda result, tab=tab: self._on_finished(tab, result))
         self._tabs.append(tab)
         index = self._tab_bar.addTab(tab.name)
@@ -292,9 +512,15 @@ class IntegratedTerminalPanel(QFrame):
         tab = self._active_tab()
         return tab is not None and not tab.finished and not tab.closed
 
-    def active_session(self) -> TerminalSession | None:
+    def active_session(self) -> object | None:
         tab = self._active_tab()
         return tab.session if tab is not None else None
+
+    def session_for_terminal_id(self, terminal_id: str) -> object | None:
+        for tab in self._tabs:
+            if not tab.closed and str(getattr(tab.session, "terminal_id", "")) == str(terminal_id):
+                return tab.session
+        return None
 
     def active_view(self) -> TerminalTextEdit:
         return self.output
@@ -377,6 +603,17 @@ class IntegratedTerminalPanel(QFrame):
         output.input_requested.connect(self.write_input)
         return output
 
+    def _make_session(self):
+        return NativeTerminalSession(self.cwd, self)
+
+    @staticmethod
+    def _output_size(output: TerminalTextEdit) -> tuple[int, int]:
+        metrics = output.fontMetrics()
+        return (
+            max(10, output.viewport().width() // max(1, metrics.horizontalAdvance("M"))),
+            max(2, output.viewport().height() // max(1, metrics.height())),
+        )
+
     def _reset_idle_output(self) -> None:
         while self._output_stack.count():
             widget = self._output_stack.widget(0)
@@ -429,6 +666,28 @@ class IntegratedTerminalPanel(QFrame):
         return f"{shell} {suffix}"
 
 
+def _terminal_input_from_mime(mime: QMimeData | None) -> str:
+    if mime is None:
+        return ""
+    paths = []
+    if mime.hasUrls():
+        for url in mime.urls():
+            if url.isLocalFile():
+                paths.append(_quote_terminal_path(url.toLocalFile()))
+    if paths:
+        return " ".join(paths)
+    return mime.text() if mime.hasText() else ""
+
+
+def _quote_terminal_path(path: str) -> str:
+    path = str(path or "")
+    if not path or not any(char.isspace() for char in path):
+        return path
+    if sys.platform == "win32":
+        return f'"{path.replace(chr(34), chr(34) * 2)}"'
+    return "'" + path.replace("'", "'\"'\"'") + "'"
+
+
 def _cursor_line_range(text: str, cursor: QTextCursor) -> tuple[int, int]:
     lines = text.splitlines()
     line_count = max(1, len(lines))
@@ -440,20 +699,4 @@ def _cursor_line_range(text: str, cursor: QTextCursor) -> tuple[int, int]:
         end -= 1
     start_line = text.count("\n", 0, start) + 1
     end_line = text.count("\n", 0, max(start, end)) + 1
-    start_line = max(1, min(start_line, line_count))
-    end_line = max(start_line, min(end_line, line_count))
-    return start_line, end_line
-
-
-def _selection_covers_full_lines(text: str, cursor: QTextCursor) -> bool:
-    start = min(cursor.selectionStart(), cursor.selectionEnd())
-    end = max(cursor.selectionStart(), cursor.selectionEnd())
-    if start == end:
-        return False
-    starts_on_line_boundary = start == 0 or text[start - 1] == "\n"
-    ends_on_line_boundary = (
-        end >= len(text)
-        or text[end] == "\n"
-        or text[end - 1] == "\n"
-    )
-    return starts_on_line_boundary and ends_on_line_boundary
+    return max(1, min(start_line, line_count)), max(1, min(end_line, line_count))

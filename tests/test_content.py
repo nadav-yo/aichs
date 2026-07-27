@@ -370,10 +370,11 @@ def test_terminal_summary_uses_reference_not_full_context():
         "duration_s": 1.2,
         "line_count": 50,
         "stored_line_count": 50,
+        "terminal_id": "pytest123",
         "output": output,
     })
 
-    assert "Output reference: #term[1:50]" in summary
+    assert "Output reference: #term[pytest123:1:50]" in summary
     assert "Command: pytest -q" in summary
     assert "line 1" not in summary
     assert "line 31" not in summary
@@ -385,14 +386,14 @@ def test_terminal_refs_hidden_context_does_not_reexpand_itself():
             "role": "assistant",
             "synthetic": "terminal_result",
             "content": "Terminal summary",
-            "terminal": {"command": "pwsh", "output": "one\ntwo", "stored_line_count": 2},
+            "terminal": {"terminal_id": "pwsh123", "command": "pwsh", "output": "one\ntwo", "stored_line_count": 2},
         },
-        {"role": "user", "content": "[Hidden referenced terminal output]\nTerminal output #term[2:2]\n```text\ntwo\n```", "synthetic": "terminal_refs"},
+        {"role": "user", "content": "[Hidden referenced terminal output]\nTerminal output #term[pwsh123:2:2]\n```text\ntwo\n```", "synthetic": "terminal_refs"},
     ]
 
     anthropic = prepare_for_anthropic(messages)
 
-    assert anthropic[1]["content"].count("Terminal output #term[2:2]") == 1
+    assert anthropic[1]["content"].count("Terminal output #term[pwsh123:2:2]") == 1
     assert "Referenced terminal output" not in anthropic[1]["content"]
 
 
@@ -401,14 +402,15 @@ def test_terminal_refs_expand_into_model_context():
         {
             "role": "assistant",
             "synthetic": "terminal_result",
-            "content": "Terminal summary\nReference: #term[1:4]",
+            "content": "Terminal summary\nReference: #term[pytest123:1:4]",
             "terminal": {
+                "terminal_id": "pytest123",
                 "command": "pytest -q",
                 "output": "one\ntwo\nthree\nfour",
                 "stored_line_count": 4,
             },
         },
-        {"role": "user", "content": "explain #term[2:3]"},
+        {"role": "user", "content": "explain #term[pytest123:2:3]"},
     ]
 
     anthropic = prepare_for_anthropic(messages)
@@ -417,20 +419,24 @@ def test_terminal_refs_expand_into_model_context():
     assert "from command: pytest -q" in anthropic[1]["content"]
 
 
-def test_legacy_bang_terminal_refs_still_expand():
+def test_terminal_refs_target_the_requested_terminal_tab():
     messages = [
         {
             "role": "assistant",
             "synthetic": "terminal_result",
-            "content": "Terminal summary\nReference: !term[1:2]",
-            "terminal": {"command": "dir", "output": "one\ntwo", "stored_line_count": 2},
+            "terminal": {"terminal_id": "first123", "command": "first", "output": "first output"},
         },
-        {"role": "user", "content": "explain !term[2:2]"},
+        {
+            "role": "assistant",
+            "synthetic": "terminal_result",
+            "terminal": {"terminal_id": "second123", "command": "second", "output": "second output"},
+        },
     ]
 
-    anthropic = prepare_for_anthropic(messages)
+    expanded = expand_terminal_refs("read #term[first123:1:1]", messages)
 
-    assert "two" in anthropic[1]["content"]
+    assert "first output" in expanded
+    assert "second output" not in expanded
 
 
 def test_terminal_refs_expand_exact_line_without_shift():
@@ -438,8 +444,9 @@ def test_terminal_refs_expand_exact_line_without_shift():
         {
             "role": "assistant",
             "synthetic": "terminal_result",
-            "content": "Terminal summary\nOutput reference: #term[1:2]",
+            "content": "Terminal summary\nOutput reference: #term[dir123:1:2]",
             "terminal": {
+                "terminal_id": "dir123",
                 "command": "dir",
                 "output": (
                     "-a---          25/05/2026    13:53            223 pytest.ini\n"
@@ -448,7 +455,7 @@ def test_terminal_refs_expand_exact_line_without_shift():
                 "stored_line_count": 2,
             },
         },
-        {"role": "user", "content": "can you read this file? #term[2:2]"},
+        {"role": "user", "content": "can you read this file? #term[dir123:2:2]"},
     ]
 
     anthropic = prepare_for_anthropic(messages)
@@ -462,10 +469,10 @@ def test_terminal_refs_append_to_block_content_for_model_context():
         {
             "role": "assistant",
             "synthetic": "terminal_result",
-            "content": "Terminal summary\nOutput reference: #term[1:1]",
-            "terminal": {"command": "pytest -q", "output": "ready", "stored_line_count": 1},
+            "content": "Terminal summary\nOutput reference: #term[pytest123:1:1]",
+            "terminal": {"terminal_id": "pytest123", "command": "pytest -q", "output": "ready", "stored_line_count": 1},
         },
-        {"role": "user", "content": [{"type": "text", "text": "show #term[1:1]"}]},
+        {"role": "user", "content": [{"type": "text", "text": "show #term[pytest123:1:1]"}]},
     ]
 
     anthropic = prepare_for_anthropic(messages)
@@ -475,7 +482,7 @@ def test_terminal_refs_append_to_block_content_for_model_context():
 
 
 def test_expand_terminal_refs_without_previous_terminal_is_empty():
-    assert expand_terminal_refs("see #term[1:2]", []) == ""
+    assert expand_terminal_refs("see #term[missing123:1:2]", []) == ""
 
 
 def test_terminal_refs_ignore_missing_and_out_of_range_requests():
@@ -484,13 +491,13 @@ def test_terminal_refs_ignore_missing_and_out_of_range_requests():
             "role": "assistant",
             "synthetic": "terminal_result",
             "content": "Terminal summary",
-            "terminal": {"output": "one\ntwo", "stored_line_count": 2},
+            "terminal": {"terminal_id": "output123", "output": "one\ntwo", "stored_line_count": 2},
         },
-        {"role": "user", "content": "show #term[9:10]"},
+        {"role": "user", "content": "show #term[output123:9:10]"},
     ]
 
     assert expand_terminal_refs("no refs here", messages) == ""
-    assert "no stored terminal output lines" in expand_terminal_refs("show #term[9:10]", messages)
+    assert "no stored terminal output lines" in expand_terminal_refs("show #term[output123:9:10]", messages)
 
 
 def test_terminal_summary_running_and_truncated():

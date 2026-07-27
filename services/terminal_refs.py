@@ -7,7 +7,12 @@ from config import MAX_STORED_TERMINAL_OUTPUT_CHARS
 TERMINAL_REF_NAME = "term"
 TERMINAL_REF_MIME = "application/x-aichs-terminal-ref"
 MAX_TERMINAL_REF_LINES = 400
-_TERMINAL_REF_RE = re.compile(r"(?:!|@|#)term\[(\d*)\s*(?::\s*(\d*))?\]")
+# Every reference names its source terminal explicitly:
+# ``#term[abc123:2:4]``.
+_TERMINAL_REF_RE = re.compile(
+    r"#term\[(?P<terminal_id>[A-Za-z0-9][A-Za-z0-9_-]*):"
+    r"(?P<start>\d+)\s*:\s*(?P<end>\d+)\]"
+)
 
 
 def build_terminal_summary(result: dict) -> str:
@@ -17,7 +22,11 @@ def build_terminal_summary(result: dict) -> str:
     line_count = int(result.get("line_count") or 0)
     stored_line_count = int(result.get("stored_line_count") or 0)
     truncated = bool(result.get("truncated"))
-    ref = terminal_ref(1, max(1, stored_line_count))
+    ref = terminal_ref(
+        1,
+        max(1, stored_line_count),
+        str(result.get("terminal_id") or ""),
+    )
 
     status = "running" if exit_code is None else f"exit {exit_code}"
     header = (
@@ -51,8 +60,11 @@ def retain_terminal_output_tail(
     return tail, True
 
 
-def terminal_ref(start: int, end: int) -> str:
-    return f"#{TERMINAL_REF_NAME}[{start}:{end}]"
+def terminal_ref(start: int, end: int, terminal_id: str) -> str:
+    terminal_id = str(terminal_id or "").strip()
+    if not terminal_id:
+        return ""
+    return f"#{TERMINAL_REF_NAME}[{terminal_id}:{start}:{end}]"
 
 def normalize_terminal_ref(ref: str) -> str:
     text = str(ref or "").strip()
@@ -60,11 +72,26 @@ def normalize_terminal_ref(ref: str) -> str:
     if not match:
         return text
     start, end = _parse_ref_range(match, 1_000_000_000)
-    return terminal_ref(start, end)
+    return terminal_ref(start, end, match.group("terminal_id") or "")
 
 
 def has_terminal_refs(text: str) -> bool:
     return bool(_TERMINAL_REF_RE.search(str(text or "")))
+
+
+def terminal_ref_ids(text: str) -> set[str]:
+    """Return explicit terminal IDs referenced by *text* (legacy refs omit one)."""
+    return {
+        terminal_id
+        for match in _TERMINAL_REF_RE.finditer(str(text or ""))
+        if (terminal_id := str(match.group("terminal_id") or "").strip())
+    }
+
+
+def terminal_ref_id(ref: str) -> str:
+    """Return the optional terminal ID embedded in one reference token."""
+    match = _TERMINAL_REF_RE.fullmatch(str(ref or "").strip())
+    return str(match.group("terminal_id") or "") if match else ""
 
 
 
@@ -75,14 +102,18 @@ def expand_terminal_refs(text: str, previous_terminal_messages: list[dict]) -> s
     if not matches:
         return ""
 
-    terminal = previous_terminal_messages[-1]
-    result = terminal.get("terminal") if isinstance(terminal.get("terminal"), dict) else {}
-    output = str(result.get("output") or terminal.get("terminal_output") or "")
-    lines = output.splitlines()
-    command = str(result.get("command") or terminal.get("terminal_command") or "").strip()
-
     sections = []
     for match in matches:
+        terminal_id = str(match.group("terminal_id") or "").strip()
+        terminal = _terminal_for_ref(previous_terminal_messages, terminal_id)
+        if terminal is None:
+            label = terminal_ref(1, 1, terminal_id)
+            sections.append(f"{label}: terminal output is no longer available.")
+            continue
+        result = terminal.get("terminal") if isinstance(terminal.get("terminal"), dict) else {}
+        output = str(result.get("output") or terminal.get("terminal_output") or "")
+        lines = output.splitlines()
+        command = str(result.get("command") or terminal.get("terminal_command") or "").strip()
         requested_start, requested_end = _parse_ref_range(match, len(lines))
         if requested_start < 1 or requested_start > max(1, len(lines)):
             sections.append(
@@ -95,7 +126,7 @@ def expand_terminal_refs(text: str, previous_terminal_messages: list[dict]) -> s
         truncated = end > max_end
         end = min(end, max_end)
         selected = lines[requested_start - 1:end]
-        label = terminal_ref(requested_start, end)
+        label = terminal_ref(requested_start, end, terminal_id)
         heading = f"Terminal output {label}"
         if command:
             heading += f" from command: {command}"
@@ -107,15 +138,18 @@ def expand_terminal_refs(text: str, previous_terminal_messages: list[dict]) -> s
 
 
 def _parse_ref_range(match: re.Match, line_count: int) -> tuple[int, int]:
-    raw_start = match.group(1)
-    raw_end = match.group(2)
-    start = int(raw_start) if raw_start else 1
-    if raw_end is None:
-        end = start
-    elif raw_end:
-        end = int(raw_end)
-    else:
-        end = line_count
+    raw_start = match.group("start")
+    raw_end = match.group("end")
+    start = int(raw_start)
+    end = int(raw_end)
     if end < start:
         end = start
     return start, end
+
+
+def _terminal_for_ref(messages: list[dict], terminal_id: str) -> dict | None:
+    for message in reversed(messages):
+        result = message.get("terminal") if isinstance(message.get("terminal"), dict) else {}
+        if str(result.get("terminal_id") or "") == terminal_id:
+            return message
+    return None

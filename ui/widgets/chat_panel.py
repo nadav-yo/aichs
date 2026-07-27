@@ -76,7 +76,13 @@ from ui.theme import (
 )
 from services.skills import Skill, load_all as load_skills
 from services.shell_tool import is_shell_tool
-from services.terminal_refs import expand_terminal_refs, has_terminal_refs, retain_terminal_output_tail, terminal_ref
+from services.terminal_refs import (
+    expand_terminal_refs,
+    has_terminal_refs,
+    retain_terminal_output_tail,
+    terminal_ref,
+    terminal_ref_ids,
+)
 from services.user_terminal import UserTerminalThread
 from services.slash_commands import (
     load_all_commands,
@@ -2473,9 +2479,9 @@ class ChatPanel(QWidget):
 
         self._enter_streaming()
 
-        snapshot = draft.get("terminal_snapshot")
-        if snapshot and not _same_terminal_snapshot(self.history, snapshot):
-            self.history.append(snapshot)
+        for snapshot in _terminal_snapshots(draft.get("terminal_snapshot")):
+            if not _same_terminal_snapshot(self.history, snapshot):
+                self.history.append(snapshot)
 
         now = datetime.now().isoformat()
         user_msg = {"role": "user", "content": content, "created_at": now}
@@ -2524,16 +2530,27 @@ class ChatPanel(QWidget):
         )
         self._pin_to_bottom()
 
-    def _terminal_snapshot_for_refs(self, text: str) -> dict | None:
+    def _terminal_snapshot_for_refs(self, text: str) -> dict | list[dict] | None:
         if not has_terminal_refs(text):
             return None
         terminal = getattr(self, "_integrated_terminal", None)
-        if terminal is None or not terminal.is_running():
+        if terminal is None:
             return None
-        session = terminal.active_session()
-        if session is None or not session.output_text():
-            return None
-        return _terminal_result_message(session.result())
+        ids = terminal_ref_ids(text)
+        if ids and hasattr(terminal, "session_for_terminal_id"):
+            sessions = [terminal.session_for_terminal_id(terminal_id) for terminal_id in sorted(ids)]
+        elif not ids and terminal.is_running():
+            sessions = [terminal.active_session()]
+        else:
+            sessions = []
+        snapshots = [
+            _terminal_result_message(session.result())
+            for session in sessions
+            if session is not None and session.output_text()
+        ]
+        if len(snapshots) == 1:
+            return snapshots[0]
+        return snapshots or None
 
     def _toggle_integrated_terminal(self):
         if not self._integrated_terminal.isHidden():
@@ -4942,9 +4959,9 @@ class ChatPanel(QWidget):
         data = copy.deepcopy(base_data)
         history = copy.deepcopy(data.get("messages", []))
         now = datetime.now().isoformat()
-        snapshot = draft.get("terminal_snapshot")
-        if snapshot and not _same_terminal_snapshot(history, snapshot):
-            history.append(snapshot)
+        for snapshot in _terminal_snapshots(draft.get("terminal_snapshot")):
+            if not _same_terminal_snapshot(history, snapshot):
+                history.append(snapshot)
 
         user_msg = {"role": "user", "content": draft["content"], "created_at": now}
         if draft.get("synthetic"):
@@ -5183,18 +5200,21 @@ def _disconnect_thread_signals(thread: QThread | None) -> None:
 
 
 def _same_terminal_snapshot(history: list[dict], snapshot: dict) -> bool:
-    if not history:
-        return False
-    last = history[-1]
-    if last.get("synthetic") != "terminal_result":
-        return False
-    last_terminal = last.get("terminal") if isinstance(last.get("terminal"), dict) else {}
     snapshot_terminal = snapshot.get("terminal") if isinstance(snapshot.get("terminal"), dict) else {}
-    return (
-        str(last_terminal.get("command") or "") == str(snapshot_terminal.get("command") or "")
-        and str(last_terminal.get("cwd") or "") == str(snapshot_terminal.get("cwd") or "")
-        and str(last_terminal.get("output") or "") == str(snapshot_terminal.get("output") or "")
-    )
+    snapshot_id = str(snapshot_terminal.get("terminal_id") or "")
+    for message in reversed(history):
+        if message.get("synthetic") != "terminal_result":
+            continue
+        terminal = message.get("terminal") if isinstance(message.get("terminal"), dict) else {}
+        if snapshot_id and str(terminal.get("terminal_id") or "") != snapshot_id:
+            continue
+        if (
+            str(terminal.get("command") or "") == str(snapshot_terminal.get("command") or "")
+            and str(terminal.get("cwd") or "") == str(snapshot_terminal.get("cwd") or "")
+            and str(terminal.get("output") or "") == str(snapshot_terminal.get("output") or "")
+        ):
+            return True
+    return False
 
 
 def _terminal_result_message(result: dict) -> dict:
@@ -5203,6 +5223,7 @@ def _terminal_result_message(result: dict) -> dict:
     stored_line_count = len(output.splitlines())
     line_count = max(int(result.get("line_count") or 0), stored_line_count)
     terminal = {
+        "terminal_id": str(result.get("terminal_id") or ""),
         "command": str(result.get("command") or ""),
         "cwd": str(result.get("cwd") or ""),
         "exit_code": int(result.get("exit_code") or 0),
@@ -5235,7 +5256,7 @@ def _terminal_status_detail(result: dict) -> str:
 
 def _terminal_result_ref(result: dict) -> str:
     stored = int(result.get("stored_line_count") or 0)
-    return terminal_ref(1, max(1, stored))
+    return terminal_ref(1, max(1, stored), str(result.get("terminal_id") or ""))
 
 
 def _history_ends_with_assistant_text(history: list[dict], text: str) -> bool:
@@ -5353,15 +5374,22 @@ def _chat_ref_context(refs: list[dict] | None) -> str:
     return "\n".join(lines)
 
 
-def _terminal_ref_context(history: list[dict], text: str, snapshot: dict | None = None) -> str:
+def _terminal_snapshots(snapshot: object) -> list[dict]:
+    if isinstance(snapshot, dict):
+        return [snapshot]
+    if isinstance(snapshot, list):
+        return [item for item in snapshot if isinstance(item, dict)]
+    return []
+
+
+def _terminal_ref_context(history: list[dict], text: str, snapshot: object = None) -> str:
     if not has_terminal_refs(text):
         return ""
     terminal_messages = [
         msg for msg in history
         if isinstance(msg, dict) and msg.get("synthetic") == "terminal_result"
     ]
-    if snapshot:
-        terminal_messages.append(snapshot)
+    terminal_messages.extend(_terminal_snapshots(snapshot))
     expanded = expand_terminal_refs(text, terminal_messages)
     if not expanded:
         return ""

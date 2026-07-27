@@ -1,5 +1,5 @@
 
-from ui.avatars import clear_cache, list_builtin_avatars, persist_portrait, portrait_source
+from ui.avatars import avatar_pixmap, clear_cache, list_builtin_avatars, persist_portrait, portrait_source
 
 
 def test_list_builtin_avatars():
@@ -25,3 +25,21 @@ def test_persist_custom_file(tmp_path, isolate_aichs_home):
     dest = persist_portrait(str(src), "user")
     assert dest.endswith(".png")
     clear_cache()
+
+
+def test_persist_existing_custom_file_does_not_copy_onto_itself(tmp_path, isolate_aichs_home):
+    src = tmp_path / "pic.png"
+    src.write_bytes(b"\x89PNG\r\n\x1a\n")
+    dest = persist_portrait(str(src), "human")
+
+    assert persist_portrait(dest, "human") == dest
+
+
+def test_invalid_custom_avatar_falls_back_without_null_pixmap(tmp_path, qapp):
+    source = tmp_path / "truncated.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    image = avatar_pixmap(str(source))
+
+    assert not image.isNull()
+    assert image.size().width() == 28

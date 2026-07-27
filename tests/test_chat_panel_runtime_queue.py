@@ -1063,11 +1063,14 @@ def test_send_captures_running_integrated_terminal_snapshot_for_refs():
         pass
 
     class Session:
+        terminal_id = "snap123"
+
         def output_text(self):
             return "one\ntwo"
 
         def result(self):
             return {
+                "terminal_id": self.terminal_id,
                 "command": "pwsh",
                 "cwd": "C:/repo",
                 "exit_code": 0,
@@ -1081,10 +1084,11 @@ def test_send_captures_running_integrated_terminal_snapshot_for_refs():
     drafts = []
     panel = SimpleNamespace()
     panel.cwd = "C:/repo"
-    panel.composer = ComposerWithTerminalRef("explain #term[2:2]")
+    panel.composer = ComposerWithTerminalRef("explain #term[snap123:2:2]")
     panel._integrated_terminal = SimpleNamespace(
         is_running=lambda: True,
         active_session=lambda: Session(),
+        session_for_terminal_id=lambda terminal_id: Session() if terminal_id == "snap123" else None,
     )
     panel._slash_commands = []
     panel._slash_commands_cwd = "C:/repo"
@@ -1122,8 +1126,8 @@ def test_send_draft_appends_terminal_snapshot_before_user(qapp):
     panel._pin_to_bottom = lambda: None
 
     ChatPanel._send_draft(panel, {
-        "content": "explain #term[2:2]",
-        "title_text": "explain #term[2:2]",
+        "content": "explain #term[snap123:2:2]",
+        "title_text": "explain #term[snap123:2:2]",
         "skill": None,
         "crew": None,
         "file_refs": [],
@@ -1132,21 +1136,21 @@ def test_send_draft_appends_terminal_snapshot_before_user(qapp):
             "role": "assistant",
             "content": "exit 0",
             "synthetic": "terminal_result",
-            "terminal": {"command": "pwsh", "cwd": "C:/repo", "output": "one\ntwo"},
+            "terminal": {"terminal_id": "snap123", "command": "pwsh", "cwd": "C:/repo", "output": "one\ntwo"},
         },
         "terminal_ref_context": "[Hidden referenced terminal output]\n```text\ntwo\n```",
     })
 
     assert [msg.get("synthetic") for msg in panel.history] == ["terminal_result", None, "terminal_refs"]
-    assert panel.history[1]["content"] == "explain #term[2:2]"
+    assert panel.history[1]["content"] == "explain #term[snap123:2:2]"
     assert "two" in panel.history[2]["content"]
 
 
-def test_terminal_ref_context_uses_latest_terminal_result():
+def test_terminal_ref_context_uses_matching_terminal_result():
     context = _terminal_ref_context([
-        {"role": "assistant", "synthetic": "terminal_result", "terminal": {"command": "old", "output": "old"}},
-        {"role": "assistant", "synthetic": "terminal_result", "terminal": {"command": "pwsh", "output": "one\ntwo"}},
-    ], "explain #term[2:2]")
+        {"role": "assistant", "synthetic": "terminal_result", "terminal": {"terminal_id": "old123", "command": "old", "output": "old"}},
+        {"role": "assistant", "synthetic": "terminal_result", "terminal": {"terminal_id": "pwsh123", "command": "pwsh", "output": "one\ntwo"}},
+    ], "explain #term[pwsh123:2:2]")
 
     assert "Hidden referenced terminal output" in context
     assert "two" in context
