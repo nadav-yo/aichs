@@ -119,7 +119,9 @@ def test_main_window_uses_custom_frameless_chrome(qapp, workspace):
         assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
         assert window.centralWidget() is window._window_shell
         assert window._window_shell_layout.itemAt(0).widget() is window._window_chrome
-        assert window._window_shell_layout.itemAt(1).widget() is window._root_splitter
+        assert window._window_shell_layout.itemAt(1).widget() is window._update_banner
+        assert window._window_shell_layout.itemAt(2).widget() is window._root_splitter
+        assert window._update_banner.isHidden()
         assert window._window_chrome._minimize_btn.toolTip() == "Minimize"
         assert window._window_chrome._maximize_btn.toolTip() == "Maximize"
         assert window._window_chrome._close_btn.toolTip() == "Close"

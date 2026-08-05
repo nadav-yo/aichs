@@ -46,6 +46,7 @@ from storage.settings import (
     CANVAS_ENABLED_KEY,
     CANVAS_PARALLEL_LIMIT_KEY,
     CANVAS_RUN_MODE_KEY,
+    CHECK_FOR_UPDATES_KEY,
     DEFAULT_ARCHIVIST_PROMPT,
     DEFAULT_AUTO_TITLE_PROMPT_INSTRUCTIONS,
     DEFAULT_CANVAS_ACTION_AUTO_APPROVE,
@@ -79,6 +80,7 @@ from storage.settings import (
     canvas_enabled,
     canvas_parallel_limit,
     canvas_run_mode,
+    check_for_updates,
     compact_resume_prompt,
     compaction_summary_guidance,
     diagnostic_fix_prompt_template,
@@ -1619,6 +1621,17 @@ class SettingsDialog(QDialog):
         resume_hint.setStyleSheet(self._hint_style)
         layout.addWidget(resume_hint)
 
+        self.check_for_updates_check = QCheckBox("Check for updates on startup")
+        self.check_for_updates_check.setStyleSheet(self._checkbox_style)
+        layout.addWidget(self.check_for_updates_check)
+        updates_hint = QLabel(
+            "Quietly checks PyPI at most once a day. If a newer release is available, "
+            "shows a banner with `pipx upgrade aichs`. Frozen desktop builds are skipped."
+        )
+        updates_hint.setWordWrap(True)
+        updates_hint.setStyleSheet(self._hint_style)
+        layout.addWidget(updates_hint)
+
         enter_hint = QLabel("When enabled, Shift+Enter inserts a new line.")
         enter_hint.setWordWrap(True)
         enter_hint.setStyleSheet(self._hint_style)
@@ -2427,6 +2440,7 @@ class SettingsDialog(QDialog):
         if resume_index < 0:
             resume_index = self.resume_session_combo.findData(DEFAULT_RESUME_SESSION)
         self.resume_session_combo.setCurrentIndex(max(0, resume_index))
+        self.check_for_updates_check.setChecked(check_for_updates(saved))
         self.trash_retention_spin.setValue(trash_retention_days(saved))
 
     def _load_editor_values(self, saved: dict):
@@ -2744,6 +2758,7 @@ class SettingsDialog(QDialog):
             "font_size": self.font_combo.currentText(),
             "enter_to_send": self.enter_to_send_check.isChecked(),
             RESUME_SESSION_KEY: str(self.resume_session_combo.currentData() or DEFAULT_RESUME_SESSION),
+            CHECK_FOR_UPDATES_KEY: self.check_for_updates_check.isChecked(),
             TRASH_RETENTION_DAYS_KEY: self.trash_retention_spin.value(),
             "avatar_human": persist_portrait(self.human_portrait.value(), "human"),
         })
@@ -2867,6 +2882,7 @@ class SettingsDialog(QDialog):
             "font_size": self.font_combo.currentText(),
             "enter_to_send": self.enter_to_send_check.isChecked(),
             RESUME_SESSION_KEY: str(self.resume_session_combo.currentData() or DEFAULT_RESUME_SESSION),
+            CHECK_FOR_UPDATES_KEY: self.check_for_updates_check.isChecked(),
             FILE_EDITOR_AUTO_SAVE_KEY: self.file_editor_auto_save_check.isChecked(),
             FILE_EDITOR_TAB_SPACES_KEY: self.file_editor_tab_spaces_spin.value(),
             CANVAS_ENABLED_KEY: self.canvas_enabled_check.isChecked(),

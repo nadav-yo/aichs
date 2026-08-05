@@ -745,6 +745,15 @@ def center_notice_style() -> str:
     return hint_label_style(padding="8px")
 
 
+def update_banner_style() -> str:
+    p = palette()
+    return (
+        f"QFrame#updateBanner {{ background:{p['BG2']}; border:none;"
+        f"border-bottom:1px solid {p['BORDER']}; }}"
+        f"QLabel#updateBannerLabel {{ color:{p['TEXT']}; background:transparent; border:none; }}"
+    )
+
+
 def input_bar_style() -> str:
     p = palette()
     return f"QFrame {{ background:{p['BG']}; border:0; }}"
