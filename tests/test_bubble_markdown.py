@@ -13,6 +13,8 @@ from ui.widgets.bubble import (
     _linkify_user_text,
     _safe_paragraph_boundary,
     _to_html,
+    format_timestamp,
+    format_timestamp_tooltip,
 )
 
 
@@ -249,6 +251,21 @@ def test_assistant_markdown_linkifies_plain_file_paths():
 
     assert 'href="aichs-file:services\\git_diff.py"' in html
     assert ">services\\git_diff.py</a>" in html
+
+
+def test_assistant_markdown_linkifies_backtick_wrapped_file_paths():
+    html = _to_html("**File**: `services/chat.py`")
+
+    assert 'href="aichs-file:services/chat.py"' in html
+    assert ">services/chat.py</a>" in html
+    assert "<code>services/chat.py</code>" not in html
+
+
+def test_assistant_markdown_keeps_non_path_inline_code():
+    html = _to_html("Run `pytest -q` after editing services/chat.py.")
+
+    assert "<code>pytest -q</code>" in html
+    assert 'href="aichs-file:services/chat.py"' in html
 
 
 def test_assistant_markdown_linkifies_file_paths_in_lists():
@@ -490,3 +507,41 @@ class _FakeKeyEvent:
 
     def isAccepted(self):
         return self._accepted
+
+
+def test_format_timestamp_is_locale_stable_and_relative(monkeypatch):
+    from datetime import date
+
+    today = date(2026, 8, 5)
+    assert format_timestamp("2026-08-05T14:07:00", today=today) == "14:07"
+    assert format_timestamp("2026-08-04T21:15:00", today=today) == "Aug 4 21:15"
+    assert format_timestamp("2026-03-15T09:30:00", today=today) == "Mar 15 09:30"
+    assert format_timestamp("2025-12-01T09:30:00", today=today) == "Dec 1, 2025 09:30"
+    assert format_timestamp_tooltip("2026-03-15T09:30:00") == "Mar 15, 2026 09:30"
+
+
+def test_assistant_meta_puts_usage_beside_timestamp(qapp):
+    bubble = MessageBubble(
+        "hello",
+        is_user=False,
+        timestamp="2026-08-05T14:07:00",
+        usage={"input_tokens": 12, "output_tokens": 4, "cached_input_tokens": 2},
+    )
+    try:
+        assert bubble._timestamp_lbl.text() == "14:07"
+        assert bubble._usage_lbl.text() == "↓12 · ↑4"
+        assert "Input tokens: 12" in bubble._usage_lbl.toolTip()
+        assert "Cache hit: 2" in bubble._usage_lbl.toolTip()
+        assert "Output tokens: 4" in bubble._usage_lbl.toolTip()
+        shared = False
+        for index in range(bubble.body.count()):
+            item = bubble.body.itemAt(index)
+            layout = item.layout() if item is not None else None
+            if layout is None:
+                continue
+            if layout.indexOf(bubble._timestamp_lbl) >= 0 and layout.indexOf(bubble._usage_lbl) >= 0:
+                shared = True
+                break
+        assert shared
+    finally:
+        bubble.close()

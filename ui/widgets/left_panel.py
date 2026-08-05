@@ -2091,6 +2091,7 @@ class LeftPanel(QWidget):
         rail_layout.setContentsMargins(8, 2, 8, 9)
         rail_layout.setSpacing(3)
         self._rail_layout = rail_layout
+        self._rail_in_chrome = False
 
         self._stack = QStackedWidget()
         self._stack.setObjectName("activityStack")
@@ -2253,6 +2254,23 @@ class LeftPanel(QWidget):
         self._sync_activity_buttons()
         self.canvas_requested.emit()
 
+    def detach_activity_rail(self) -> QFrame:
+        """Move activity tabs into the window chrome; sidebar collapse goes to zero width."""
+        if self._rail_in_chrome:
+            return self._rail
+        layout = self.layout()
+        if layout is not None:
+            layout.removeWidget(self._rail)
+        self._rail_in_chrome = True
+        self._collapsed_width = 0
+        self._rail_layout.setContentsMargins(4, 0, 4, 0)
+        self._rail_layout.setSpacing(2)
+        if self.is_activity_panel_collapsed():
+            self.setMinimumWidth(0)
+            self.setMaximumWidth(0)
+        self._sync_activity_buttons()
+        return self._rail
+
     def set_active_activity(self, key: str, *, expand: bool = True):
         widget = self._activity_widgets.get(key)
         if widget is None:
@@ -2319,7 +2337,8 @@ class LeftPanel(QWidget):
     def _sync_activity_buttons(self):
         palette()
         fs = max(11, chat_font_pt() - 2)
-        compact = self.is_activity_panel_collapsed()
+        # Chrome-hosted tabs stay labeled; compact icons only when the rail lives in the sidebar.
+        compact = (not self._rail_in_chrome) and self.is_activity_panel_collapsed()
         for key, button in self._activity_buttons.items():
             has_attention = self._activity_attention.get(key, False)
             button.setText("" if compact else self._activity_labels.get(key, ""))

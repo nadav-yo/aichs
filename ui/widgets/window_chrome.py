@@ -191,36 +191,38 @@ class WindowChrome(QWidget):
         self._window = window
         self._allow_minimize = allow_minimize
         self._allow_maximize = allow_maximize
+        self._leading = None
+        self._trailing = None
         self.setObjectName("windowChrome")
         self.setFixedHeight(34)
         self._window.installEventFilter(self)
 
-        root = QHBoxLayout(self)
-        root.setContentsMargins(8, 0, 0, 0)
-        root.setSpacing(0)
+        self._root = QHBoxLayout(self)
+        self._root.setContentsMargins(8, 0, 0, 0)
+        self._root.setSpacing(0)
 
         self._drag_area = _ChromeDragArea(window, allow_maximize=allow_maximize, parent=self)
-        drag_layout = QHBoxLayout(self._drag_area)
-        drag_layout.setContentsMargins(0, 0, 8, 0)
-        drag_layout.setSpacing(8)
+        self._drag_layout = QHBoxLayout(self._drag_area)
+        self._drag_layout.setContentsMargins(0, 0, 8, 0)
+        self._drag_layout.setSpacing(8)
 
         self._icon = QLabel()
         self._icon.setObjectName("windowChromeIcon")
         self._icon.setFixedSize(18, 18)
-        drag_layout.addWidget(self._icon, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._drag_layout.addWidget(self._icon, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._title = QLabel(window.windowTitle() or "AICHS")
         self._title.setObjectName("windowChromeTitle")
-        drag_layout.addWidget(self._title, 0, Qt.AlignmentFlag.AlignVCenter)
-        drag_layout.addStretch(1)
-        root.addWidget(self._drag_area, 1)
+        self._drag_layout.addWidget(self._title, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._drag_layout.addStretch(1)
+        self._root.addWidget(self._drag_area, 1)
 
         self._minimize_btn = self._window_button("minimize", "Minimize")
         self._maximize_btn = self._window_button("maximize", "Maximize")
         self._close_btn = self._window_button("close", "Close")
-        root.addWidget(self._minimize_btn)
-        root.addWidget(self._maximize_btn)
-        root.addWidget(self._close_btn)
+        self._root.addWidget(self._minimize_btn)
+        self._root.addWidget(self._maximize_btn)
+        self._root.addWidget(self._close_btn)
 
         self._minimize_btn.setVisible(allow_minimize)
         self._maximize_btn.setVisible(allow_maximize)
@@ -229,6 +231,51 @@ class WindowChrome(QWidget):
         self._close_btn.clicked.connect(window.close)
         self.apply_appearance()
         self.sync_window_state()
+
+    def set_toolbar_content(
+        self,
+        *,
+        leading: QWidget | None = None,
+        trailing: QWidget | None = None,
+    ) -> None:
+        """Replace brand icon/title with main-window nav (activity tabs + focus modes)."""
+        self._leading = leading
+        self._trailing = trailing
+        self._icon.hide()
+        self._title.hide()
+
+        while self._root.count():
+            item = self._root.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(self)
+
+        self._drag_layout.setContentsMargins(0, 0, 0, 0)
+        self._drag_layout.setSpacing(0)
+        while self._drag_layout.count():
+            item = self._drag_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None and widget not in {self._icon, self._title}:
+                widget.setParent(None)
+
+        if leading is not None:
+            leading.setParent(self)
+            self._root.addWidget(leading, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self._drag_layout.addStretch(1)
+        self._root.addWidget(self._drag_area, 1)
+
+        if trailing is not None:
+            trailing.setParent(self)
+            self._root.addWidget(trailing, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self._root.addWidget(self._minimize_btn)
+        self._root.addWidget(self._maximize_btn)
+        self._root.addWidget(self._close_btn)
+        self.setFixedHeight(40)
+        for button in (self._minimize_btn, self._maximize_btn, self._close_btn):
+            button.setFixedSize(46, 40)
+        self._root.setContentsMargins(4, 0, 0, 0)
 
     def _window_button(self, role: str, tooltip: str) -> QPushButton:
         button = QPushButton("")
@@ -270,11 +317,13 @@ class WindowChrome(QWidget):
         self.sync_window_state()
 
     def sync_window_state(self):
-        icon = self._window.windowIcon()
-        if icon.isNull():
-            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
-        self._icon.setPixmap(icon.pixmap(16, 16))
-        self._title.setText(self._window.windowTitle() or "AICHS")
+        if self._icon.isVisible():
+            icon = self._window.windowIcon()
+            if icon.isNull():
+                icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+            self._icon.setPixmap(icon.pixmap(16, 16))
+        if self._title.isVisible():
+            self._title.setText(self._window.windowTitle() or "AICHS")
         self._minimize_btn.setIcon(_window_control_icon("minimize"))
         if self._window.isMaximized():
             self._maximize_btn.setIcon(_window_control_icon("maximize", maximized=True))

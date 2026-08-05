@@ -7,6 +7,9 @@ from pathlib import Path
 from services.performance import slowest_logged_operations
 
 APP_USER_MODEL_ID = "studio.aichs.desktop"
+APP_NAME = "Aichs"
+APP_ORGANIZATION = "aichs"
+APP_ORGANIZATION_DOMAIN = "aichs.studio"
 
 
 def _assets_dir() -> Path:
@@ -129,6 +132,16 @@ def _set_windows_app_id() -> None:
         pass
 
 
+def _configure_application(app) -> None:
+    """Set the process/app identity shown in OS chrome (Dock hover, taskbar, etc.)."""
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
+    app.setOrganizationName(APP_ORGANIZATION)
+    app.setOrganizationDomain(APP_ORGANIZATION_DOMAIN)
+    if hasattr(app, "setDesktopFileName"):
+        app.setDesktopFileName("aichs")
+
+
 def _app_icon():
     from PyQt6.QtGui import QIcon
 
@@ -149,6 +162,7 @@ def _start_gui(workspace: str | None, last_workspace: bool, qt_args: list[str]) 
     SettingsStore().apply()
     _set_windows_app_id()
     app = QApplication([sys.argv[0], *qt_args])
+    _configure_application(app)
     icon = _app_icon()
     app.setWindowIcon(icon)
     app.setStyle("Fusion")

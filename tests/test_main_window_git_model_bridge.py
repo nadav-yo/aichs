@@ -82,6 +82,34 @@ def test_theme_only_settings_change_skips_model_and_editor_refresh(qapp, workspa
         qapp.setStyleSheet(app_style)
 
 
+def test_user_providers_settings_change_refreshes_models(qapp, workspace, monkeypatch):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    window = MainWindow(startup_workspace=str(workspace))
+    calls = {"chat_models": 0, "canvas_refresh": None}
+    try:
+        monkeypatch.setattr(
+            window._chat,
+            "refresh_models",
+            lambda: calls.__setitem__("chat_models", calls["chat_models"] + 1),
+        )
+
+        def _canvas_apply(*, refresh_models=True):
+            calls["canvas_refresh"] = refresh_models
+
+        monkeypatch.setattr(window._agent_canvas, "apply_appearance", _canvas_apply)
+
+        window._apply_appearance({"user_providers"})
+
+        assert calls == {"chat_models": 1, "canvas_refresh": True}
+    finally:
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
 def test_main_window_uses_custom_frameless_chrome(qapp, workspace):
     cwd = os.getcwd()
     app_style = qapp.styleSheet()
@@ -95,6 +123,11 @@ def test_main_window_uses_custom_frameless_chrome(qapp, workspace):
         assert window._window_chrome._minimize_btn.toolTip() == "Minimize"
         assert window._window_chrome._maximize_btn.toolTip() == "Maximize"
         assert window._window_chrome._close_btn.toolTip() == "Close"
+        assert not window._window_chrome._icon.isVisible()
+        assert not window._window_chrome._title.isVisible()
+        assert window._left._rail.parent() is window._window_chrome
+        assert window._workbench_mode_bar.parent() is window._window_chrome
+        assert window._workbench_host.layout().indexOf(window._workbench_mode_bar) < 0
     finally:
         window.close()
         os.chdir(cwd)
@@ -747,13 +780,15 @@ def test_main_window_restores_zero_width_left_panel_as_activity_rail(qapp, works
 
         assert not window._root_splitter.isCollapsible(0)
         assert window._left.is_activity_panel_collapsed()
-        assert window._left.minimumWidth() == window._left._collapsed_width
-        assert window._root_splitter.sizes()[0] >= window._left._collapsed_width
+        assert window._left.minimumWidth() == 0
+        assert window._root_splitter.sizes()[0] == 0
+        assert window._left._rail.parent() is window._window_chrome
+        assert window._left._activity_buttons["chats"].text() == "Chats"
 
         window._left._activity_buttons["files"].click()
 
         assert not window._left.is_activity_panel_collapsed()
-        assert window._root_splitter.sizes()[0] > window._left._collapsed_width
+        assert window._root_splitter.sizes()[0] > 0
     finally:
         window.close()
         os.chdir(cwd)

@@ -256,6 +256,129 @@ def test_settings_save_refreshes_anthropic_context_asynchronously(qapp, monkeypa
     assert async_calls == ["refresh"]
 
 
+def test_settings_save_marks_user_providers_when_only_models_change(qapp, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    reg.save_user_providers({
+        "local": {
+            "api": "openai-compatible",
+            "apiKey": "LOCAL_KEY",
+            "baseUrl": "http://localhost:11434/v1",
+            "models": [{"id": "model-a", "name": "Model A"}],
+        }
+    })
+    reg.reload()
+
+    try:
+        store = SettingsStore()
+        store.save({
+            "provider_api_keys": {"local": "test-key"},
+            "provider_order": ["local"],
+            "default_models": {"local": "model-a"},
+        })
+        dialog = SettingsDialog(store)
+        _ensure_models_page(dialog)
+        row = _provider_row(dialog, "local")
+        dialog._providers[row]["models"].append({"id": "model-b", "name": "Model B"})
+
+        dialog._save()
+
+        assert "user_providers" in dialog.changed_keys
+        assert "model-b" in _model_ids(reg.load_user_providers()["local"]["models"])
+        assert "model-b" in reg.MODELS.get("local", [])
+    finally:
+        reg.save_user_providers({})
+        reg.reload()
+
+
+def test_settings_save_marks_user_providers_when_model_edited_or_removed(qapp, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    initial = {
+        "local": {
+            "api": "openai-compatible",
+            "apiKey": "LOCAL_KEY",
+            "baseUrl": "http://localhost:11434/v1",
+            "models": [
+                {"id": "model-a", "name": "Model A"},
+                {"id": "model-b", "name": "Model B"},
+            ],
+        }
+    }
+    reg.save_user_providers(initial)
+    reg.reload()
+
+    try:
+        store = SettingsStore()
+        store.save({
+            "provider_api_keys": {"local": "test-key"},
+            "provider_order": ["local"],
+            "default_models": {"local": "model-a"},
+        })
+
+        edit_dialog = SettingsDialog(store)
+        _ensure_models_page(edit_dialog)
+        edit_row = _provider_row(edit_dialog, "local")
+        edit_dialog._providers[edit_row]["models"][0]["name"] = "Renamed A"
+        edit_dialog._save()
+
+        assert "user_providers" in edit_dialog.changed_keys
+        assert reg.load_user_providers()["local"]["models"][0]["name"] == "Renamed A"
+        assert reg.get_model_config("model-a").display_name == "Renamed A"
+
+        remove_dialog = SettingsDialog(store)
+        _ensure_models_page(remove_dialog)
+        remove_row = _provider_row(remove_dialog, "local")
+        remove_dialog._providers[remove_row]["models"] = [
+            model
+            for model in remove_dialog._providers[remove_row]["models"]
+            if model["id"] != "model-b"
+        ]
+        remove_dialog._save()
+
+        assert "user_providers" in remove_dialog.changed_keys
+        assert _model_ids(reg.load_user_providers()["local"]["models"]) == ["model-a"]
+        assert "model-b" not in reg.MODELS.get("local", [])
+    finally:
+        reg.save_user_providers({})
+        reg.reload()
+
+
+def test_settings_save_marks_user_providers_when_provider_removed(qapp, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    reg.save_user_providers({
+        "local": {
+            "api": "openai-compatible",
+            "apiKey": "LOCAL_KEY",
+            "baseUrl": "http://localhost:11434/v1",
+            "models": [{"id": "model-a", "name": "Model A"}],
+        }
+    })
+    reg.reload()
+
+    try:
+        store = SettingsStore()
+        store.save({
+            "provider_api_keys": {"local": "test-key"},
+            "provider_order": ["local"],
+            "default_models": {"local": "model-a"},
+        })
+        dialog = SettingsDialog(store)
+        _ensure_models_page(dialog)
+        row = _provider_row(dialog, "local")
+        del dialog._providers[row]
+
+        dialog._save()
+
+        assert "user_providers" in dialog.changed_keys
+        assert "local" not in reg.load_user_providers()
+        assert "local" not in reg.MODELS
+    finally:
+        reg.save_user_providers({})
+        reg.reload()
+
+
 def test_settings_save_preserves_env_only_provider_key(qapp, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "external-key")

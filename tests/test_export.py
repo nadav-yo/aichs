@@ -72,7 +72,7 @@ def test_user_blocks_with_image_and_timestamp():
         "",
         {"input_tokens": 100, "cached_input_tokens": 80, "output_tokens": 12},
     )
-    assert "Usage: in 100" in "\n".join(usage_lines)
+    assert "Usage: ↓100 · ↑12" in "\n".join(usage_lines)
 
 
 def test_conversation_metadata_updated_only():

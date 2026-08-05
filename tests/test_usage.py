@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from services.usage import merge_usage, normalize_usage, usage_summary
+from services.usage import merge_usage, normalize_usage, usage_summary, usage_tooltip
 
 
 def test_normalize_anthropic_usage():
@@ -38,4 +38,5 @@ def test_merge_and_summarize_usage():
     )
     assert merged["input_tokens"] == 30
     assert merged["cached_input_tokens"] == 5
-    assert usage_summary(merged) == "in 30 · cache hit 5 · out 3"
+    assert usage_summary(merged) == "↓30 · ↑3"
+    assert usage_tooltip(merged) == "Input tokens: 30\nCache hit: 5\nOutput tokens: 3"
