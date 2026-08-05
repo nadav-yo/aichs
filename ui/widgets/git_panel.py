@@ -70,6 +70,8 @@ _ROLE_SHORT_HASH = Qt.ItemDataRole.UserRole + 2
 _ROLE_FILE_DIFF = Qt.ItemDataRole.UserRole + 3
 _ROLE_REF_BADGES = Qt.ItemDataRole.UserRole + 4
 _LOG_SEP = "\x1f"
+_COMMIT_SUBJECT_DISPLAY_MAX = 72
+_COMMIT_REF_LABEL_DISPLAY_MAX = 24
 
 
 class _GitActionThread(QThread):
@@ -115,8 +117,8 @@ class _CommitLogDelegate(QStyledItemDelegate):
         subject_color = p["SELECTION_TEXT"] if selected else p["TEXT"]
 
         short_hash = str(index.data(_ROLE_SHORT_HASH) or "").strip()
-        subject = str(index.data(_ROLE_SUBJECT) or "").strip()
-        badges = index.data(_ROLE_REF_BADGES) or []
+        subject = _display_commit_subject(str(index.data(_ROLE_SUBJECT) or ""))
+        badges = _display_commit_badges(index.data(_ROLE_REF_BADGES) or [])
         if not short_hash:
             short_hash = str(index.data(_ROLE_HASH) or "").strip()[:7]
 
@@ -137,21 +139,17 @@ class _CommitLogDelegate(QStyledItemDelegate):
             subject_x = self._draw_ref_badges(painter, option, badges, subject_x)
 
         if subject:
-            subject_rect = QRect(subject_x, rect.y(), max(0, rect.right() - subject_x + 1), rect.height())
             subject_font = app_font()
             subject_font.setPointSize(max(10, option.font.pointSize()))
             subject_metrics = QFontMetrics(subject_font)
-            subject_text = subject_metrics.elidedText(
-                subject,
-                Qt.TextElideMode.ElideRight,
-                subject_rect.width(),
-            )
+            subject_width = subject_metrics.horizontalAdvance(subject)
+            subject_rect = QRect(subject_x, rect.y(), subject_width, rect.height())
             painter.setFont(subject_font)
             painter.setPen(QColor(subject_color))
             painter.drawText(
                 subject_rect,
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                subject_text,
+                subject,
             )
         painter.restore()
 
@@ -169,12 +167,10 @@ class _CommitLogDelegate(QStyledItemDelegate):
         row_rect = option.rect.adjusted(6, 0, -6, 0)
         gap = max(4, metrics.horizontalAdvance(" "))
         for label, kind in badges:
-            label = str(label or "").strip()
+            label = _display_commit_ref_label(label)
             if not label:
                 continue
             badge_width = metrics.horizontalAdvance(label) + 10
-            if x + badge_width > row_rect.right():
-                break
             badge_height = min(row_rect.height() - 4, metrics.height() + 4)
             badge_y = row_rect.y() + (row_rect.height() - badge_height) // 2
             badge_rect = QRect(x, badge_y, badge_width, badge_height)
@@ -195,7 +191,43 @@ class _CommitLogDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
         size = super().sizeHint(option, index)
         size.setHeight(max(size.height(), QFontMetrics(option.font).height() + 10))
+        size.setWidth(self._content_width(option, index))
         return size
+
+    def _content_width(self, option, index) -> int:
+        short_hash = str(index.data(_ROLE_SHORT_HASH) or "").strip()
+        subject = _display_commit_subject(str(index.data(_ROLE_SUBJECT) or ""))
+        badges = _display_commit_badges(index.data(_ROLE_REF_BADGES) or [])
+        if not short_hash:
+            short_hash = str(index.data(_ROLE_HASH) or "").strip()[:7]
+
+        hash_font = QFont(option.font)
+        hash_font.setWeight(QFont.Weight.DemiBold)
+        hash_metrics = QFontMetrics(hash_font)
+        width = 12  # left/right padding from paint()
+        width += hash_metrics.horizontalAdvance(short_hash)
+        width += hash_metrics.horizontalAdvance("  ")
+
+        if badges:
+            badge_font = QFont(option.font)
+            point_size = badge_font.pointSize()
+            if point_size > 0:
+                badge_font.setPointSize(max(8, point_size - 1))
+            badge_font.setWeight(QFont.Weight.DemiBold)
+            badge_metrics = QFontMetrics(badge_font)
+            gap = max(4, badge_metrics.horizontalAdvance(" "))
+            for label, _kind in badges:
+                label = _display_commit_ref_label(label)
+                if not label:
+                    continue
+                width += badge_metrics.horizontalAdvance(label) + 10 + gap
+            width += gap
+
+        if subject:
+            subject_font = app_font()
+            subject_font.setPointSize(max(10, option.font.pointSize()))
+            width += QFontMetrics(subject_font).horizontalAdvance(subject)
+        return max(width, 1)
 
 
 class _CommitLogList(QListWidget):
@@ -204,6 +236,8 @@ class _CommitLogList(QListWidget):
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.setDefaultDropAction(Qt.DropAction.CopyAction)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setItemDelegate(_CommitLogDelegate(self))
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._context_menu)
@@ -779,9 +813,12 @@ class GitPanel(QWidget):
                 continue
             full_hash, short_hash, refs, subject = parsed
             badges = _commit_ref_badges(refs)
-            text = f"{short_hash} {subject}" if subject else short_hash
-            item = QListWidgetItem(text)
-            tooltip = "Drag this commit into chat."
+            # Keep display text short so QListWidget size hints track real paint width
+            # (full subject lives in _ROLE_SUBJECT and the delegate sizeHint).
+            item = QListWidgetItem(short_hash)
+            tooltip = subject or "Drag this commit into chat."
+            if subject:
+                tooltip = f"{subject}\nDrag this commit into chat."
             if badges:
                 tooltip += "\nRefs: " + ", ".join(label for label, _kind in badges)
             item.setToolTip(tooltip)
@@ -987,6 +1024,42 @@ def _commit_ref_badges(refs: list[str]) -> list[tuple[str, str]]:
             seen.add(label)
             badges.append((label, kind))
     return badges
+
+
+def _display_commit_subject(
+    subject: str,
+    *,
+    max_chars: int = _COMMIT_SUBJECT_DISPLAY_MAX,
+) -> str:
+    text = str(subject or "").strip()
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    if max_chars <= 3:
+        return text[:max_chars]
+    return text[: max_chars - 3].rstrip() + "..."
+
+
+def _display_commit_ref_label(
+    label: str,
+    *,
+    max_chars: int = _COMMIT_REF_LABEL_DISPLAY_MAX,
+) -> str:
+    text = str(label or "").strip()
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    if max_chars <= 3:
+        return text[:max_chars]
+    return text[: max_chars - 3].rstrip() + "..."
+
+
+def _display_commit_badges(badges) -> list[tuple[str, str]]:
+    for badge in badges or []:
+        if not isinstance(badge, (tuple, list)) or len(badge) < 2:
+            continue
+        label = str(badge[0] or "").strip()
+        if label:
+            return [(label, str(badge[1] or ""))]
+    return []
 
 
 def _commit_ref_badge_colors(kind: str, selected: bool, p: dict) -> tuple[str, str, str]:

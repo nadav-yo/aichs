@@ -85,6 +85,10 @@ DEFAULT_GIT_PANEL_LISTS_SPLIT = [120, 220]
 RESUME_SESSION_KEY = "resume_session"
 DEFAULT_RESUME_SESSION = "always"
 _VALID_RESUME_SESSION = frozenset({"always", "ask", "never"})
+CHECK_FOR_UPDATES_KEY = "check_for_updates"
+DEFAULT_CHECK_FOR_UPDATES = True
+UPDATE_DISMISSED_VERSION_KEY = "update_dismissed_version"
+UPDATE_LAST_CHECKED_KEY = "update_last_checked"
 PROJECT_MEMORY_SCOPE_KEY = "project_memory_scope"
 DEFAULT_PROJECT_MEMORY_SCOPE = "local"
 _VALID_PROJECT_MEMORY_SCOPES = frozenset({"local", "global", "disabled"})
@@ -232,6 +236,28 @@ def resume_session(data: dict | None) -> str:
     if mode not in _VALID_RESUME_SESSION:
         return DEFAULT_RESUME_SESSION
     return mode
+
+
+def check_for_updates(data: dict | None) -> bool:
+    data = data if isinstance(data, dict) else {}
+    if CHECK_FOR_UPDATES_KEY not in data:
+        return DEFAULT_CHECK_FOR_UPDATES
+    return bool(data.get(CHECK_FOR_UPDATES_KEY))
+
+
+def update_dismissed_version(data: dict | None) -> str:
+    data = data if isinstance(data, dict) else {}
+    return str(data.get(UPDATE_DISMISSED_VERSION_KEY) or "").strip()
+
+
+def update_last_checked(data: dict | None) -> float:
+    data = data if isinstance(data, dict) else {}
+    raw = data.get(UPDATE_LAST_CHECKED_KEY, 0)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, value)
 
 
 def project_memory_scope(data: dict | None) -> str:

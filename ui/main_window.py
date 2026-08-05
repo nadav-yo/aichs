@@ -21,13 +21,17 @@ from storage.repository import ConversationStore
 from storage.agent_canvas import CanvasSaveRefused, load_agent_canvas, save_agent_canvas
 from storage.settings import (
     CANVAS_ENABLED_KEY,
+    CHECK_FOR_UPDATES_KEY,
     DIAGNOSTIC_FIX_PROMPT_TEMPLATE_KEY,
     FILE_EDITOR_AUTO_SAVE_KEY,
     FILE_EDITOR_TAB_SPACES_KEY,
     FILE_REVIEW_PROMPT_TEMPLATE_KEY,
     SettingsStore,
     canvas_enabled,
+    check_for_updates,
     resume_session,
+    update_dismissed_version,
+    update_last_checked,
 )
 from storage.workspace_session import (
     load_workspace_session,
@@ -40,6 +44,7 @@ from services.mcp_tools import start_mcp_capability_warmup
 from services.palette import PaletteContext, build_palette_items
 from services.processes import get_process_manager
 from services.tool_registry import disable_unreviewed_extensions
+from services import updates as app_updates
 from ui.theme import (
     apply_app_theme,
     current_theme,
@@ -57,6 +62,7 @@ from ui.widgets.agent_canvas import AgentCanvasPanel
 from ui.widgets.workbench_context import WorkbenchContextPanel
 from ui.widgets.workspace_dashboard import WorkspaceDashboard
 from ui.widgets.context_ring import ContextRing
+from ui.widgets.update_banner import UpdateBanner
 from ui.widgets.window_chrome import set_chromed_central_widget
 import config
 from ui.widgets.command_palette import CommandPalette
@@ -146,6 +152,17 @@ class _ExtensionReviewThread(QThread):
         self.done.emit(self._generation, self._repo, summaries, "")
 
 
+class _UpdateCheckThread(QThread):
+    done = pyqtSignal(object)
+
+    def run(self):
+        try:
+            result = app_updates.check_for_update()
+        except Exception:
+            result = None
+        self.done.emit(result)
+
+
 def _startup_workspace(
     saved: dict,
     startup_workspace: str | None = None,
@@ -183,6 +200,7 @@ class MainWindow(QMainWindow):
         self._initial_git_snapshot = None
         self._extension_review_generation = 0
         self._extension_review_threads: list[_ExtensionReviewThread] = []
+        self._update_check_thread: _UpdateCheckThread | None = None
         self._workspace_context_state: dict[str, int | bool] | None = None
         self._pending_workspace_session: dict | None = None
         self._workbench_preview_host_tab = None
@@ -466,6 +484,12 @@ class MainWindow(QMainWindow):
         self._setup_shortcuts()
 
         set_chromed_central_widget(self, self._root_splitter)
+        self._update_banner = UpdateBanner(self)
+        self._update_banner.dismissed.connect(self._on_update_dismissed)
+        self._update_banner.remind_later.connect(self._update_banner.hide)
+        shell_layout = getattr(self, "_window_shell_layout", None)
+        if shell_layout is not None:
+            shell_layout.insertWidget(1, self._update_banner)
         self._window_chrome.set_toolbar_content(
             leading=self._left.detach_activity_rail(),
             trailing=self._workbench_mode_bar,
@@ -488,6 +512,7 @@ class MainWindow(QMainWindow):
 
     def _run_after_first_paint(self):
         self._review_new_extensions()
+        self._maybe_check_for_updates()
         start_mcp_capability_warmup(os.getcwd())
         if not self._pending_default_activity_width:
             self._start_initial_git_status_refresh()
@@ -855,6 +880,11 @@ class MainWindow(QMainWindow):
             self._agent_canvas.apply_appearance(refresh_models=refresh_models)
             if self._window_chrome is not None:
                 self._window_chrome.apply_appearance()
+            if hasattr(self, "_update_banner"):
+                self._update_banner.apply_appearance()
+                if changed is not None and CHECK_FOR_UPDATES_KEY in changed:
+                    if not check_for_updates(self._settings.load()):
+                        self._update_banner.clear()
             self._sync_workbench_mode_buttons()
             self._apply_workbench_restore_tab_style()
             self._sync_context_tab_icons()
@@ -1436,6 +1466,45 @@ class MainWindow(QMainWindow):
         thread.finished.connect(lambda t=thread: self._release_extension_review_thread(t))
         thread.finished.connect(thread.deleteLater)
         thread.start()
+
+    def _maybe_check_for_updates(self):
+        if self._update_check_thread is not None:
+            return
+        saved = self._settings.load()
+        if not app_updates.should_run_network_check(
+            enabled=check_for_updates(saved),
+            last_checked=update_last_checked(saved),
+        ):
+            return
+        thread = _UpdateCheckThread(self)
+        self._update_check_thread = thread
+        thread.done.connect(self._on_update_check_done)
+        thread.finished.connect(self._clear_update_check_thread)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _on_update_check_done(self, availability: object):
+        saved = self._settings.load()
+        updated = app_updates.mark_checked(saved)
+        if updated != saved:
+            self._settings.save(updated)
+        if not check_for_updates(updated):
+            self._update_banner.clear()
+            return
+        if app_updates.should_prompt(availability, update_dismissed_version(updated)):
+            self._update_banner.show_update(availability)
+        else:
+            self._update_banner.clear()
+
+    def _on_update_dismissed(self, version: str):
+        saved = self._settings.load()
+        updated = app_updates.dismiss_version(saved, version)
+        if updated != saved:
+            self._settings.save(updated)
+        self._update_banner.clear()
+
+    def _clear_update_check_thread(self):
+        self._update_check_thread = None
 
     def _on_extension_review_done(self, generation: int, repo: str, summaries: object, error: str):
         if generation != self._extension_review_generation:

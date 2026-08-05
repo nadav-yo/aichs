@@ -119,6 +119,12 @@ def isolate_aichs_home(monkeypatch, tmp_path):
     monkeypatch.setattr("services.model_registry._MODELS_PATH", settings_dir / "models.json")
 
 
+@pytest.fixture(autouse=True)
+def disable_startup_update_network(monkeypatch):
+    """Tests must not hit PyPI; MainWindow show() would otherwise start a check."""
+    monkeypatch.setattr("services.updates.should_run_network_check", lambda **_kwargs: False)
+
+
 @pytest.fixture
 def workspace(tmp_path):
     """Minimal repo tree for path and slash-command tests."""

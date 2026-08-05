@@ -132,6 +132,145 @@ def _set_windows_app_id() -> None:
         pass
 
 
+def _set_macos_process_name_cps(name: str) -> bool:
+    """Undocumented CPSSetProcessName — used for Dock hover on non-bundled launches."""
+    try:
+        import ctypes
+        from ctypes import Structure, byref, c_char_p, c_uint32, cdll
+        from ctypes.util import find_library
+
+        lib_name = find_library("ApplicationServices")
+        if not lib_name:
+            return False
+        app_services = cdll.LoadLibrary(lib_name)
+
+        class ProcessSerialNumber(Structure):
+            _fields_ = [
+                ("highLongOfPSN", c_uint32),
+                ("lowLongOfPSN", c_uint32),
+            ]
+
+        psn = ProcessSerialNumber()
+        if app_services.GetCurrentProcess(byref(psn)) != 0:
+            return False
+        app_services.CPSSetProcessName.argtypes = [
+            ctypes.POINTER(ProcessSerialNumber),
+            c_char_p,
+        ]
+        return app_services.CPSSetProcessName(byref(psn), name.encode("utf-8")) == 0
+    except Exception:
+        return False
+
+
+def _objc_msg(objc, receiver, selector, *args, restype=None):
+    import ctypes
+
+    sel = objc.sel_registerName(selector if isinstance(selector, bytes) else selector.encode("utf-8"))
+    objc.objc_msgSend.restype = ctypes.c_void_p if restype is None else restype
+    if not args:
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        return objc.objc_msgSend(receiver, sel)
+    argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    for arg in args:
+        if isinstance(arg, bytes):
+            argtypes.append(ctypes.c_char_p)
+        else:
+            argtypes.append(ctypes.c_void_p)
+    objc.objc_msgSend.argtypes = argtypes
+    return objc.objc_msgSend(receiver, sel, *args)
+
+
+def _set_macos_bundle_and_process_name_ctypes(name: str) -> bool:
+    """Set CFBundleName + processName via libobjc (no PyObjC required)."""
+    try:
+        import ctypes
+        from ctypes.util import find_library
+
+        # Ensure Foundation/AppKit symbols are loaded.
+        for framework in ("Foundation", "AppKit"):
+            path = find_library(framework)
+            if path:
+                ctypes.cdll.LoadLibrary(path)
+
+        objc_path = find_library("objc")
+        if not objc_path:
+            return False
+        objc = ctypes.cdll.LoadLibrary(objc_path)
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        ns_string = objc.objc_getClass(b"NSString")
+        if not ns_string:
+            return False
+        ns_name = _objc_msg(
+            objc,
+            ns_string,
+            b"stringWithUTF8String:",
+            name.encode("utf-8"),
+        )
+        if not ns_name:
+            return False
+
+        ns_bundle = objc.objc_getClass(b"NSBundle")
+        bundle = _objc_msg(objc, ns_bundle, b"mainBundle")
+        if bundle:
+            info = _objc_msg(objc, bundle, b"localizedInfoDictionary") or _objc_msg(
+                objc, bundle, b"infoDictionary"
+            )
+            if info:
+                for key in (b"CFBundleName", b"CFBundleDisplayName"):
+                    ns_key = _objc_msg(objc, ns_string, b"stringWithUTF8String:", key)
+                    if ns_key:
+                        _objc_msg(objc, info, b"setObject:forKey:", ns_name, ns_key)
+
+        ns_process_info = objc.objc_getClass(b"NSProcessInfo")
+        process_info = _objc_msg(objc, ns_process_info, b"processInfo")
+        if process_info:
+            _objc_msg(objc, process_info, b"setProcessName:", ns_name)
+        return True
+    except Exception:
+        return False
+
+
+def _set_macos_bundle_and_process_name(name: str) -> bool:
+    """Set menu-bar CFBundleName + process name (PyObjC if present, else ctypes)."""
+    try:
+        from Foundation import NSBundle, NSProcessInfo
+    except Exception:
+        return _set_macos_bundle_and_process_name_ctypes(name)
+    try:
+        bundle = NSBundle.mainBundle()
+        info = None
+        if bundle is not None:
+            info = bundle.localizedInfoDictionary() or bundle.infoDictionary()
+        if info is not None:
+            try:
+                info.setObject_forKey_(name, "CFBundleName")
+                info.setObject_forKey_(name, "CFBundleDisplayName")
+            except Exception:
+                info["CFBundleName"] = name
+                info["CFBundleDisplayName"] = name
+        NSProcessInfo.processInfo().setProcessName_(name)
+        return True
+    except Exception:
+        return _set_macos_bundle_and_process_name_ctypes(name)
+
+
+def _configure_macos_process_identity(name: str = APP_NAME) -> None:
+    """Make Dock / menu bar say Aichs for pipx (non-.app) launches.
+
+    Must run before QApplication: Qt's Cocoa plugin snapshots bundle + process
+    name when it starts NSApplication. Menu bar title comes from CFBundleName;
+    Dock hover also uses processName / CPSSetProcessName.
+    """
+    if sys.platform != "darwin":
+        return
+    _set_macos_bundle_and_process_name(name)
+    _set_macos_process_name_cps(name)
+
+
 def _configure_application(app) -> None:
     """Set the process/app identity shown in OS chrome (Dock hover, taskbar, etc.)."""
     app.setApplicationName(APP_NAME)
@@ -152,6 +291,7 @@ def _app_icon():
 
 
 def _start_gui(workspace: str | None, last_workspace: bool, qt_args: list[str]) -> int:
+    from PyQt6.QtCore import QCoreApplication
     from PyQt6.QtWidgets import QApplication
 
     from storage.settings import SettingsStore
@@ -161,6 +301,11 @@ def _start_gui(workspace: str | None, last_workspace: bool, qt_args: list[str]) 
 
     SettingsStore().apply()
     _set_windows_app_id()
+    # Before QApplication: Cocoa reads CFBundleName / processName for Dock + menu.
+    QCoreApplication.setApplicationName(APP_NAME)
+    QCoreApplication.setOrganizationName(APP_ORGANIZATION)
+    QCoreApplication.setOrganizationDomain(APP_ORGANIZATION_DOMAIN)
+    _configure_macos_process_identity(APP_NAME)
     app = QApplication([sys.argv[0], *qt_args])
     _configure_application(app)
     icon = _app_icon()

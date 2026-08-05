@@ -119,15 +119,39 @@ def test_main_window_uses_custom_frameless_chrome(qapp, workspace):
         assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
         assert window.centralWidget() is window._window_shell
         assert window._window_shell_layout.itemAt(0).widget() is window._window_chrome
-        assert window._window_shell_layout.itemAt(1).widget() is window._root_splitter
+        assert window._window_shell_layout.itemAt(1).widget() is window._update_banner
+        assert window._window_shell_layout.itemAt(2).widget() is window._root_splitter
+        assert window._update_banner.isHidden()
         assert window._window_chrome._minimize_btn.toolTip() == "Minimize"
         assert window._window_chrome._maximize_btn.toolTip() == "Maximize"
         assert window._window_chrome._close_btn.toolTip() == "Close"
         assert not window._window_chrome._icon.isVisible()
         assert not window._window_chrome._title.isVisible()
-        assert window._left._rail.parent() is window._window_chrome
-        assert window._workbench_mode_bar.parent() is window._window_chrome
+        drag = window._window_chrome._drag_area
+        assert window._left._rail.parent() is drag
+        assert window._workbench_mode_bar.parent() is drag
         assert window._workbench_host.layout().indexOf(window._workbench_mode_bar) < 0
+        assert drag.minimumHeight() >= window._window_chrome.height()
+        # Focus modes sit between equal stretches, balanced against the leading tabs.
+        layout = window._window_chrome._drag_layout
+        mode_index = layout.indexOf(window._workbench_mode_bar)
+        assert mode_index > 0
+        assert layout.itemAt(mode_index - 1).spacerItem() is not None
+        assert layout.itemAt(mode_index + 1).spacerItem() is not None
+        balance = window._window_chrome._leading_balance
+        assert balance is not None
+        assert layout.indexOf(balance) == mode_index + 2
+        window.resize(1200, 800)
+        window.show()
+        qapp.processEvents()
+        window._window_chrome._sync_leading_balance()
+        assert balance.width() == window._left._rail.width()
+        assert window._window_chrome._drag_filter is not None
+        # Rail no longer keeps a filler stretch that would eat the drag region.
+        assert all(
+            window._left._rail_layout.itemAt(i).spacerItem() is None
+            for i in range(window._left._rail_layout.count())
+        )
     finally:
         window.close()
         os.chdir(cwd)
@@ -782,7 +806,7 @@ def test_main_window_restores_zero_width_left_panel_as_activity_rail(qapp, works
         assert window._left.is_activity_panel_collapsed()
         assert window._left.minimumWidth() == 0
         assert window._root_splitter.sizes()[0] == 0
-        assert window._left._rail.parent() is window._window_chrome
+        assert window._left._rail.parent() is window._window_chrome._drag_area
         assert window._left._activity_buttons["chats"].text() == "Chats"
 
         window._left._activity_buttons["files"].click()

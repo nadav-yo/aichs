@@ -9,6 +9,7 @@ from storage.settings import (
     DEFAULT_CANVAS_ENABLED,
     DEFAULT_CANVAS_PARALLEL_LIMIT,
     DEFAULT_CANVAS_RUN_MODE,
+    DEFAULT_CHECK_FOR_UPDATES,
     DEFAULT_COMPACT_RESUME_PROMPT,
     DEFAULT_DIAGNOSTIC_FIX_PROMPT_TEMPLATE,
     DEFAULT_FILE_REVIEW_PROMPT_TEMPLATE,
@@ -23,6 +24,7 @@ from storage.settings import (
     canvas_enabled,
     canvas_parallel_limit,
     canvas_run_mode,
+    check_for_updates,
     compact_resume_prompt,
     compaction_summary_guidance,
     diagnostic_fix_prompt_template,
@@ -33,6 +35,8 @@ from storage.settings import (
     graph_generation_strategy,
     project_memory_scope,
     resume_session,
+    update_dismissed_version,
+    update_last_checked,
     DEFAULT_RESUME_SESSION,
 )
 
@@ -191,6 +195,17 @@ def test_resume_session_defaults_and_validates():
     assert resume_session({"resume_session": "ask"}) == "ask"
     assert resume_session({"resume_session": "never"}) == "never"
     assert resume_session({"resume_session": "bogus"}) == DEFAULT_RESUME_SESSION
+
+
+def test_check_for_updates_defaults_and_reads():
+    assert check_for_updates({}) is DEFAULT_CHECK_FOR_UPDATES
+    assert check_for_updates({"check_for_updates": False}) is False
+    assert check_for_updates({"check_for_updates": True}) is True
+    assert update_dismissed_version({}) == ""
+    assert update_dismissed_version({"update_dismissed_version": " 0.5.2 "}) == "0.5.2"
+    assert update_last_checked({}) == 0.0
+    assert update_last_checked({"update_last_checked": "12.5"}) == 12.5
+    assert update_last_checked({"update_last_checked": "nope"}) == 0.0
 
 
 def test_git_panel_settings_helpers():
