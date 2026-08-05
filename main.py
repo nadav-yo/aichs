@@ -132,6 +132,72 @@ def _set_windows_app_id() -> None:
         pass
 
 
+def _set_macos_process_name_cps(name: str) -> bool:
+    """Undocumented CPSSetProcessName — used for Dock hover on non-bundled launches."""
+    try:
+        import ctypes
+        from ctypes import Structure, byref, c_char_p, c_uint32, cdll
+        from ctypes.util import find_library
+
+        lib_name = find_library("ApplicationServices")
+        if not lib_name:
+            return False
+        app_services = cdll.LoadLibrary(lib_name)
+
+        class ProcessSerialNumber(Structure):
+            _fields_ = [
+                ("highLongOfPSN", c_uint32),
+                ("lowLongOfPSN", c_uint32),
+            ]
+
+        psn = ProcessSerialNumber()
+        if app_services.GetCurrentProcess(byref(psn)) != 0:
+            return False
+        app_services.CPSSetProcessName.argtypes = [
+            ctypes.POINTER(ProcessSerialNumber),
+            c_char_p,
+        ]
+        return app_services.CPSSetProcessName(byref(psn), name.encode("utf-8")) == 0
+    except Exception:
+        return False
+
+
+def _set_macos_bundle_and_process_name(name: str) -> bool:
+    """Prefer PyObjC when present; used for menu bar + Dock process identity."""
+    try:
+        from Foundation import NSBundle, NSProcessInfo
+    except Exception:
+        return False
+    try:
+        bundle = NSBundle.mainBundle()
+        info = None
+        if bundle is not None:
+            info = bundle.localizedInfoDictionary() or bundle.infoDictionary()
+        if info is not None:
+            try:
+                info.setObject_forKey_(name, "CFBundleName")
+                info.setObject_forKey_(name, "CFBundleDisplayName")
+            except Exception:
+                info["CFBundleName"] = name
+                info["CFBundleDisplayName"] = name
+        NSProcessInfo.processInfo().setProcessName_(name)
+        return True
+    except Exception:
+        return False
+
+
+def _configure_macos_process_identity(name: str = APP_NAME) -> None:
+    """Make Dock / menu bar say Aichs for pipx (non-.app) launches.
+
+    Must run before QApplication: Qt's Cocoa plugin snapshots bundle + process
+    name when it starts NSApplication.
+    """
+    if sys.platform != "darwin":
+        return
+    _set_macos_bundle_and_process_name(name)
+    _set_macos_process_name_cps(name)
+
+
 def _configure_application(app) -> None:
     """Set the process/app identity shown in OS chrome (Dock hover, taskbar, etc.)."""
     app.setApplicationName(APP_NAME)
@@ -152,6 +218,7 @@ def _app_icon():
 
 
 def _start_gui(workspace: str | None, last_workspace: bool, qt_args: list[str]) -> int:
+    from PyQt6.QtCore import QCoreApplication
     from PyQt6.QtWidgets import QApplication
 
     from storage.settings import SettingsStore
@@ -161,6 +228,11 @@ def _start_gui(workspace: str | None, last_workspace: bool, qt_args: list[str]) 
 
     SettingsStore().apply()
     _set_windows_app_id()
+    # Before QApplication: Cocoa reads CFBundleName / processName for Dock + menu.
+    QCoreApplication.setApplicationName(APP_NAME)
+    QCoreApplication.setOrganizationName(APP_ORGANIZATION)
+    QCoreApplication.setOrganizationDomain(APP_ORGANIZATION_DOMAIN)
+    _configure_macos_process_identity(APP_NAME)
     app = QApplication([sys.argv[0], *qt_args])
     _configure_application(app)
     icon = _app_icon()

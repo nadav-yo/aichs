@@ -1,6 +1,14 @@
 from pathlib import Path
 
-from main import APP_NAME, _configure_application, _parse_args, _print_performance_summary
+from main import (
+    APP_NAME,
+    _configure_application,
+    _configure_macos_process_identity,
+    _parse_args,
+    _print_performance_summary,
+    _set_macos_bundle_and_process_name,
+    _set_macos_process_name_cps,
+)
 from services.performance import PerformanceOperationSummary
 from ui.main_window import _startup_workspace
 
@@ -161,3 +169,88 @@ def test_configure_application_sets_display_name(qapp):
     assert qapp.organizationName() == "aichs"
     assert qapp.organizationDomain() == "aichs.studio"
     assert qapp.desktopFileName() == "aichs"
+
+
+def test_configure_macos_process_identity_is_noop_off_darwin(monkeypatch):
+    monkeypatch.setattr("main.sys.platform", "linux")
+    calls = []
+    monkeypatch.setattr(
+        "main._set_macos_bundle_and_process_name",
+        lambda name: calls.append(("bundle", name)) or True,
+    )
+    monkeypatch.setattr(
+        "main._set_macos_process_name_cps",
+        lambda name: calls.append(("cps", name)) or True,
+    )
+
+    _configure_macos_process_identity("Aichs")
+
+    assert calls == []
+
+
+def test_configure_macos_process_identity_sets_bundle_and_cps(monkeypatch):
+    monkeypatch.setattr("main.sys.platform", "darwin")
+    calls = []
+    monkeypatch.setattr(
+        "main._set_macos_bundle_and_process_name",
+        lambda name: calls.append(("bundle", name)) or True,
+    )
+    monkeypatch.setattr(
+        "main._set_macos_process_name_cps",
+        lambda name: calls.append(("cps", name)) or True,
+    )
+
+    _configure_macos_process_identity("Aichs")
+
+    assert calls == [("bundle", "Aichs"), ("cps", "Aichs")]
+
+
+def test_set_macos_bundle_and_process_name_updates_info_dictionary(monkeypatch):
+    class FakeInfo(dict):
+        def setObject_forKey_(self, value, key):
+            self[key] = value
+
+    class FakeBundle:
+        def __init__(self, info):
+            self._info = info
+
+        def localizedInfoDictionary(self):
+            return None
+
+        def infoDictionary(self):
+            return self._info
+
+    class FakeProcessInfo:
+        def __init__(self):
+            self.name = None
+
+        def setProcessName_(self, name):
+            self.name = name
+
+    info = FakeInfo()
+    process_info = FakeProcessInfo()
+
+    class FakeFoundation:
+        class NSBundle:
+            @staticmethod
+            def mainBundle():
+                return FakeBundle(info)
+
+        class NSProcessInfo:
+            @staticmethod
+            def processInfo():
+                return process_info
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "Foundation", FakeFoundation)
+
+    assert _set_macos_bundle_and_process_name("Aichs") is True
+    assert info["CFBundleName"] == "Aichs"
+    assert info["CFBundleDisplayName"] == "Aichs"
+    assert process_info.name == "Aichs"
+
+
+def test_set_macos_process_name_cps_returns_false_without_library(monkeypatch):
+    monkeypatch.setattr("ctypes.util.find_library", lambda _name: None)
+    assert _set_macos_process_name_cps("Aichs") is False
