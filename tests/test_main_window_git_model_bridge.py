@@ -82,6 +82,34 @@ def test_theme_only_settings_change_skips_model_and_editor_refresh(qapp, workspa
         qapp.setStyleSheet(app_style)
 
 
+def test_user_providers_settings_change_refreshes_models(qapp, workspace, monkeypatch):
+    cwd = os.getcwd()
+    app_style = qapp.styleSheet()
+    app_font = qapp.font()
+    window = MainWindow(startup_workspace=str(workspace))
+    calls = {"chat_models": 0, "canvas_refresh": None}
+    try:
+        monkeypatch.setattr(
+            window._chat,
+            "refresh_models",
+            lambda: calls.__setitem__("chat_models", calls["chat_models"] + 1),
+        )
+
+        def _canvas_apply(*, refresh_models=True):
+            calls["canvas_refresh"] = refresh_models
+
+        monkeypatch.setattr(window._agent_canvas, "apply_appearance", _canvas_apply)
+
+        window._apply_appearance({"user_providers"})
+
+        assert calls == {"chat_models": 1, "canvas_refresh": True}
+    finally:
+        window.close()
+        os.chdir(cwd)
+        qapp.setFont(app_font)
+        qapp.setStyleSheet(app_style)
+
+
 def test_main_window_uses_custom_frameless_chrome(qapp, workspace):
     cwd = os.getcwd()
     app_style = qapp.styleSheet()
