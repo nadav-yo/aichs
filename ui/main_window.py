@@ -822,6 +822,7 @@ class MainWindow(QMainWindow):
             "default_models",
             "crew",
             "crew_models",
+            "user_providers",
         }
         editor_keys = {
             FILE_EDITOR_AUTO_SAVE_KEY,

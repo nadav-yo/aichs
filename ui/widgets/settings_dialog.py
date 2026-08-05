@@ -2908,10 +2908,15 @@ class SettingsDialog(QDialog):
             data["provider_order"] = []
             data["anthropic_api_key"] = ""
             data["openai_api_key"] = ""
+        before_providers = load_user_providers()
         save_user_providers(user_providers)
         model_registry.reload(refresh_anthropic=False)
         model_registry.refresh_anthropic_context_async()
         self.changed_keys = self._changed_keys(before, data)
+        # models.json is outside the settings store; surface provider/model edits so
+        # the chat/canvas model pickers refresh without requiring an app restart.
+        if before_providers != user_providers:
+            self.changed_keys.add("user_providers")
         self.store.save(data)
         self.store.apply_saved(data)
         clear_cache()
