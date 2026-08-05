@@ -1,6 +1,7 @@
 from PyQt6.QtCore import QObject, QEvent, QPoint, QSize, QTimer, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
+    QAbstractButton,
     QApplication,
     QHBoxLayout,
     QLabel,
@@ -162,6 +163,7 @@ class _ChromeDragArea(QWidget):
         self._allow_maximize = allow_maximize
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -185,6 +187,46 @@ class _ChromeDragArea(QWidget):
             self._window.showMaximized()
 
 
+class _ChromeDragForwardFilter(QObject):
+    """Start window moves from empty chrome regions (not from buttons/controls)."""
+
+    def __init__(self, window, chrome: "WindowChrome", *, allow_maximize: bool = True, parent=None):
+        super().__init__(parent)
+        self._window = window
+        self._chrome = chrome
+        self._allow_maximize = allow_maximize
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            if self._is_interactive(obj):
+                return False
+            handle = self._window.windowHandle()
+            if handle is not None and handle.startSystemMove():
+                return True
+        if (
+            self._allow_maximize
+            and event.type() == QEvent.Type.MouseButtonDblClick
+            and event.button() == Qt.MouseButton.LeftButton
+            and not self._is_interactive(obj)
+        ):
+            if self._window.isMaximized():
+                self._window.showNormal()
+            else:
+                self._window.showMaximized()
+            self._chrome.sync_window_state()
+            return True
+        return False
+
+    @staticmethod
+    def _is_interactive(obj) -> bool:
+        widget = obj if isinstance(obj, QWidget) else None
+        while widget is not None:
+            if isinstance(widget, QAbstractButton):
+                return True
+            widget = widget.parentWidget()
+        return False
+
+
 class WindowChrome(QWidget):
     def __init__(self, window, *, allow_minimize: bool = True, allow_maximize: bool = True, parent=None):
         super().__init__(parent)
@@ -193,6 +235,8 @@ class WindowChrome(QWidget):
         self._allow_maximize = allow_maximize
         self._leading = None
         self._trailing = None
+        self._leading_balance = None
+        self._drag_filter = None
         self.setObjectName("windowChrome")
         self.setFixedHeight(34)
         self._window.installEventFilter(self)
@@ -277,11 +321,64 @@ class WindowChrome(QWidget):
 
         self._drag_layout.addStretch(1)
 
+        # Balance the leading tabs so focus modes stay centered in the drag region.
+        self._leading_balance = QWidget(self._drag_area)
+        self._leading_balance.setObjectName("windowChromeLeadingBalance")
+        self._leading_balance.setFixedWidth(0)
+        self._leading_balance.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        self._drag_layout.addWidget(self._leading_balance, 0, Qt.AlignmentFlag.AlignVCenter)
+
         self._root.setContentsMargins(0, 0, 0, 0)
         self._root.addWidget(self._drag_area, 1)
         for button in (self._minimize_btn, self._maximize_btn, self._close_btn):
             button.setFixedSize(46, chrome_h)
             self._root.addWidget(button)
+
+        self._install_drag_forwarding()
+        QTimer.singleShot(0, self._sync_leading_balance)
+
+    def _install_drag_forwarding(self) -> None:
+        if self._drag_filter is not None:
+            return
+        self._drag_filter = _ChromeDragForwardFilter(
+            self._window,
+            self,
+            allow_maximize=self._allow_maximize,
+            parent=self,
+        )
+        targets = [self, self._drag_area]
+        if self._leading is not None:
+            targets.append(self._leading)
+        if self._trailing is not None:
+            targets.append(self._trailing)
+        if self._leading_balance is not None:
+            targets.append(self._leading_balance)
+        seen: set[int] = set()
+        for root in targets:
+            for widget in [root, *root.findChildren(QWidget)]:
+                ident = id(widget)
+                if ident in seen:
+                    continue
+                seen.add(ident)
+                if widget in {self._minimize_btn, self._maximize_btn, self._close_btn}:
+                    continue
+                if isinstance(widget, QAbstractButton):
+                    continue
+                widget.installEventFilter(self._drag_filter)
+
+    def _sync_leading_balance(self) -> None:
+        if self._leading_balance is None:
+            return
+        width = self._leading.width() if self._leading is not None else 0
+        self._leading_balance.setFixedWidth(max(0, width))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_leading_balance()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_leading_balance()
 
     def _window_button(self, role: str, tooltip: str) -> QPushButton:
         button = QPushButton("")

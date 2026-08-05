@@ -130,12 +130,26 @@ def test_main_window_uses_custom_frameless_chrome(qapp, workspace):
         assert window._workbench_mode_bar.parent() is drag
         assert window._workbench_host.layout().indexOf(window._workbench_mode_bar) < 0
         assert drag.minimumHeight() >= window._window_chrome.height()
-        # Focus modes sit between equal stretches inside the drag region.
+        # Focus modes sit between equal stretches, balanced against the leading tabs.
         layout = window._window_chrome._drag_layout
         mode_index = layout.indexOf(window._workbench_mode_bar)
         assert mode_index > 0
         assert layout.itemAt(mode_index - 1).spacerItem() is not None
         assert layout.itemAt(mode_index + 1).spacerItem() is not None
+        balance = window._window_chrome._leading_balance
+        assert balance is not None
+        assert layout.indexOf(balance) == mode_index + 2
+        window.resize(1200, 800)
+        window.show()
+        qapp.processEvents()
+        window._window_chrome._sync_leading_balance()
+        assert balance.width() == window._left._rail.width()
+        assert window._window_chrome._drag_filter is not None
+        # Rail no longer keeps a filler stretch that would eat the drag region.
+        assert all(
+            window._left._rail_layout.itemAt(i).spacerItem() is None
+            for i in range(window._left._rail_layout.count())
+        )
     finally:
         window.close()
         os.chdir(cwd)

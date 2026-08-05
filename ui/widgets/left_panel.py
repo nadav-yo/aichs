@@ -2265,6 +2265,13 @@ class LeftPanel(QWidget):
         self._collapsed_width = 0
         self._rail_layout.setContentsMargins(4, 0, 4, 0)
         self._rail_layout.setSpacing(2)
+        # Drop the sidebar filler stretch so the rail stays content-sized in chrome.
+        while self._rail_layout.count():
+            item = self._rail_layout.itemAt(self._rail_layout.count() - 1)
+            if item is None or item.spacerItem() is None:
+                break
+            self._rail_layout.takeAt(self._rail_layout.count() - 1)
+        self._rail.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         if self.is_activity_panel_collapsed():
             self.setMinimumWidth(0)
             self.setMaximumWidth(0)
