@@ -19,7 +19,7 @@ from services.chat_drag import (
     parse_file_drop,
 )
 from services.file_search import clear_workspace_file_cache, list_workspace_files
-from PyQt6.QtWidgets import QLabel, QListWidget, QLineEdit, QMenu, QTextBrowser
+from PyQt6.QtWidgets import QHeaderView, QLabel, QListWidget, QLineEdit, QMenu, QTextBrowser
 from PyQt6.QtWidgets import QMessageBox
 
 from services.file_tree_snapshot import FileTreeEntry, FileTreeSnapshot
@@ -670,7 +670,29 @@ def test_files_tree_marks_dirty_files_and_parent_folders(qapp, workspace):
     tree.set_file_dirty(str(path), False)
 
     assert item.text(0) == "main.py"
-    assert item.toolTip(0) == ""
+    assert item.toolTip(0) == "src/main.py"
+
+
+def test_files_tree_allows_horizontal_scroll_for_long_names(qapp, workspace):
+    long_name = "very_long_file_name_that_should_not_be_elided_in_the_files_explorer.py"
+    (workspace / "src" / long_name).write_text("x = 1\n", encoding="utf-8")
+    tree = FileTree(str(workspace), defer_git_status=True)
+    tree.resize(180, 320)
+    src = tree.topLevelItem(0)
+    tree._on_item_expanded(src)
+    _wait_for_loaded_children(qapp, src)
+
+    assert tree.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    assert tree.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    assert tree.textElideMode() == Qt.TextElideMode.ElideNone
+    assert not tree.header().stretchLastSection()
+    assert tree.header().sectionResizeMode(0) == QHeaderView.ResizeMode.ResizeToContents
+
+    item = tree._find_item_for_path(str(workspace / "src" / long_name))
+    assert item is not None
+    assert item.text(0) == long_name
+    assert item.toolTip(0) == f"src/{long_name}"
+    assert tree.sizeHintForColumn(0) > tree.viewport().width()
 
 
 def test_files_tree_reveal_rejects_outside_workspace(qapp, workspace, tmp_path):

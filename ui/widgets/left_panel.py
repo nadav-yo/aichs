@@ -8,7 +8,8 @@ from typing import Callable
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QStackedWidget, QTreeWidget, QTreeWidgetItem,
     QPushButton, QHBoxLayout, QLabel, QMenu, QSizePolicy, QStyleFactory,
-    QAbstractItemView, QInputDialog, QMessageBox, QFrame, QLineEdit, QFileDialog,
+    QAbstractItemView, QHeaderView, QInputDialog, QMessageBox, QFrame, QLineEdit,
+    QFileDialog,
 )
 from PyQt6.QtCore import pyqtSignal, Qt, QFileSystemWatcher, QThread, QTimer, QMimeData, QSize, QRectF, QLineF
 from PyQt6.QtGui import (
@@ -694,6 +695,14 @@ class FileTree(QTreeWidget):
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setIconSize(QSize(18, 18))
         self.setStyle(QStyleFactory.create("Fusion"))
+        self.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        header = self.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
@@ -1943,9 +1952,12 @@ class FileTree(QTreeWidget):
             notes.append("Contains unsaved editor changes")
         if git_label:
             notes.append(f"Git: {git_status_description(git_code, git_label)}")
+        try:
+            rel = os.path.relpath(path, self.root_path)
+        except ValueError:
+            rel = path
         if not notes:
-            return ""
-        rel = os.path.relpath(path, self.root_path)
+            return rel
         return f"{' - '.join(notes)} - {rel}"
 
     def _rebuild_dirty_dirs(self):
