@@ -162,12 +162,84 @@ def _set_macos_process_name_cps(name: str) -> bool:
         return False
 
 
+def _objc_msg(objc, receiver, selector, *args, restype=None):
+    import ctypes
+
+    sel = objc.sel_registerName(selector if isinstance(selector, bytes) else selector.encode("utf-8"))
+    objc.objc_msgSend.restype = ctypes.c_void_p if restype is None else restype
+    if not args:
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        return objc.objc_msgSend(receiver, sel)
+    argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    for arg in args:
+        if isinstance(arg, bytes):
+            argtypes.append(ctypes.c_char_p)
+        else:
+            argtypes.append(ctypes.c_void_p)
+    objc.objc_msgSend.argtypes = argtypes
+    return objc.objc_msgSend(receiver, sel, *args)
+
+
+def _set_macos_bundle_and_process_name_ctypes(name: str) -> bool:
+    """Set CFBundleName + processName via libobjc (no PyObjC required)."""
+    try:
+        import ctypes
+        from ctypes.util import find_library
+
+        # Ensure Foundation/AppKit symbols are loaded.
+        for framework in ("Foundation", "AppKit"):
+            path = find_library(framework)
+            if path:
+                ctypes.cdll.LoadLibrary(path)
+
+        objc_path = find_library("objc")
+        if not objc_path:
+            return False
+        objc = ctypes.cdll.LoadLibrary(objc_path)
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        ns_string = objc.objc_getClass(b"NSString")
+        if not ns_string:
+            return False
+        ns_name = _objc_msg(
+            objc,
+            ns_string,
+            b"stringWithUTF8String:",
+            name.encode("utf-8"),
+        )
+        if not ns_name:
+            return False
+
+        ns_bundle = objc.objc_getClass(b"NSBundle")
+        bundle = _objc_msg(objc, ns_bundle, b"mainBundle")
+        if bundle:
+            info = _objc_msg(objc, bundle, b"localizedInfoDictionary") or _objc_msg(
+                objc, bundle, b"infoDictionary"
+            )
+            if info:
+                for key in (b"CFBundleName", b"CFBundleDisplayName"):
+                    ns_key = _objc_msg(objc, ns_string, b"stringWithUTF8String:", key)
+                    if ns_key:
+                        _objc_msg(objc, info, b"setObject:forKey:", ns_name, ns_key)
+
+        ns_process_info = objc.objc_getClass(b"NSProcessInfo")
+        process_info = _objc_msg(objc, ns_process_info, b"processInfo")
+        if process_info:
+            _objc_msg(objc, process_info, b"setProcessName:", ns_name)
+        return True
+    except Exception:
+        return False
+
+
 def _set_macos_bundle_and_process_name(name: str) -> bool:
-    """Prefer PyObjC when present; used for menu bar + Dock process identity."""
+    """Set menu-bar CFBundleName + process name (PyObjC if present, else ctypes)."""
     try:
         from Foundation import NSBundle, NSProcessInfo
     except Exception:
-        return False
+        return _set_macos_bundle_and_process_name_ctypes(name)
     try:
         bundle = NSBundle.mainBundle()
         info = None
@@ -183,14 +255,15 @@ def _set_macos_bundle_and_process_name(name: str) -> bool:
         NSProcessInfo.processInfo().setProcessName_(name)
         return True
     except Exception:
-        return False
+        return _set_macos_bundle_and_process_name_ctypes(name)
 
 
 def _configure_macos_process_identity(name: str = APP_NAME) -> None:
     """Make Dock / menu bar say Aichs for pipx (non-.app) launches.
 
     Must run before QApplication: Qt's Cocoa plugin snapshots bundle + process
-    name when it starts NSApplication.
+    name when it starts NSApplication. Menu bar title comes from CFBundleName;
+    Dock hover also uses processName / CPSSetProcessName.
     """
     if sys.platform != "darwin":
         return

@@ -7,6 +7,7 @@ from main import (
     _parse_args,
     _print_performance_summary,
     _set_macos_bundle_and_process_name,
+    _set_macos_bundle_and_process_name_ctypes,
     _set_macos_process_name_cps,
 )
 from services.performance import PerformanceOperationSummary
@@ -249,6 +250,35 @@ def test_set_macos_bundle_and_process_name_updates_info_dictionary(monkeypatch):
     assert info["CFBundleName"] == "Aichs"
     assert info["CFBundleDisplayName"] == "Aichs"
     assert process_info.name == "Aichs"
+
+
+def test_set_macos_bundle_falls_back_to_ctypes_without_pyobjc(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "Foundation":
+            raise ImportError("no pyobjc")
+        return real_import(name, *args, **kwargs)
+
+    calls = []
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(
+        "main._set_macos_bundle_and_process_name_ctypes",
+        lambda name: calls.append(name) or True,
+    )
+
+    assert _set_macos_bundle_and_process_name("Aichs") is True
+    assert calls == ["Aichs"]
+
+
+def test_set_macos_bundle_ctypes_returns_false_without_objc(monkeypatch):
+    monkeypatch.setattr(
+        "ctypes.util.find_library",
+        lambda name: None if name == "objc" else f"/usr/lib/lib{name}.dylib",
+    )
+    assert _set_macos_bundle_and_process_name_ctypes("Aichs") is False
 
 
 def test_set_macos_process_name_cps_returns_false_without_library(monkeypatch):
