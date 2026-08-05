@@ -23,6 +23,13 @@ Keep measured coverage **~91%+** (gate is 90%). A single-file/IDE run is not a v
 - Extensions: `register(registry)` in `.aichs/extensions/*.py` or `.aichs/extensions/*/extension.py`.
 - Do not commit or push unless asked.
 
+## Changelog
+
+- Document user-facing changes in [`CHANGELOG.md`](CHANGELOG.md) under `## Next` in the same change as the code.
+- Keep bullets short and concrete; skip pure refactors, test-only, or internal churn unless it affects users.
+- Do not rewrite released version sections except to fix factual errors.
+- On release, `## Next` is renamed to `## <version>` and a new empty `## Next` is opened (see `.github/workflows/release.yml`).
+
 ## Docs
 
-[extensions](docs/extensions.md) · [skills](docs/skills.md) · [models](docs/custom-models.md) · [settings](docs/configuration.md)
+[extensions](docs/extensions.md) · [skills](docs/skills.md) · [models](docs/custom-models.md) · [settings](docs/configuration.md) · [changelog](CHANGELOG.md)
