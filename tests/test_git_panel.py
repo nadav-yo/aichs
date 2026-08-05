@@ -327,6 +327,43 @@ def test_git_panel_history_area_has_horizontal_inset(qapp, workspace):
     assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (10, 4, 10, 8)
 
 
+def test_git_history_scroll_width_tracks_commit_subjects(qapp, workspace):
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QStyleOptionViewItem
+
+    from ui.widgets.git_panel import _CommitLogDelegate, _ROLE_SUBJECT
+
+    panel = GitPanel(str(workspace), defer_refresh=True)
+    panel.resize(240, 400)
+    panel.show()
+    qapp.processEvents()
+
+    short = "aaaaaaaa\x1faaaaaaa\x1f\x1fshort"
+    long_subject = "x" * 120
+    long = f"bbbbbbbb\x1fbbbbbbb\x1f\x1f{long_subject}"
+    panel._set_log_lines([short, long])
+    qapp.processEvents()
+
+    assert panel.log.count() == 2
+    assert panel.log.item(0).text() == "aaaaaaa"
+    assert panel.log.item(1).data(_ROLE_SUBJECT) == long_subject
+    assert panel.log.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+
+    delegate = panel.log.itemDelegate()
+    assert isinstance(delegate, _CommitLogDelegate)
+    option = QStyleOptionViewItem()
+    option.font = panel.log.font()
+    short_w = delegate.sizeHint(option, panel.log.model().index(0, 0)).width()
+    long_w = delegate.sizeHint(option, panel.log.model().index(1, 0)).width()
+    assert long_w > short_w
+    assert long_w > panel.log.viewport().width()
+
+    panel._set_log_lines([short])
+    qapp.processEvents()
+    short_only_w = delegate.sizeHint(option, panel.log.model().index(0, 0)).width()
+    assert short_only_w < panel.log.viewport().width()
+
+
 def test_git_panel_apply_snapshot_is_timed(qapp, workspace, monkeypatch):
     import ui.widgets.git_panel as git_panel
 

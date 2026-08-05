@@ -702,7 +702,7 @@ class FileTree(QTreeWidget):
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         header = self.header()
         header.setStretchLastSection(False)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
@@ -718,13 +718,29 @@ class FileTree(QTreeWidget):
         self._watcher = QFileSystemWatcher([root_path])
         self._watcher.directoryChanged.connect(lambda _: self._schedule_refresh())
         self.itemExpanded.connect(self._on_item_expanded)
+        self.itemCollapsed.connect(lambda _item: self._sync_column_width())
         self._populate(load_git_status=False, preserve_state=False)
         self.expandToDepth(1)
         self.itemDoubleClicked.connect(self._on_double_click)
+        self._sync_column_width()
         self._git_timer = QTimer(self)
         self._git_timer.timeout.connect(self._refresh_git_status)
         if not defer_git_status:
             self.start_git_timer()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_column_width()
+
+    def _sync_column_width(self):
+        """Widen only when content exceeds the viewport; no phantom default width."""
+        if self._shutting_down:
+            return
+        viewport_w = max(0, self.viewport().width())
+        if viewport_w <= 0:
+            return
+        content_w = max(0, self.sizeHintForColumn(0))
+        self.setColumnWidth(0, max(content_w, viewport_w))
 
     def _apply_tree_style(self):
         self.setFont(mono_font(mono_font_pt()))
@@ -1768,6 +1784,8 @@ class FileTree(QTreeWidget):
         path = item.data(0, Qt.ItemDataRole.UserRole)
         if path and self._item_is_dir(item, path) and self._has_placeholder(item):
             self._request_children(item, path)
+            return
+        self._sync_column_width()
 
     def _request_children(self, item: QTreeWidgetItem, path: str):
         if self._shutting_down:
@@ -1821,6 +1839,7 @@ class FileTree(QTreeWidget):
 
     def _end_tree_update_batch(self, updates_enabled: bool):
         self.setUpdatesEnabled(updates_enabled)
+        self._sync_column_width()
 
     def _display_name(self, name: str, path: str, *, is_dir: bool | None = None) -> str:
         parts = []

@@ -19,7 +19,7 @@ from services.chat_drag import (
     parse_file_drop,
 )
 from services.file_search import clear_workspace_file_cache, list_workspace_files
-from PyQt6.QtWidgets import QHeaderView, QLabel, QListWidget, QLineEdit, QMenu, QTextBrowser
+from PyQt6.QtWidgets import QLabel, QListWidget, QLineEdit, QMenu, QTextBrowser
 from PyQt6.QtWidgets import QMessageBox
 
 from services.file_tree_snapshot import FileTreeEntry, FileTreeSnapshot
@@ -678,21 +678,37 @@ def test_files_tree_allows_horizontal_scroll_for_long_names(qapp, workspace):
     (workspace / "src" / long_name).write_text("x = 1\n", encoding="utf-8")
     tree = FileTree(str(workspace), defer_git_status=True)
     tree.resize(180, 320)
+    tree.show()
+    qapp.processEvents()
     src = tree.topLevelItem(0)
     tree._on_item_expanded(src)
     _wait_for_loaded_children(qapp, src)
+    tree._sync_column_width()
 
     assert tree.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
     assert tree.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
     assert tree.textElideMode() == Qt.TextElideMode.ElideNone
     assert not tree.header().stretchLastSection()
-    assert tree.header().sectionResizeMode(0) == QHeaderView.ResizeMode.ResizeToContents
 
     item = tree._find_item_for_path(str(workspace / "src" / long_name))
     assert item is not None
     assert item.text(0) == long_name
     assert item.toolTip(0) == f"src/{long_name}"
-    assert tree.sizeHintForColumn(0) > tree.viewport().width()
+    assert tree.columnWidth(0) >= tree.sizeHintForColumn(0)
+    assert tree.columnWidth(0) > tree.viewport().width()
+
+
+def test_files_tree_column_matches_viewport_when_names_fit(qapp, workspace):
+    tree = FileTree(str(workspace), defer_git_status=True)
+    tree.resize(420, 320)
+    tree.show()
+    qapp.processEvents()
+    tree._sync_column_width()
+    qapp.processEvents()
+
+    assert tree.columnWidth(0) == tree.viewport().width()
+    assert tree.sizeHintForColumn(0) <= tree.viewport().width()
+    assert tree.horizontalScrollBar().maximum() == 0
 
 
 def test_files_tree_reveal_rejects_outside_workspace(qapp, workspace, tmp_path):
