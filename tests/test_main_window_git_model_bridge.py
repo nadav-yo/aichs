@@ -123,6 +123,11 @@ def test_main_window_uses_custom_frameless_chrome(qapp, workspace):
         assert window._window_chrome._minimize_btn.toolTip() == "Minimize"
         assert window._window_chrome._maximize_btn.toolTip() == "Maximize"
         assert window._window_chrome._close_btn.toolTip() == "Close"
+        assert not window._window_chrome._icon.isVisible()
+        assert not window._window_chrome._title.isVisible()
+        assert window._left._rail.parent() is window._window_chrome
+        assert window._workbench_mode_bar.parent() is window._window_chrome
+        assert window._workbench_host.layout().indexOf(window._workbench_mode_bar) < 0
     finally:
         window.close()
         os.chdir(cwd)
@@ -775,13 +780,15 @@ def test_main_window_restores_zero_width_left_panel_as_activity_rail(qapp, works
 
         assert not window._root_splitter.isCollapsible(0)
         assert window._left.is_activity_panel_collapsed()
-        assert window._left.minimumWidth() == window._left._collapsed_width
-        assert window._root_splitter.sizes()[0] >= window._left._collapsed_width
+        assert window._left.minimumWidth() == 0
+        assert window._root_splitter.sizes()[0] == 0
+        assert window._left._rail.parent() is window._window_chrome
+        assert window._left._activity_buttons["chats"].text() == "Chats"
 
         window._left._activity_buttons["files"].click()
 
         assert not window._left.is_activity_panel_collapsed()
-        assert window._root_splitter.sizes()[0] > window._left._collapsed_width
+        assert window._root_splitter.sizes()[0] > 0
     finally:
         window.close()
         os.chdir(cwd)
