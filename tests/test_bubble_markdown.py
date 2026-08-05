@@ -514,8 +514,9 @@ def test_format_timestamp_is_locale_stable_and_relative(monkeypatch):
 
     today = date(2026, 8, 5)
     assert format_timestamp("2026-08-05T14:07:00", today=today) == "14:07"
-    assert format_timestamp("2026-03-15T09:30:00", today=today) == "Mar 15"
-    assert format_timestamp("2025-12-01T09:30:00", today=today) == "Dec 1, 2025"
+    assert format_timestamp("2026-08-04T21:15:00", today=today) == "Aug 4 21:15"
+    assert format_timestamp("2026-03-15T09:30:00", today=today) == "Mar 15 09:30"
+    assert format_timestamp("2025-12-01T09:30:00", today=today) == "Dec 1, 2025 09:30"
     assert format_timestamp_tooltip("2026-03-15T09:30:00") == "Mar 15, 2026 09:30"
 
 

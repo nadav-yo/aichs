@@ -322,21 +322,24 @@ _MONTH_ABBR = (
 def format_timestamp(iso: str, *, today: date | None = None) -> str:
     """Compact English timestamp, independent of OS locale/RTL.
 
+    Additive: always keep HH:MM; add date when not today; add year when needed.
+
     - today: HH:MM
-    - same year: Mon D
-    - older: Mon D, YYYY
+    - same year: Mon D HH:MM
+    - older: Mon D, YYYY HH:MM
     """
     try:
         dt = datetime.fromisoformat(iso)
         if dt.tzinfo is not None:
             dt = dt.astimezone().replace(tzinfo=None)
         current = today or date.today()
+        clock = f"{dt.hour:02d}:{dt.minute:02d}"
         if dt.date() == current:
-            return f"{dt.hour:02d}:{dt.minute:02d}"
+            return clock
         month = _MONTH_ABBR[dt.month - 1]
         if dt.year == current.year:
-            return f"{month} {dt.day}"
-        return f"{month} {dt.day}, {dt.year}"
+            return f"{month} {dt.day} {clock}"
+        return f"{month} {dt.day}, {dt.year} {clock}"
     except Exception:
         return ""
 
