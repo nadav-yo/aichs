@@ -67,7 +67,7 @@ from ui.widgets.text_search_dialog import TextSearchDialog
 DEFAULT_ACTIVITY_WIDTH = config.DEFAULT_ACTIVITY_WIDTH
 MIN_ACTIVITY_WIDTH = config.MIN_ACTIVITY_WIDTH
 MAX_ACTIVITY_WIDTH = config.MAX_ACTIVITY_WIDTH
-COLLAPSED_ACTIVITY_WIDTH = config.ACTIVITY_RAIL_WIDTH
+COLLAPSED_ACTIVITY_WIDTH = 0
 WORKBENCH_COLLAPSED_WIDTH = 64
 WORKBENCH_DEFAULT_CHAT_PERCENT = 40
 WORKBENCH_MIN_CHAT_WIDTH = 280
@@ -371,9 +371,8 @@ class MainWindow(QMainWindow):
         self._workbench_mode_bar = QWidget()
         self._workbench_mode_bar.setObjectName("workbenchModeBar")
         mode_layout = QHBoxLayout(self._workbench_mode_bar)
-        mode_layout.setContentsMargins(10, 5, 10, 5)
+        mode_layout.setContentsMargins(8, 0, 4, 0)
         mode_layout.setSpacing(0)
-        mode_layout.addStretch(1)
         self._workbench_mode_group = QFrame()
         self._workbench_mode_group.setObjectName("workbenchModeGroup")
         mode_group_layout = QHBoxLayout(self._workbench_mode_group)
@@ -387,8 +386,6 @@ class MainWindow(QMainWindow):
             self._workbench_mode_buttons[key] = button
             mode_group_layout.addWidget(button)
         mode_layout.addWidget(self._workbench_mode_group)
-        mode_layout.addStretch(1)
-        workbench_host_layout.addWidget(self._workbench_mode_bar)
         workbench_host_layout.addWidget(self._workbench, 1)
 
         self._workbench_restore_chat_btn = QPushButton("Chat", self._workbench_left)
@@ -469,6 +466,10 @@ class MainWindow(QMainWindow):
         self._setup_shortcuts()
 
         set_chromed_central_widget(self, self._root_splitter)
+        self._window_chrome.set_toolbar_content(
+            leading=self._left.detach_activity_rail(),
+            trailing=self._workbench_mode_bar,
+        )
 
         self._restore_layout(saved)
         self._apply_appearance()

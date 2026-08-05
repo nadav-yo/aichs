@@ -956,7 +956,7 @@ def activity_tab_style(
     return (
         f"QPushButton {{ background:transparent; color:{color}; border:0;"
         f"border-bottom:2px solid {marker}; border-radius:0;"
-        "padding:8px 9px 6px; font-weight:600; }"
+        "padding:6px 9px 4px; font-weight:600; }"
         f"QPushButton:hover {{ color:{p['TEXT']}; background:transparent; }}"
     )
 
@@ -972,8 +972,8 @@ def activity_sidebar_surface_style() -> tuple[str, str]:
 
 
 def workbench_mode_bar_style(theme: str | None = None) -> str:
-    p = palette(theme)
-    return f"QWidget#workbenchModeBar {{ background:{p['BG']}; border-bottom:1px solid {p['BORDER_SUBTLE']}; }}"
+    palette(theme)
+    return "QWidget#workbenchModeBar { background:transparent; border:0; }"
 
 
 def workbench_mode_group_style(theme: str | None = None) -> str:
@@ -990,7 +990,7 @@ def workbench_mode_button_style(*, active: bool, theme: str | None = None) -> st
     color = p["SELECTION_TEXT"] if active else p["TEXT_DIM"]
     return (
         f"QPushButton {{ background:{background}; color:{color}; border:0; border-radius:5px;"
-        "padding:5px 13px; font-weight:600; }"
+        "padding:4px 11px; font-weight:600; }"
         f"QPushButton:hover:!disabled {{ color:{p['TEXT']}; background:{p['BG3']}; }}"
         f"QPushButton:checked {{ background:{p['SELECTION']}; color:{p['SELECTION_TEXT']}; }}"
         f"QPushButton:disabled {{ color:{p['TEXT_DIM']}; background:transparent; }}"
