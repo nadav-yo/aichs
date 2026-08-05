@@ -2,6 +2,8 @@
 
 ## Next
 
+## 0.5.2
+
 - Restore frameless chrome dragging; center Chat Focus / Review / Editor Focus
 - Content-sized horizontal scroll for long names in Files and Git history
 - Cap Git history commit subjects with ellipsis; show only the first ref badge (full text on hover)
