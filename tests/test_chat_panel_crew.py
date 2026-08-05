@@ -1,5 +1,6 @@
 from ui.widgets.chat_panel import (
     _crew_model_choice,
+    _crew_display_meta_for_skill,
     _enabled_crew,
     _crew_for_history_message,
     _crew_notice_text,
@@ -7,6 +8,7 @@ from ui.widgets.chat_panel import (
     _latest_regenerable_assistant_index,
     _tool_call_notice,
 )
+from services.skills import Skill
 
 
 def test_chat_panel_crew_helpers():
@@ -22,6 +24,24 @@ def test_chat_panel_crew_helpers():
     enabled = _enabled_crew({"crew": {"scout": {"enabled": False}}})
     assert "scout" not in {member.id for member in enabled}
     assert {member.id for member in enabled} == {"archivist", "architect"}
+
+
+def test_crew_display_meta_for_archivist_skill():
+    skill = Skill(
+        name="archivist",
+        description="Memory",
+        prompt="Use project memory.",
+        tools=["read_project_memory"],
+    )
+    meta = _crew_display_meta_for_skill(skill, {})
+
+    assert meta is not None
+    assert meta["id"] == "archivist"
+    assert meta["name"] == "Archivist"
+    assert meta["avatar"] == "crew_archivist"
+    assert _crew_display_meta_for_skill(skill, {"crew": {"archivist": {"enabled": False}}}) is None
+    assert _crew_display_meta_for_skill(Skill("other", "", "x"), {}) is None
+    assert _crew_display_meta_for_skill(None, {}) is None
 
 
 def test_crew_for_history_message():

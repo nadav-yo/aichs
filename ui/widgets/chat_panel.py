@@ -390,6 +390,7 @@ class _AssistantRun:
     tool_notices: dict[str, tuple[QWidget, dict, str]] = field(default_factory=dict)
     active_terminal: TerminalCard | None = None
     crew: dict | None = None
+    crew_summoned: bool = False
     crew_bubbles: dict[str, MessageBubble] = field(default_factory=dict)
 
 
@@ -2698,7 +2699,11 @@ class ChatPanel(QWidget):
             deferred_file_refs=deferred_file_refs,
             deferred_file_target=thread_file_target,
         )
-        crew_meta = crew_metadata(crew, settings) if crew else None
+        crew_meta = (
+            crew_metadata(crew, settings)
+            if crew
+            else _crew_display_meta_for_skill(skill, settings)
+        )
         bubble = (
             self._add_bubble("", is_user=False, typing=True, crew=crew_meta)
             if visible
@@ -2713,6 +2718,7 @@ class ChatPanel(QWidget):
             data_snapshot=data_snapshot,
             bubble=bubble,
             crew=crew_meta,
+            crew_summoned=crew is not None,
         )
         self._runtime_for(conv_id).run = run
         if visible:
@@ -3658,7 +3664,7 @@ class ChatPanel(QWidget):
             bubble.finalize(full, on_artifact=add_artifact)
             self._sync_regenerate_flags()
 
-        if is_current and run.crew:
+        if is_current and run.crew and run.crew_summoned:
             self._add_notice(_crew_notice_text(run.crew, "left"))
 
         if is_current:
@@ -3780,7 +3786,7 @@ class ChatPanel(QWidget):
             self._flush_stream_buffer()
         if is_current and run.bubble:
             run.bubble.append(f"[Error: {msg}]")
-        if is_current and run.crew:
+        if is_current and run.crew and run.crew_summoned:
             self._add_notice(_crew_notice_text(run.crew, "left"))
         if is_current:
             self.active_bubble = None
@@ -5105,6 +5111,20 @@ def _first_summoned_crew(text: str, settings: dict | None = None) -> CrewMember 
         if crew_enabled(settings, member):
             return member
     return None
+
+
+def _crew_display_meta_for_skill(skill, settings: dict | None = None) -> dict | None:
+    """Map a slash skill/command onto matching crew portrait metadata.
+
+    `/archivist` is a skill mode, not an @Archivist summon, but the response
+    should still use the Archivist avatar/name styling.
+    """
+    if skill is None:
+        return None
+    member = get_crew_member(str(getattr(skill, "name", "") or ""))
+    if member is None or not crew_enabled(settings, member):
+        return None
+    return crew_metadata(member, settings)
 
 
 def _enabled_crew(settings: dict | None = None) -> list[CrewMember]:
