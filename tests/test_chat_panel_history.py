@@ -1721,6 +1721,67 @@ def test_start_assistant_run_defers_system_build_until_chat_thread_runs(qapp, mo
     assert runtime.run.thread is started[0]
 
 
+def test_start_assistant_run_uses_archivist_avatar_for_slash_mode(qapp, monkeypatch):
+    from services.skills import Skill
+
+    class FakeThread:
+        def __init__(self, model, history, system, cwd, **kwargs):
+            self.model = model
+            self.history = history
+            self.system = system
+            self.cwd = cwd
+            self.kwargs = kwargs
+            self.chunk = _ConnectSignal()
+            self.tool_called = _ConnectSignal()
+            self.bash_line = _ConnectSignal()
+            self.tool_result = _ConnectSignal()
+            self.crew_started = _ConnectSignal()
+            self.crew_chunk = _ConnectSignal()
+            self.crew_done = _ConnectSignal()
+            self.crew_error = _ConnectSignal()
+            self.runtime_event = _ConnectSignal()
+            self.done = _ConnectSignal()
+            self.error = _ConnectSignal()
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr("ui.widgets.chat_panel.ChatThread", FakeThread)
+    runtime = SimpleNamespace(tool_policy=object(), run=None)
+    panel = SimpleNamespace(
+        cwd="repo",
+        _settings=SimpleNamespace(load=lambda: {}),
+        _runtime_for=lambda _conv_id: runtime,
+        _approval_bus=object(),
+        _configured_providers=lambda: ["anthropic"],
+    )
+    skill = Skill(
+        name="archivist",
+        description="Memory",
+        prompt="Use project memory.",
+        tools=["read_project_memory", "search_project_chats"],
+    )
+
+    ChatPanel._start_assistant_run(
+        panel,
+        "c1",
+        "claude-sonnet-4-6",
+        [{"role": "user", "content": "find the plan"}],
+        {"id": "c1"},
+        skill=skill,
+        visible=False,
+    )
+
+    assert runtime.run.crew["id"] == "archivist"
+    assert runtime.run.crew["avatar"] == "crew_archivist"
+    assert runtime.run.crew_summoned is False
+    assert runtime.run.thread.kwargs["allowed_tools"] == [
+        "read_project_memory",
+        "search_project_chats",
+    ]
+    assert runtime.run.thread.kwargs["enable_crew_tool"] is True
+
+
 def test_extension_command_done_applies_directives_before_result_notice(qapp):
     notices = []
     sent = []
