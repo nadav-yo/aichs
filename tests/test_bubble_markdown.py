@@ -251,6 +251,21 @@ def test_assistant_markdown_linkifies_plain_file_paths():
     assert ">services\\git_diff.py</a>" in html
 
 
+def test_assistant_markdown_linkifies_backtick_wrapped_file_paths():
+    html = _to_html("**File**: `services/chat.py`")
+
+    assert 'href="aichs-file:services/chat.py"' in html
+    assert ">services/chat.py</a>" in html
+    assert "<code>services/chat.py</code>" not in html
+
+
+def test_assistant_markdown_keeps_non_path_inline_code():
+    html = _to_html("Run `pytest -q` after editing services/chat.py.")
+
+    assert "<code>pytest -q</code>" in html
+    assert 'href="aichs-file:services/chat.py"' in html
+
+
 def test_assistant_markdown_linkifies_file_paths_in_lists():
     html = _to_html(
         "- services\\chat.py: 79%\n"
