@@ -125,9 +125,17 @@ def test_main_window_uses_custom_frameless_chrome(qapp, workspace):
         assert window._window_chrome._close_btn.toolTip() == "Close"
         assert not window._window_chrome._icon.isVisible()
         assert not window._window_chrome._title.isVisible()
-        assert window._left._rail.parent() is window._window_chrome
-        assert window._workbench_mode_bar.parent() is window._window_chrome
+        drag = window._window_chrome._drag_area
+        assert window._left._rail.parent() is drag
+        assert window._workbench_mode_bar.parent() is drag
         assert window._workbench_host.layout().indexOf(window._workbench_mode_bar) < 0
+        assert drag.minimumHeight() >= window._window_chrome.height()
+        # Focus modes sit between equal stretches inside the drag region.
+        layout = window._window_chrome._drag_layout
+        mode_index = layout.indexOf(window._workbench_mode_bar)
+        assert mode_index > 0
+        assert layout.itemAt(mode_index - 1).spacerItem() is not None
+        assert layout.itemAt(mode_index + 1).spacerItem() is not None
     finally:
         window.close()
         os.chdir(cwd)
@@ -782,7 +790,7 @@ def test_main_window_restores_zero_width_left_panel_as_activity_rail(qapp, works
         assert window._left.is_activity_panel_collapsed()
         assert window._left.minimumWidth() == 0
         assert window._root_splitter.sizes()[0] == 0
-        assert window._left._rail.parent() is window._window_chrome
+        assert window._left._rail.parent() is window._window_chrome._drag_area
         assert window._left._activity_buttons["chats"].text() == "Chats"
 
         window._left._activity_buttons["files"].click()

@@ -160,7 +160,7 @@ class _ChromeDragArea(QWidget):
         super().__init__(parent)
         self._window = window
         self._allow_maximize = allow_maximize
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def mousePressEvent(self, event):
@@ -238,7 +238,7 @@ class WindowChrome(QWidget):
         leading: QWidget | None = None,
         trailing: QWidget | None = None,
     ) -> None:
-        """Replace brand icon/title with main-window nav (activity tabs + focus modes)."""
+        """Host activity tabs + centered focus modes; empty chrome space stays draggable."""
         self._leading = leading
         self._trailing = trailing
         self._icon.hide()
@@ -250,32 +250,38 @@ class WindowChrome(QWidget):
             if widget is not None:
                 widget.setParent(self)
 
-        self._drag_layout.setContentsMargins(0, 0, 0, 0)
-        self._drag_layout.setSpacing(0)
         while self._drag_layout.count():
             item = self._drag_layout.takeAt(0)
             widget = item.widget()
             if widget is not None and widget not in {self._icon, self._title}:
                 widget.setParent(None)
 
+        chrome_h = 40
+        self.setFixedHeight(chrome_h)
+        self._drag_area.setMinimumHeight(chrome_h)
+        self._drag_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._drag_layout.setContentsMargins(4, 0, 4, 0)
+        self._drag_layout.setSpacing(0)
+
         if leading is not None:
-            leading.setParent(self)
-            self._root.addWidget(leading, 0, Qt.AlignmentFlag.AlignVCenter)
+            leading.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+            leading.setParent(self._drag_area)
+            self._drag_layout.addWidget(leading, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._drag_layout.addStretch(1)
-        self._root.addWidget(self._drag_area, 1)
 
         if trailing is not None:
-            trailing.setParent(self)
-            self._root.addWidget(trailing, 0, Qt.AlignmentFlag.AlignVCenter)
+            trailing.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+            trailing.setParent(self._drag_area)
+            self._drag_layout.addWidget(trailing, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        self._root.addWidget(self._minimize_btn)
-        self._root.addWidget(self._maximize_btn)
-        self._root.addWidget(self._close_btn)
-        self.setFixedHeight(40)
+        self._drag_layout.addStretch(1)
+
+        self._root.setContentsMargins(0, 0, 0, 0)
+        self._root.addWidget(self._drag_area, 1)
         for button in (self._minimize_btn, self._maximize_btn, self._close_btn):
-            button.setFixedSize(46, 40)
-        self._root.setContentsMargins(4, 0, 0, 0)
+            button.setFixedSize(46, chrome_h)
+            self._root.addWidget(button)
 
     def _window_button(self, role: str, tooltip: str) -> QPushButton:
         button = QPushButton("")
