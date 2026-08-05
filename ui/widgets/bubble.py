@@ -58,9 +58,11 @@ _EXT_LANG = {
     ".xml": "xml",
 }
 _HTML_TOKEN_RE = re.compile(r"(<[^>]+>)")
+_INLINE_CODE_CHIP_RE = re.compile(r"<code>([^<]*)</code>")
 
 
 def _linkify_paths(rendered_html: str) -> str:
+    rendered_html = _linkify_inline_code_paths(rendered_html)
     out: list[str] = []
     ignored: list[str] = []
     for token in _HTML_TOKEN_RE.split(rendered_html):
@@ -74,6 +76,31 @@ def _linkify_paths(rendered_html: str) -> str:
         else:
             out.append(_linkify_path_text(token))
     return "".join(out)
+
+
+def _linkify_inline_code_paths(rendered_html: str) -> str:
+    """Turn `<code>path/to/file.py</code>` chips into clickable file links.
+
+    Models often wrap paths in markdown backticks; those should still open in
+    the viewer. Fenced code blocks stay untouched (they use <pre>, not chips).
+    """
+    link_style = markdown_file_link_style()
+
+    def repl(match: re.Match) -> str:
+        text = html.unescape(match.group(1))
+        spans = file_ref_spans(text)
+        if len(spans) != 1:
+            return match.group(0)
+        start, end, ref = spans[0]
+        if text[start:end] != text.strip():
+            return match.group(0)
+        href = html.escape(f"aichs-file:{ref}", quote=True)
+        label = html.escape(ref)
+        return (
+            f'<a class="aichs-file-link" href="{href}" style="{link_style}">{label}</a>'
+        )
+
+    return _INLINE_CODE_CHIP_RE.sub(repl, rendered_html)
 
 
 def _update_ignored_html_stack(tag: str, ignored: list[str]) -> None:
