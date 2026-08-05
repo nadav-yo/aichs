@@ -19,7 +19,7 @@ from services.file_ref_clipboard import (
     file_refs_payload,
 )
 from services.performance import time_operation
-from services.usage import usage_summary
+from services.usage import usage_summary, usage_tooltip
 from ui.avatars import AVATAR_SIZE, avatar_label, avatar_pixmap
 from ui.markdown_html import code_from_copy_url, markdown_body
 from ui.theme import (
@@ -313,12 +313,40 @@ def _extract_artifacts(text: str) -> tuple[str, list[dict]]:
     return "".join(parts).strip(), artifacts
 
 
-def format_timestamp(iso: str) -> str:
+_MONTH_ABBR = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+
+def format_timestamp(iso: str, *, today: date | None = None) -> str:
+    """Compact English timestamp, independent of OS locale/RTL.
+
+    - today: HH:MM
+    - same year: Mon D
+    - older: Mon D, YYYY
+    """
     try:
         dt = datetime.fromisoformat(iso)
-        if dt.date() == date.today():
-            return dt.strftime("%H:%M")
-        return dt.strftime("%b %d, %H:%M")
+        if dt.tzinfo is not None:
+            dt = dt.astimezone().replace(tzinfo=None)
+        current = today or date.today()
+        if dt.date() == current:
+            return f"{dt.hour:02d}:{dt.minute:02d}"
+        month = _MONTH_ABBR[dt.month - 1]
+        if dt.year == current.year:
+            return f"{month} {dt.day}"
+        return f"{month} {dt.day}, {dt.year}"
+    except Exception:
+        return ""
+
+
+def format_timestamp_tooltip(iso: str) -> str:
+    try:
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone().replace(tzinfo=None)
+        return f"{_MONTH_ABBR[dt.month - 1]} {dt.day}, {dt.year} {dt.hour:02d}:{dt.minute:02d}"
     except Exception:
         return ""
 
@@ -430,7 +458,7 @@ class MessageBubble(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
 
         if timestamp:
-            self.setToolTip(format_timestamp(timestamp))
+            self.setToolTip(format_timestamp_tooltip(timestamp))
 
         row = QHBoxLayout(self)
         row.setContentsMargins(24, 7, 24, 7)
@@ -513,19 +541,24 @@ class MessageBubble(QFrame):
             self.body.addWidget(self._stream_view, 0, Qt.AlignmentFlag.AlignLeft)
             self.body.addWidget(self.edit_input, 0, Qt.AlignmentFlag.AlignLeft)
 
+        meta = QHBoxLayout()
+        meta.setContentsMargins(0, 0, 0, 0)
+        meta.setSpacing(8)
+        if is_user:
+            meta.addStretch()
         if timestamp:
             self._timestamp_lbl = QLabel(format_timestamp(timestamp))
             self._timestamp_lbl.setStyleSheet(timestamp_style())
-            self._timestamp_lbl.setAlignment(
-                Qt.AlignmentFlag.AlignRight if is_user else Qt.AlignmentFlag.AlignLeft
-            )
-            self.body.addWidget(self._timestamp_lbl)
+            self._timestamp_lbl.setToolTip(format_timestamp_tooltip(timestamp))
+            meta.addWidget(self._timestamp_lbl)
         if not is_user:
             self._usage_lbl = QLabel("")
             self._usage_lbl.setStyleSheet(timestamp_style())
-            self._usage_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft)
-            self.body.addWidget(self._usage_lbl)
+            meta.addWidget(self._usage_lbl)
+            meta.addStretch()
             self.set_usage(usage)
+        if timestamp or not is_user:
+            self.body.addLayout(meta)
 
         if is_user:
             row.addStretch()
@@ -895,5 +928,7 @@ class MessageBubble(QFrame):
         if not self._usage_lbl:
             return
         text = usage_summary(usage)
+        tip = usage_tooltip(usage)
         self._usage_lbl.setText(text)
+        self._usage_lbl.setToolTip(tip)
         self._usage_lbl.setVisible(bool(text))

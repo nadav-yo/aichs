@@ -30,19 +30,32 @@ def usage_summary(usage: dict | None) -> str:
     if not isinstance(usage, dict) or not usage:
         return ""
     input_tokens = _int(usage.get("input_tokens"))
-    cached = _int(usage.get("cached_input_tokens"))
-    cache_write = _int(usage.get("cache_creation_input_tokens"))
     output = _int(usage.get("output_tokens"))
     parts = []
     if input_tokens:
-        parts.append(f"in {input_tokens:,}")
-    if cached:
-        parts.append(f"cache hit {cached:,}")
-    if cache_write:
-        parts.append(f"cache write {cache_write:,}")
+        parts.append(f"↓{input_tokens:,}")
     if output:
-        parts.append(f"out {output:,}")
+        parts.append(f"↑{output:,}")
     return " · ".join(parts)
+
+
+def usage_tooltip(usage: dict | None) -> str:
+    if not isinstance(usage, dict) or not usage:
+        return ""
+    input_tokens = _int(usage.get("input_tokens"))
+    cached = _int(usage.get("cached_input_tokens"))
+    cache_write = _int(usage.get("cache_creation_input_tokens"))
+    output = _int(usage.get("output_tokens"))
+    lines = []
+    if input_tokens:
+        lines.append(f"Input tokens: {input_tokens:,}")
+    if cached:
+        lines.append(f"Cache hit: {cached:,}")
+    if cache_write:
+        lines.append(f"Cache write: {cache_write:,}")
+    if output:
+        lines.append(f"Output tokens: {output:,}")
+    return "\n".join(lines)
 
 
 def _normalize_anthropic(usage) -> dict:
