@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from main import _parse_args, _print_performance_summary
+from main import APP_NAME, _configure_application, _parse_args, _print_performance_summary
 from services.performance import PerformanceOperationSummary
 from ui.main_window import _startup_workspace
 
@@ -151,3 +151,13 @@ def test_main_performance_summary_exits_before_workspace_or_qt(monkeypatch, caps
     main_module.main()
 
     assert capsys.readouterr().out == "No slow performance events found.\n"
+
+
+def test_configure_application_sets_display_name(qapp):
+    _configure_application(qapp)
+
+    assert qapp.applicationName() == APP_NAME
+    assert qapp.applicationDisplayName() == "Aichs"
+    assert qapp.organizationName() == "aichs"
+    assert qapp.organizationDomain() == "aichs.studio"
+    assert qapp.desktopFileName() == "aichs"

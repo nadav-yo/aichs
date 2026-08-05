@@ -77,4 +77,10 @@ if sys.platform == "darwin":
         name="aichs.app",
         icon=icon,
         bundle_identifier="studio.aichs.desktop",
+        info_plist={
+            "CFBundleName": "Aichs",
+            "CFBundleDisplayName": "Aichs",
+            "CFBundleGetInfoString": "Aichs",
+            "NSHighResolutionCapable": True,
+        },
     )
