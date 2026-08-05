@@ -176,6 +176,7 @@ def test_settings_general_only_save_skips_lazy_pages_and_model_reload(qapp, monk
         "font_size": "medium",
         "enter_to_send": False,
         "resume_session": "always",
+        "check_for_updates": True,
         "trash_retention_days": 14,
         "avatar_human": "human",
     })

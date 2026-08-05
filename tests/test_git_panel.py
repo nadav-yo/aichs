@@ -327,6 +327,67 @@ def test_git_panel_history_area_has_horizontal_inset(qapp, workspace):
     assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (10, 4, 10, 8)
 
 
+def test_git_history_scroll_width_caps_long_commit_subjects(qapp, workspace):
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QStyleOptionViewItem
+
+    from ui.widgets.git_panel import (
+        _COMMIT_SUBJECT_DISPLAY_MAX,
+        _CommitLogDelegate,
+        _ROLE_SUBJECT,
+        _display_commit_subject,
+    )
+
+    panel = GitPanel(str(workspace), defer_refresh=True)
+    panel.resize(240, 400)
+    panel.show()
+    qapp.processEvents()
+
+    short = "aaaaaaaa\x1faaaaaaa\x1f\x1fshort"
+    long_subject = "x" * 200
+    long = f"bbbbbbbb\x1fbbbbbbb\x1f\x1f{long_subject}"
+    panel._set_log_lines([short, long])
+    qapp.processEvents()
+
+    assert panel.log.count() == 2
+    assert panel.log.item(1).data(_ROLE_SUBJECT) == long_subject
+    assert panel.log.item(1).toolTip().startswith(long_subject)
+    assert panel.log.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+
+    delegate = panel.log.itemDelegate()
+    assert isinstance(delegate, _CommitLogDelegate)
+    option = QStyleOptionViewItem()
+    option.font = panel.log.font()
+    short_w = delegate.sizeHint(option, panel.log.model().index(0, 0)).width()
+    long_w = delegate.sizeHint(option, panel.log.model().index(1, 0)).width()
+    capped = _display_commit_subject(long_subject)
+    assert capped.endswith("...")
+    assert len(capped) == _COMMIT_SUBJECT_DISPLAY_MAX
+    assert long_w > short_w
+    # Capped display must not grow with an arbitrarily long subject.
+    longer = f"bbbbbbbb\x1fbbbbbbb\x1f\x1f{'x' * 400}"
+    panel._set_log_lines([long, longer])
+    qapp.processEvents()
+    longer_w = delegate.sizeHint(option, panel.log.model().index(1, 0)).width()
+    assert longer_w == long_w
+
+
+def test_display_commit_helpers_trim_and_keep_first_badge():
+    from ui.widgets.git_panel import (
+        _display_commit_badges,
+        _display_commit_ref_label,
+        _display_commit_subject,
+    )
+
+    assert _display_commit_subject("short") == "short"
+    assert _display_commit_subject("x" * 80).endswith("...")
+    assert _display_commit_ref_label("origin/main") == "origin/main"
+    assert _display_commit_ref_label("origin/" + ("b" * 40)).endswith("...")
+    badges = [("HEAD", "head"), ("origin/main", "origin")]
+    assert _display_commit_badges(badges) == [("HEAD", "head")]
+    assert _display_commit_badges([]) == []
+
+
 def test_git_panel_apply_snapshot_is_timed(qapp, workspace, monkeypatch):
     import ui.widgets.git_panel as git_panel
 

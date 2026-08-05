@@ -10,6 +10,7 @@ from ui.widgets.docs_dialog import (
     available_docs,
     doc_title,
     markdown_document_html,
+    resolve_doc_path,
 )
 from tests.conftest import write_extension
 
@@ -17,14 +18,28 @@ from tests.conftest import write_extension
 def test_available_docs_uses_known_order_then_extras(tmp_path):
     docs = tmp_path / "docs"
     docs.mkdir()
-    for name in ("z-extra.md", "skills.md", "configuration.md"):
+    for name in ("z-extra.md", "skills.md", "configuration.md", "CHANGELOG.md"):
         (docs / name).write_text(f"# {name}\n", encoding="utf-8")
 
     assert [path.name for path in available_docs(docs)] == [
+        "CHANGELOG.md",
         "configuration.md",
         "skills.md",
         "z-extra.md",
     ]
+
+
+def test_available_docs_resolves_repo_root_changelog(tmp_path):
+    root = tmp_path / "repo"
+    docs = root / "docs"
+    docs.mkdir(parents=True)
+    (root / "CHANGELOG.md").write_text("# Changelog\n\n## Next\n", encoding="utf-8")
+    (docs / "configuration.md").write_text("# Configuration\n", encoding="utf-8")
+
+    paths = available_docs(docs)
+    assert [path.name for path in paths] == ["CHANGELOG.md", "configuration.md"]
+    assert paths[0].samefile(root / "CHANGELOG.md")
+    assert resolve_doc_path(docs, "CHANGELOG.md").samefile(root / "CHANGELOG.md")
 
 
 def test_available_doc_entries_includes_extension_docs(tmp_path):

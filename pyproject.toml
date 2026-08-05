@@ -77,4 +77,5 @@ assets = [
 [tool.setuptools.data-files]
 "share/aichs/docs" = [
   "docs/*.md",
+  "CHANGELOG.md",
 ]

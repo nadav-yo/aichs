@@ -31,7 +31,11 @@ a = Analysis(
     ["main.py"],
     pathex=[str(ROOT)],
     binaries=native_binaries,
-    datas=[(str(ASSETS), "assets"), (str(DOCS), "docs")],
+    datas=[
+        (str(ASSETS), "assets"),
+        (str(DOCS), "docs"),
+        (str(ROOT / "CHANGELOG.md"), "docs"),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

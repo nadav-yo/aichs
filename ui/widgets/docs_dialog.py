@@ -18,6 +18,7 @@ from ui.widgets.window_chrome import chromed_dialog_layout
 
 
 _DOC_ORDER = [
+    "CHANGELOG.md",
     "configuration.md",
     "custom-models.md",
     "extensions.md",
@@ -26,6 +27,7 @@ _DOC_ORDER = [
     "compact.md",
 ]
 _HEADING_RE = re.compile(r"^\s*#\s+(.+?)\s*$", re.MULTILINE)
+_CHANGELOG_NAMES = frozenset({"CHANGELOG.md", "changelog.md"})
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,24 @@ def docs_dir() -> Path:
     return candidates[0]
 
 
+def resolve_doc_path(root: Path, name: str) -> Path | None:
+    """Resolve a doc filename under ``root``, with CHANGELOG falling back to repo root."""
+    direct = root / name
+    if direct.is_file():
+        return direct
+    if name not in _CHANGELOG_NAMES:
+        return None
+    for candidate in (root / "CHANGELOG.md", root / "changelog.md"):
+        if candidate.is_file():
+            return candidate
+    # Source checkouts keep CHANGELOG.md at the repo root next to docs/.
+    if root.name == "docs":
+        parent = root.parent / "CHANGELOG.md"
+        if parent.is_file():
+            return parent
+    return None
+
+
 def doc_title(path: Path) -> str:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -70,10 +90,22 @@ def doc_title(path: Path) -> str:
 
 def available_docs(root: Path | None = None) -> list[Path]:
     root = root or docs_dir()
-    ordered = [root / name for name in _DOC_ORDER if (root / name).is_file()]
+    ordered: list[Path] = []
+    seen: set[str] = set()
+    for name in _DOC_ORDER:
+        path = resolve_doc_path(root, name)
+        if path is None:
+            continue
+        key = os.path.normcase(str(path.resolve()))
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(path)
     extras = sorted(
         path for path in root.glob("*.md")
         if path.name not in _DOC_ORDER
+        and path.name not in _CHANGELOG_NAMES
+        and os.path.normcase(str(path.resolve())) not in seen
     )
     return ordered + extras
 

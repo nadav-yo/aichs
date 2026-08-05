@@ -24,6 +24,9 @@ state, and recent workspaces, to another directory.
 | `theme` | `"dark"` or `"light"` |
 | `font_size` | Chat font size (pt) |
 | `trash_retention_days` | Days to keep deleted chats in Trash before permanent removal (default 14) |
+| `check_for_updates` | When true (default), quietly check PyPI for a newer aichs release at most once per day on startup |
+| `update_dismissed_version` | Latest version the user dismissed; that version will not show the update banner again |
+| `update_last_checked` | Unix timestamp of the last update check attempt |
 | `compaction.reserve_tokens` | Optional. Tokens held back for the next reply before auto-compaction (omit to scale from each model's context window) |
 | `compaction.keep_recent_tokens` | Optional. Recent message tokens to keep verbatim when compacting (omit to scale automatically) |
 
