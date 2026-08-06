@@ -2,6 +2,8 @@
 
 ## Next
 
+## 0.5.3
+
 - Modernize integrated terminal experience using a native Rust terminal helper
 - Update workspace UI styling and interactive terminal panel design
 - Snapshot selected terminal screen lines so `#term[...]` refs match what you highlighted
