@@ -1050,12 +1050,43 @@ def test_terminal_result_message_uses_existing_terminal_schema():
         "stored_line_count": 2,
         "truncated": False,
         "output": "one\ntwo",
+        "terminal_id": "abcd1234",
+        "display_name": "pwsh",
     })
 
     assert msg["synthetic"] == "terminal_result"
     assert msg["terminal"]["command"] == "pwsh"
     assert msg["terminal"]["output"] == "one\ntwo"
+    assert msg["terminal"]["display_name"] == "pwsh"
     assert msg["content"].startswith("exit 0")
+
+
+def test_terminal_display_names_prefer_live_tab_titles():
+    from ui.widgets.chat_panel import _terminal_display_names
+
+    history = [
+        {
+            "synthetic": "terminal_result",
+            "terminal": {
+                "terminal_id": "abcd1234",
+                "display_name": "Old",
+                "command": "pwsh",
+            },
+        },
+        {
+            "synthetic": "terminal_result",
+            "terminal": {
+                "terminal_id": "deadbeef",
+                "command": "Get-ChildItem",
+            },
+        },
+    ]
+    live = type("T", (), {"terminal_display_names": lambda self: {"abcd1234": "pwsh"}})()
+
+    names = _terminal_display_names(history, live)
+
+    assert names["abcd1234"] == "pwsh"
+    assert "deadbeef" not in names
 
 
 def test_send_captures_running_integrated_terminal_snapshot_for_refs():
@@ -1163,6 +1194,18 @@ def test_same_terminal_snapshot_matches_terminal_identity_and_output():
     assert _same_terminal_snapshot([{"synthetic": "terminal_result", "terminal": dict(snapshot["terminal"])}], snapshot)
     assert not _same_terminal_snapshot([], snapshot)
     assert not _same_terminal_snapshot([{"synthetic": "terminal_result", "terminal": {"output": "new"}}], snapshot)
+    with_capture = {
+        "terminal": {
+            "command": "pwsh",
+            "cwd": "C:/repo",
+            "output": "ok",
+            "selection_captures": {"2:2": "README"},
+        }
+    }
+    assert not _same_terminal_snapshot(
+        [{"synthetic": "terminal_result", "terminal": dict(snapshot["terminal"])}],
+        with_capture,
+    )
 
 
 def test_integrated_terminal_finish_records_result_on_active_conversation():

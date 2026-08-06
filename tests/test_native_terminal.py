@@ -140,6 +140,16 @@ def test_native_terminal_handles_protocol_output_frame_and_exit(monkeypatch, qap
     assert len(finished[0]["terminal_id"]) == 8
 
 
+def test_native_terminal_remembers_selection_captures(monkeypatch, qapp):
+    session, _process = _session(monkeypatch)
+
+    session.remember_selection(2, 3, "screen line\nnext line  ")
+    session.remember_selection(2, 3, "")
+    result = session.result(0)
+
+    assert result["selection_captures"] == {"2:3": "screen line\nnext line"}
+
+
 def test_native_terminal_buffers_protocol_lines_and_resizes(monkeypatch, qapp):
     session, process = _session(monkeypatch)
     started = []
@@ -156,6 +166,7 @@ def test_native_terminal_buffers_protocol_lines_and_resizes(monkeypatch, qapp):
 
 def test_native_terminal_writes_base64_input_and_terminates(monkeypatch, qapp):
     session, process = _session(monkeypatch)
+    process.writes.clear()
 
     session.write("echo hello\r\n")
     process.waits = [False, False]
@@ -167,16 +178,68 @@ def test_native_terminal_writes_base64_input_and_terminates(monkeypatch, qapp):
     assert process.killed is True
 
 
+def test_native_terminal_scroll_commands(monkeypatch, qapp):
+    session, process = _session(monkeypatch)
+    process.writes.clear()
+
+    session.scroll(0)
+    session._display_offset = 4
+    session.scroll(3)
+    session.scroll_to_bottom()
+
+    assert [json.loads(item.decode("utf-8")) for item in process.writes] == [
+        {"type": "scroll", "delta": 3},
+        {"type": "scroll", "to_bottom": True},
+    ]
+
+
+def test_native_terminal_write_scrolls_only_when_view_is_scrolled_up(monkeypatch, qapp):
+    session, process = _session(monkeypatch)
+    process.writes.clear()
+
+    session.write("a")
+    session._display_offset = 2
+    session.write("b")
+
+    commands = [json.loads(item.decode("utf-8")) for item in process.writes]
+    assert commands[0]["type"] == "input"
+    assert commands[1] == {"type": "scroll", "to_bottom": True}
+    assert commands[2]["type"] == "input"
+
+
+def test_native_terminal_ignores_unsupported_scroll_errors(monkeypatch, qapp):
+    session, process = _session(monkeypatch)
+    finished, statuses = [], []
+    session.finished.connect(finished.append)
+    session.status.connect(statuses.append)
+    session._display_offset = 3
+
+    session._handle_event({
+        "type": "error",
+        "message": "invalid terminal command: unknown variant `scroll`, expected one of `start`, `input`, `resize`, `shutdown`",
+    })
+    process.writes.clear()
+    session.scroll(2)
+    session.scroll_to_bottom()
+
+    assert finished == []
+    assert statuses == []
+    assert session._scroll_supported is False
+    assert process.writes == []
+
+
 def test_native_terminal_reports_protocol_and_process_errors(monkeypatch, qapp):
     session, process = _session(monkeypatch)
-    finished = []
+    finished, statuses = [], []
     session.finished.connect(finished.append)
+    session.status.connect(statuses.append)
 
     session._handle_event({"type": "error", "message": "no pty"})
     session._on_error(None)
 
     assert finished[0]["exit_code"] == 1
     assert "no pty" in finished[0]["output"]
+    assert statuses[0] == "[terminal error] no pty"
 
 
 def test_native_terminal_ignores_invalid_data_and_finishes_process(monkeypatch, qapp):

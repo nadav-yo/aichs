@@ -256,14 +256,11 @@ class MessageInput(QTextEdit):
             _INPUT_MIN_HEIGHT,
             _INPUT_MIN_HEIGHT + line_height * (_INPUT_MAX_LINES - 2),
         )
-        explicit_lines = self.document().blockCount()
         visual_lines = self._visual_line_count()
         doc_height = math.ceil(self.document().documentLayout().documentSize().height()) + frame
-        target = (
-            _INPUT_MIN_HEIGHT
-            if explicit_lines <= 2 and visual_lines <= 3
-            else max(_INPUT_MIN_HEIGHT, min(max_height, doc_height))
-        )
+        # Soft-wrapped tokens (e.g. long #term[...] refs) increase document height
+        # without adding QTextBlocks — always size to the laid-out document.
+        target = max(_INPUT_MIN_HEIGHT, min(max_height, doc_height))
         self.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded
             if visual_lines > _INPUT_MAX_LINES or doc_height > max_height

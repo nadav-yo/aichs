@@ -1,12 +1,14 @@
 use alacritty_terminal::{
     event::{Event, EventListener},
-    grid::Dimensions,
-    index::{Column, Line},
-    term::{Config, Term},
+    grid::{Dimensions, Scroll},
+    index::{Column, Line, Point},
+    term::{point_to_viewport, Config, Term, TermMode},
     vte::ansi::{Color, Processor, StdSyncHandler},
 };
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
+
+const HISTORY_LINES: usize = 10_000;
 
 #[derive(Clone, Copy)]
 pub struct TerminalSize {
@@ -24,6 +26,8 @@ impl Dimensions for TerminalSize {
     }
 
     fn total_lines(&self) -> usize {
+        // History capacity comes from Config::scrolling_history; this value is
+        // only consulted for a few Dimension helpers, matching Alacritty's tests.
         self.lines
     }
 }
@@ -63,6 +67,9 @@ pub struct TerminalFrame {
     pub spans: Vec<TerminalSpan>,
     pub cursor_row: usize,
     pub cursor_column: usize,
+    pub display_offset: usize,
+    pub history_size: usize,
+    pub alt_screen: bool,
 }
 
 /// Alacritty's terminal state machine, without a GUI renderer.
@@ -91,8 +98,12 @@ impl EventListener for TerminalListener {
 impl TerminalEngine {
     pub fn new(size: TerminalSize) -> Self {
         let listener = TerminalListener::default();
+        let config = Config {
+            scrolling_history: HISTORY_LINES,
+            ..Config::default()
+        };
         Self {
-            term: Term::new(Config::default(), &size, listener.clone()),
+            term: Term::new(config, &size, listener.clone()),
             parser: Processor::new(),
             listener,
         }
@@ -106,6 +117,27 @@ impl TerminalEngine {
         self.term.resize(size);
     }
 
+    pub fn scroll(&mut self, delta: i32) -> bool {
+        if self.term.mode().contains(TermMode::ALT_SCREEN) {
+            return false;
+        }
+        if delta == 0 {
+            return false;
+        }
+        let before = self.term.grid().display_offset();
+        self.term.scroll_display(Scroll::Delta(delta));
+        self.term.grid().display_offset() != before
+    }
+
+    pub fn scroll_to_bottom(&mut self) -> bool {
+        let before = self.term.grid().display_offset();
+        if before == 0 {
+            return false;
+        }
+        self.term.scroll_display(Scroll::Bottom);
+        true
+    }
+
     pub fn take_pty_writes(&self) -> Vec<String> {
         std::mem::take(&mut *self.listener.pty_writes.lock().unwrap())
     }
@@ -113,11 +145,15 @@ impl TerminalEngine {
     pub fn frame(&self) -> TerminalFrame {
         let columns = self.term.columns();
         let lines = self.term.screen_lines();
+        let display_offset = self.term.grid().display_offset();
+        let history_size = self.term.history_size();
+        let alt_screen = self.term.mode().contains(TermMode::ALT_SCREEN);
         let mut text = String::with_capacity(columns * lines + lines.saturating_sub(1));
         let mut spans: Vec<TerminalSpan> = Vec::new();
         for row in 0..lines {
+            let line = Line(row as i32) - display_offset as i32;
             for column in 0..columns {
-                let cell = &self.term.grid()[Line(row as i32)][Column(column)];
+                let cell = &self.term.grid()[line][Column(column)];
                 let mut cell_text = cell.c.to_string();
                 if let Some(zerowidth) = cell.zerowidth() {
                     cell_text.extend(zerowidth);
@@ -152,19 +188,29 @@ impl TerminalEngine {
             }
         }
         let point = self.term.grid().cursor.point;
+        let (cursor_row, cursor_column) =
+            match point_to_viewport(display_offset, Point::new(point.line, point.column)) {
+                Some(viewport) => (viewport.line, viewport.column.0),
+                None => (lines.saturating_sub(1), 0),
+            };
         TerminalFrame {
             columns,
             lines,
             text,
             spans,
-            cursor_row: point.line.0.clamp(0, lines.saturating_sub(1) as i32) as usize,
-            cursor_column: point.column.0.min(columns.saturating_sub(1)),
+            cursor_row,
+            cursor_column,
+            display_offset,
+            history_size,
+            alt_screen,
         }
     }
 }
 
 fn is_default_style(foreground: TerminalColor, background: TerminalColor, flags: u16) -> bool {
-    foreground == TerminalColor::Named(256) && background == TerminalColor::Named(257) && flags == 0
+    foreground == TerminalColor::Named(256)
+        && background == TerminalColor::Named(257)
+        && flags == 0
 }
 
 #[cfg(test)]
@@ -184,6 +230,7 @@ mod tests {
         assert_eq!(&frame.text[..3], "RED");
         assert_eq!(frame.spans[0].foreground, TerminalColor::Named(1));
         assert_eq!(frame.cursor_column, 3);
+        assert_eq!(frame.display_offset, 0);
     }
 
     #[test]
@@ -196,5 +243,22 @@ mod tests {
         engine.process(b"\x1b[6n");
 
         assert_eq!(engine.take_pty_writes(), vec!["\x1b[1;1R"]);
+    }
+
+    #[test]
+    fn scrollback_keeps_history_and_scroll_changes_viewport() {
+        let mut engine = TerminalEngine::new(TerminalSize {
+            columns: 8,
+            lines: 2,
+        });
+        engine.process(b"one\r\ntwo\r\nthree\r\n");
+
+        assert!(engine.frame().history_size > 0);
+        assert!(engine.scroll(1));
+        let scrolled = engine.frame();
+        assert!(scrolled.display_offset > 0);
+        assert!(scrolled.text.contains("one") || scrolled.text.contains("two"));
+        assert!(engine.scroll_to_bottom());
+        assert_eq!(engine.frame().display_offset, 0);
     }
 }

@@ -95,6 +95,10 @@ def terminal_ref_id(ref: str) -> str:
 
 
 
+def selection_capture_key(start: int, end: int) -> str:
+    return f"{int(start)}:{int(end)}"
+
+
 def expand_terminal_refs(text: str, previous_terminal_messages: list[dict]) -> str:
     if not text or not previous_terminal_messages:
         return ""
@@ -114,18 +118,28 @@ def expand_terminal_refs(text: str, previous_terminal_messages: list[dict]) -> s
         output = str(result.get("output") or terminal.get("terminal_output") or "")
         lines = output.splitlines()
         command = str(result.get("command") or terminal.get("terminal_command") or "").strip()
-        requested_start, requested_end = _parse_ref_range(match, len(lines))
-        if requested_start < 1 or requested_start > max(1, len(lines)):
+        captures = _selection_captures(result)
+        requested_start, requested_end = _parse_ref_range(match, max(len(lines), 1))
+        captured = captures.get(selection_capture_key(requested_start, requested_end))
+        if captured is None and (
+            requested_start < 1 or requested_start > max(1, len(lines))
+        ):
             sections.append(
                 f"{match.group(0)}: no stored terminal output lines in that range."
             )
             continue
 
-        end = min(requested_end, len(lines))
-        max_end = requested_start + MAX_TERMINAL_REF_LINES - 1
-        truncated = end > max_end
-        end = min(end, max_end)
-        selected = lines[requested_start - 1:end]
+        if captured is not None:
+            end = requested_end
+            selected = str(captured).splitlines()
+            truncated = len(selected) > MAX_TERMINAL_REF_LINES
+            selected = selected[:MAX_TERMINAL_REF_LINES]
+        else:
+            end = min(requested_end, len(lines))
+            max_end = requested_start + MAX_TERMINAL_REF_LINES - 1
+            truncated = end > max_end
+            end = min(end, max_end)
+            selected = lines[requested_start - 1:end]
         label = terminal_ref(requested_start, end, terminal_id)
         heading = f"Terminal output {label}"
         if command:
@@ -135,6 +149,19 @@ def expand_terminal_refs(text: str, previous_terminal_messages: list[dict]) -> s
             body += f"\n\n[ref truncated: showing first {MAX_TERMINAL_REF_LINES} requested lines]"
         sections.append(f"{heading}\n```text\n{body}\n```")
     return "\n\n".join(sections)
+
+
+def _selection_captures(result: dict) -> dict[str, str]:
+    raw = result.get("selection_captures")
+    if not isinstance(raw, dict):
+        return {}
+    captures: dict[str, str] = {}
+    for key, value in raw.items():
+        text = str(value or "")
+        if not str(key or "").strip() or not text.strip():
+            continue
+        captures[str(key)] = text
+    return captures
 
 
 def _parse_ref_range(match: re.Match, line_count: int) -> tuple[int, int]:

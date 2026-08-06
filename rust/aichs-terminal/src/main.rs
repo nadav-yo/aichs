@@ -36,6 +36,12 @@ enum Command {
         columns: usize,
         lines: usize,
     },
+    Scroll {
+        #[serde(default)]
+        delta: i32,
+        #[serde(default)]
+        to_bottom: bool,
+    },
     Shutdown,
 }
 
@@ -126,6 +132,20 @@ fn main() {
                     }
                     if let Some(engine) = engine.as_mut() {
                         engine.resize(TerminalSize { columns, lines });
+                        emit(Event::Frame {
+                            frame: engine.frame(),
+                        });
+                    }
+                }
+            }
+            Ok(Ok(Command::Scroll { delta, to_bottom })) => {
+                if let Some(engine) = engine.as_mut() {
+                    let changed = if to_bottom {
+                        engine.scroll_to_bottom()
+                    } else {
+                        engine.scroll(delta)
+                    };
+                    if changed {
                         emit(Event::Frame {
                             frame: engine.frame(),
                         });

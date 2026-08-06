@@ -96,6 +96,61 @@ def test_terminal_text_edit_coalesces_native_frames(qapp):
     assert edit.toPlainText() == "b"
 
 
+def test_terminal_text_edit_show_notice_visible_without_frames(qapp):
+    edit = TerminalTextEdit()
+    edit.set_pseudo_terminal_input(True)
+
+    edit.show_notice("[terminal error] native terminal helper is unavailable")
+
+    assert "native terminal helper is unavailable" in edit.toPlainText()
+
+
+def test_terminal_text_edit_page_up_scrolls_history(qapp):
+    edit = TerminalTextEdit()
+    edit.set_pseudo_terminal_input(True)
+    scrolled = []
+    edit.scroll_requested.connect(scrolled.append)
+    edit.render_frame({
+        "columns": 4,
+        "lines": 2,
+        "text": "ab\ncd",
+        "spans": [],
+        "cursor_row": 1,
+        "cursor_column": 0,
+        "history_size": 5,
+        "display_offset": 0,
+        "alt_screen": False,
+    })
+
+    _press(edit, Qt.Key.Key_PageUp)
+
+    assert scrolled == [2]
+
+
+def test_terminal_text_edit_page_up_reaches_pty_on_alt_screen(qapp):
+    edit = TerminalTextEdit()
+    edit.set_pseudo_terminal_input(True)
+    sent, scrolled = [], []
+    edit.input_requested.connect(sent.append)
+    edit.scroll_requested.connect(scrolled.append)
+    edit.render_frame({
+        "columns": 4,
+        "lines": 2,
+        "text": "ab\ncd",
+        "spans": [],
+        "cursor_row": 0,
+        "cursor_column": 0,
+        "history_size": 5,
+        "display_offset": 0,
+        "alt_screen": True,
+    })
+
+    _press(edit, Qt.Key.Key_PageUp)
+
+    assert sent == ["\x1b[5~"]
+    assert scrolled == []
+
+
 def test_terminal_text_edit_ctrl_c_sends_interrupt_without_selection(qapp):
     edit = TerminalTextEdit()
     sent = []
@@ -194,6 +249,52 @@ def test_terminal_text_edit_partial_line_drag_uses_containing_line_reference(qap
     assert mime.text() == "#term[a1b2c3d4:2:2]"
 
 
+def test_terminal_text_edit_copy_captures_screen_lines_for_refs(qapp):
+    edit = TerminalTextEdit()
+    edit.set_terminal_id("a1b2c3d4")
+    captures = []
+    edit.set_selection_capture(lambda start, end, text: captures.append((start, end, text)))
+    edit.render_frame({
+        "columns": 8,
+        "lines": 2,
+        "text": "prompt> x\nREADME  ",
+        "spans": [],
+        "cursor_row": 1,
+        "cursor_column": 0,
+    })
+    cursor = edit.textCursor()
+    cursor.setPosition(10)
+    cursor.setPosition(18, cursor.MoveMode.KeepAnchor)
+    edit.setTextCursor(cursor)
+
+    mime = edit.copy_mime()
+
+    assert mime.text() == "README  "
+    assert bytes(mime.data(TERMINAL_REF_MIME)).decode("utf-8") == "#term[a1b2c3d4:2:2]"
+    assert captures == [(2, 2, "README")]
+
+
+def test_expand_terminal_refs_prefers_selection_captures():
+    from services.terminal_refs import expand_terminal_refs
+
+    expanded = expand_terminal_refs(
+        "explain #term[screen01:2:2]",
+        [{
+            "role": "assistant",
+            "synthetic": "terminal_result",
+            "terminal": {
+                "terminal_id": "screen01",
+                "command": "pwsh",
+                "output": "old transcript line one\nold transcript line two",
+                "selection_captures": {"2:2": "README.md"},
+            },
+        }],
+    )
+
+    assert "README.md" in expanded
+    assert "old transcript" not in expanded
+
+
 class _FakeSignal:
     def __init__(self):
         self.callbacks = []
@@ -208,8 +309,11 @@ class _FakeSignal:
 
 class _FakeSession:
     label = "pwsh"
+    _next_id = 0
 
     def __init__(self, *_args):
+        type(self)._next_id += 1
+        self.terminal_id = f"fake{self._next_id:04d}"
         self.writes = []
         self.started = _FakeSignal()
         self.output = _FakeSignal()
@@ -319,17 +423,41 @@ def test_integrated_terminal_creates_switches_renames_and_closes_tabs(monkeypatc
     assert panel.active_view().styleSheet() == panel._tabs[0].output.styleSheet()
     assert [panel._tab_bar.tabText(index) for index in range(2)] == ["pwsh", "pwsh 2"]
     assert panel.active_session() is second
+    assert panel.terminal_display_names() == {
+        first.terminal_id: "pwsh",
+        second.terminal_id: "pwsh 2",
+    }
 
     monkeypatch.setattr(terminal_panel.QInputDialog, "getText", lambda *_args, **_kwargs: ("Build", True))
     panel.rename_terminal(0)
     panel._tab_bar.setCurrentIndex(0)
     assert panel._tab_bar.tabText(0) == "Build"
     assert panel.active_session() is first
+    assert panel.terminal_display_names()[first.terminal_id] == "Build"
 
     panel.close_terminal(0)
     assert first.terminated is True
     assert panel._tab_bar.count() == 1
     assert panel.active_session() is second
+
+
+def test_integrated_terminal_rename_rejects_duplicate_names(monkeypatch, qapp):
+    panel = _new_panel_with_fake_sessions(monkeypatch)
+    panel.new_terminal()
+    panel.new_terminal()
+    warnings = []
+
+    monkeypatch.setattr(terminal_panel.QInputDialog, "getText", lambda *_args, **_kwargs: ("pwsh 2", True))
+    monkeypatch.setattr(
+        terminal_panel.QMessageBox,
+        "warning",
+        lambda *args, **kwargs: warnings.append((args, kwargs)),
+    )
+
+    panel.rename_terminal(0)
+
+    assert panel._tab_bar.tabText(0) == "pwsh"
+    assert warnings
 
 
 def test_integrated_terminal_closing_last_tab_hides_panel(monkeypatch, qapp):
@@ -370,6 +498,19 @@ def test_integrated_terminal_does_not_emit_a_chat_result_for_closed_tab(monkeypa
     panel._on_finished(tab, {"exit_code": 0})
 
     assert results == []
+
+
+def test_integrated_terminal_finished_includes_display_name(monkeypatch, qapp):
+    panel = _new_panel_with_fake_sessions(monkeypatch)
+    panel.new_terminal()
+    tab = panel._tabs[0]
+    results = []
+    panel.terminal_finished.connect(results.append)
+
+    panel._on_finished(tab, {"exit_code": 0, "terminal_id": tab.session.terminal_id})
+
+    assert results
+    assert results[0]["display_name"] == "pwsh"
 
 
 def test_terminal_text_edit_applies_backspace_echo(qapp):

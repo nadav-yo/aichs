@@ -2543,11 +2543,20 @@ class ChatPanel(QWidget):
             sessions = [terminal.active_session()]
         else:
             sessions = []
-        snapshots = [
-            _terminal_result_message(session.result())
-            for session in sessions
-            if session is not None and session.output_text()
-        ]
+        snapshots = []
+        for session in sessions:
+            if session is None:
+                continue
+            result = session.result()
+            names = {}
+            if hasattr(terminal, "terminal_display_names"):
+                names = terminal.terminal_display_names()
+            display_name = str(names.get(str(getattr(session, "terminal_id", "") or "")) or "").strip()
+            if display_name:
+                result = dict(result)
+                result["display_name"] = display_name
+            if result.get("output") or result.get("selection_captures"):
+                snapshots.append(_terminal_result_message(result))
         if len(snapshots) == 1:
             return snapshots[0]
         return snapshots or None
@@ -4127,6 +4136,8 @@ class ChatPanel(QWidget):
             history_index=history_index, timestamp=timestamp, crew=crew,
             can_regenerate=(history_index == _latest_regenerable_assistant_index(self.history)),
             usage=usage,
+            terminal_names=_terminal_display_names(self.history, getattr(self, "_integrated_terminal", None))
+            if is_user else None,
         )
         bubble.regenerate_requested.connect(self.regenerate)
         bubble.edit_resend_requested.connect(self._edit_resend)
@@ -5212,9 +5223,29 @@ def _same_terminal_snapshot(history: list[dict], snapshot: dict) -> bool:
             str(terminal.get("command") or "") == str(snapshot_terminal.get("command") or "")
             and str(terminal.get("cwd") or "") == str(snapshot_terminal.get("cwd") or "")
             and str(terminal.get("output") or "") == str(snapshot_terminal.get("output") or "")
+            and (terminal.get("selection_captures") or {}) == (snapshot_terminal.get("selection_captures") or {})
         ):
             return True
     return False
+
+
+def _terminal_display_names(history: list[dict], integrated_terminal=None) -> dict[str, str]:
+    """Resolve compact chip titles for `#term[id:…]` tokens in user bubbles."""
+    names: dict[str, str] = {}
+    for message in history or []:
+        terminal = message.get("terminal") if isinstance(message.get("terminal"), dict) else {}
+        terminal_id = str(terminal.get("terminal_id") or "").strip()
+        if not terminal_id:
+            continue
+        display_name = str(terminal.get("display_name") or "").strip()
+        command = str(terminal.get("command") or "").strip()
+        if display_name:
+            names[terminal_id] = display_name
+        elif command.casefold() in {"pwsh", "powershell", "cmd", "bash", "zsh", "fish", "sh"}:
+            names.setdefault(terminal_id, command)
+    if integrated_terminal is not None and hasattr(integrated_terminal, "terminal_display_names"):
+        names.update(integrated_terminal.terminal_display_names())
+    return names
 
 
 def _terminal_result_message(result: dict) -> dict:
@@ -5233,6 +5264,16 @@ def _terminal_result_message(result: dict) -> dict:
         "truncated": bool(result.get("truncated")) or output_dropped,
         "output": output,
     }
+    display_name = str(result.get("display_name") or "").strip()
+    if display_name:
+        terminal["display_name"] = display_name
+    captures = result.get("selection_captures")
+    if isinstance(captures, dict) and captures:
+        terminal["selection_captures"] = {
+            str(key): str(value or "")
+            for key, value in captures.items()
+            if str(key or "").strip() and str(value or "").strip()
+        }
     return {
         "role": "assistant",
         "content": str(result.get("summary") or _terminal_status_detail(terminal)),

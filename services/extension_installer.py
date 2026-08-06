@@ -201,6 +201,8 @@ def git_source_metadata(checkout_path: Path) -> tuple[str, str]:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except (FileNotFoundError, subprocess.CalledProcessError, OSError):
         return "", ""
@@ -477,6 +479,8 @@ def _run_git_clone(url: str, checkout_path: Path) -> None:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except FileNotFoundError as exc:
         raise RuntimeError("git is not installed or not on PATH") from exc

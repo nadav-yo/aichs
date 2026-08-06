@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize, QEvent, QObject, QRunnable, QThreadPool
 from PyQt6.QtCore import QMimeData
-from PyQt6.QtGui import QPixmap, QAction, QGuiApplication, QTextCursor
+from PyQt6.QtGui import QPixmap, QAction, QGuiApplication, QTextCursor, QTextDocument
 
 from services.content import content_text, image_blocks
 from services.crew import crew_name_from_metadata
@@ -181,9 +181,42 @@ class _MarkdownRenderWorker(QRunnable):
 
 _MENTION_RE = re.compile(r'@(?:"([^"]+)"|([^\s@]*[^\s@.,:;!?)\]}]))')
 _USER_INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+_USER_TERMINAL_REF_RE = re.compile(
+    r"(?<!\S)#term\[(?P<terminal_id>[A-Za-z0-9][A-Za-z0-9_-]*):"
+    r"(?P<start>\d+)\s*:\s*(?P<end>\d+)\]"
+)
+_SHELL_CHIP_NAMES = {"pwsh", "powershell", "cmd", "bash", "zsh", "fish", "sh"}
 
 
-def _linkify_user_mentions(text: str) -> str:
+def _terminal_ref_chip_name(terminal_id: str, terminal_names: dict[str, str] | None = None) -> str:
+    names = terminal_names or {}
+    raw = str(names.get(str(terminal_id or "").strip()) or "").strip()
+    if not raw:
+        return "term"
+    # Keep chips short: shell labels and tab titles, not full !commands.
+    if raw.casefold() in _SHELL_CHIP_NAMES:
+        return raw
+    if " " not in raw and len(raw) <= 24 and "/" not in raw and "\\" not in raw:
+        return raw
+    if len(raw) <= 24 and all(ch.isalnum() or ch in "-_ " for ch in raw):
+        return raw
+    return "term"
+
+
+def _terminal_ref_chip_label(
+    start: int,
+    end: int,
+    *,
+    terminal_id: str = "",
+    terminal_names: dict[str, str] | None = None,
+) -> str:
+    name = _terminal_ref_chip_name(terminal_id, terminal_names)
+    if end <= start:
+        return f"{name}:{start}"
+    return f"{name}:{start}-{end}"
+
+
+def _linkify_user_mentions(text: str, terminal_names: dict[str, str] | None = None) -> str:
     link_style = user_reference_style()
 
     def repl(match: re.Match) -> str:
@@ -200,24 +233,63 @@ def _linkify_user_mentions(text: str) -> str:
     parts: list[str] = []
     last = 0
     for match in _MENTION_RE.finditer(text):
-        parts.append(html.escape(text[last:match.start()]))
+        parts.append(_linkify_user_terminal_refs(text[last:match.start()], terminal_names))
         parts.append(repl(match))
+        last = match.end()
+    parts.append(_linkify_user_terminal_refs(text[last:], terminal_names))
+    return "".join(parts)
+
+
+def _linkify_user_terminal_refs(text: str, terminal_names: dict[str, str] | None = None) -> str:
+    link_style = user_reference_style()
+    parts: list[str] = []
+    last = 0
+    for match in _USER_TERMINAL_REF_RE.finditer(text):
+        parts.append(html.escape(text[last:match.start()]))
+        raw = match.group(0)
+        start = int(match.group("start"))
+        end = int(match.group("end"))
+        if end < start:
+            end = start
+        terminal_id = str(match.group("terminal_id") or "").strip()
+        label = html.escape(
+            _terminal_ref_chip_label(
+                start,
+                end,
+                terminal_id=terminal_id,
+                terminal_names=terminal_names,
+            )
+        ).replace(" ", "&nbsp;")
+        title = html.escape(raw, quote=True)
+        parts.append(
+            f'<span style="{link_style} white-space:nowrap;" title="{title}">{label}</span>'
+        )
         last = match.end()
     parts.append(html.escape(text[last:]))
     return "".join(parts)
 
 
-def _linkify_user_text(text: str) -> str:
+def _size_user_bubble_label(label: QLabel, *, max_width: int = 440) -> None:
+    """Keep rich chips visible: QLabel sizeHint often underestimates HTML width."""
+    doc = QTextDocument()
+    doc.setDefaultFont(label.font())
+    doc.setHtml(label.text())
+    width = int(doc.idealWidth()) + 36
+    label.setMinimumWidth(min(max_width, max(160, width)))
+    label.setMaximumWidth(max_width)
+
+
+def _linkify_user_text(text: str, terminal_names: dict[str, str] | None = None) -> str:
     """Render minimal user-message rich text: @file mentions and `inline code`."""
     parts: list[str] = []
     last = 0
     code_style = inline_code_style()
     for match in _USER_INLINE_CODE_RE.finditer(text):
-        parts.append(_linkify_user_mentions(text[last:match.start()]))
+        parts.append(_linkify_user_mentions(text[last:match.start()], terminal_names))
         code = html.escape(match.group(1))
         parts.append(f'<code style="{code_style}">{code}</code>')
         last = match.end()
-    parts.append(_linkify_user_mentions(text[last:]))
+    parts.append(_linkify_user_mentions(text[last:], terminal_names))
     return "".join(parts)
 
 
@@ -426,11 +498,17 @@ class MessageBubble(QFrame):
                  history_index: int = -1, timestamp: str = "",
                  crew: dict | None = None, can_regenerate: bool = False,
                  usage: dict | None = None,
+                 terminal_names: dict[str, str] | None = None,
                  parent=None):
         super().__init__(parent)
         self._is_user = is_user
         self._history_index = history_index
         self._content = content
+        self._terminal_names = {
+            str(key): str(value)
+            for key, value in (terminal_names or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
         self._crew = crew if isinstance(crew, dict) else None
         self._crew_id = str((self._crew or {}).get("id") or "").casefold()
         self._crew_color = str((self._crew or {}).get("color") or "")
@@ -520,7 +598,8 @@ class MessageBubble(QFrame):
             if text or typing:
                 if text and not typing:
                     self.label.setTextFormat(Qt.TextFormat.RichText)
-                    self.label.setText(_linkify_user_text(text))
+                    self.label.setText(_linkify_user_text(text, self._terminal_names))
+                    _size_user_bubble_label(self.label)
                 else:
                     self.label.setTextFormat(Qt.TextFormat.PlainText)
                 self.body.addWidget(self.label, 0, Qt.AlignmentFlag.AlignRight)
@@ -625,7 +704,8 @@ class MessageBubble(QFrame):
     def _show_user_text(self, text: str):
         self._copy_text = text
         self.label.setTextFormat(Qt.TextFormat.RichText)
-        self.label.setText(_linkify_user_text(text))
+        self.label.setText(_linkify_user_text(text, self._terminal_names))
+        _size_user_bubble_label(self.label)
 
     def _cancel_edit(self):
         self.edit_input.hide()

@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QInputDialog,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
@@ -145,6 +146,7 @@ def _terminal_icon(kind: str, *, size: int = 14, color: str = "#c9d2e6") -> QIco
 class TerminalTextEdit(QPlainTextEdit):
     input_requested = pyqtSignal(str)
     terminal_size_changed = pyqtSignal(int, int)
+    scroll_requested = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -153,8 +155,14 @@ class TerminalTextEdit(QPlainTextEdit):
         self._ansi_format = QTextCharFormat()
         self._ansi_pending = ""
         self._terminal_id = ""
+        self._selection_capture = None
         self._enter_sequence = "\r\n"
         self._pending_frame: dict | None = None
+        self._native_mode = False
+        self._alt_screen = False
+        self._history_size = 0
+        self._display_offset = 0
+        self._viewport_lines = 2
         self._frame_timer = QTimer(self)
         self._frame_timer.setSingleShot(True)
         self._frame_timer.setInterval(16)
@@ -187,16 +195,36 @@ class TerminalTextEdit(QPlainTextEdit):
     def record_output(self, _text: str) -> None:
         """Keep native-terminal transcript ownership in the session, not the view."""
 
+    def show_notice(self, text: str) -> None:
+        """Show helper/status errors even when frame rendering owns the document."""
+        notice = str(text or "").rstrip()
+        if not notice:
+            return
+        current = self.toPlainText().rstrip()
+        self.setPlainText(f"{current}\n{notice}".strip() if current else notice)
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.setTextCursor(cursor)
+
     def set_terminal_id(self, terminal_id: str) -> None:
         self._terminal_id = str(terminal_id or "").strip()
 
+    def set_selection_capture(self, callback) -> None:
+        """Register ``callback(start, end, text)`` for screen-line selection refs."""
+        self._selection_capture = callback
+
     def set_pseudo_terminal_input(self, enabled: bool) -> None:
+        self._native_mode = bool(enabled)
         self._enter_sequence = "\r" if enabled else "\r\n"
 
     def render_frame(self, frame: dict) -> None:
         """Render the native engine's authoritative screen grid."""
         columns = max(1, int(frame.get("columns") or 1))
         lines = max(1, int(frame.get("lines") or 1))
+        self._viewport_lines = lines
+        self._alt_screen = bool(frame.get("alt_screen"))
+        self._history_size = max(0, int(frame.get("history_size") or 0))
+        self._display_offset = max(0, int(frame.get("display_offset") or 0))
         text = frame.get("text")
         if not isinstance(text, str):
             return
@@ -312,6 +340,10 @@ class TerminalTextEdit(QPlainTextEdit):
             return ""
         text = self.toPlainText()
         start, end = _cursor_line_range(text, cursor)
+        if self._selection_capture is not None:
+            lines = text.splitlines()
+            captured = "\n".join(line.rstrip() for line in lines[start - 1:end])
+            self._selection_capture(start, end, captured)
         return terminal_ref(start, end, self._terminal_id)
 
     def mousePressEvent(self, event):
@@ -389,6 +421,13 @@ class TerminalTextEdit(QPlainTextEdit):
             return
         modifiers = event.modifiers()
         key = event.key()
+        if self._can_scroll_history():
+            if key == Qt.Key.Key_PageUp:
+                self.scroll_requested.emit(max(1, self._viewport_lines))
+                return
+            if key == Qt.Key.Key_PageDown:
+                self.scroll_requested.emit(-max(1, self._viewport_lines))
+                return
         if modifiers & Qt.KeyboardModifier.ControlModifier:
             if key == Qt.Key.Key_C:
                 self.input_requested.emit("\x03")
@@ -410,6 +449,21 @@ class TerminalTextEdit(QPlainTextEdit):
             self.input_requested.emit(text)
             return
         super().keyPressEvent(event)
+
+    def wheelEvent(self, event):
+        if self._can_scroll_history():
+            delta = event.angleDelta().y()
+            if delta:
+                steps = max(1, abs(delta) // 40)
+                self.scroll_requested.emit(steps if delta > 0 else -steps)
+                event.accept()
+                return
+        super().wheelEvent(event)
+
+    def _can_scroll_history(self) -> bool:
+        return self._native_mode and not self._alt_screen and (
+            self._history_size > 0 or self._display_offset > 0
+        )
 
 
 @dataclass
@@ -489,6 +543,8 @@ class IntegratedTerminalPanel(QFrame):
             self._output_stack.addWidget(output)
         session = self._make_session()
         output.set_terminal_id(getattr(session, "terminal_id", ""))
+        if hasattr(session, "remember_selection"):
+            output.set_selection_capture(session.remember_selection)
         tab = _TerminalTab(session=session, output=output)
         if hasattr(session, "set_size"):
             session.set_size(*self._output_size(output))
@@ -496,8 +552,12 @@ class IntegratedTerminalPanel(QFrame):
         if hasattr(session, "frame"):
             output.set_pseudo_terminal_input(True)
             session.output.connect(output.record_output)
+            if hasattr(session, "status"):
+                session.status.connect(output.show_notice)
             session.frame.connect(output.queue_frame)
             output.terminal_size_changed.connect(session.resize)
+            if hasattr(session, "scroll"):
+                output.scroll_requested.connect(session.scroll)
         else:
             session.output.connect(output.append_output)
         session.finished.connect(lambda result, tab=tab: self._on_finished(tab, result))
@@ -521,6 +581,18 @@ class IntegratedTerminalPanel(QFrame):
             if not tab.closed and str(getattr(tab.session, "terminal_id", "")) == str(terminal_id):
                 return tab.session
         return None
+
+    def terminal_display_names(self) -> dict[str, str]:
+        """Map terminal IDs to current tab titles for compact `#term[...]` chips."""
+        names: dict[str, str] = {}
+        for tab in self._tabs:
+            if tab.closed:
+                continue
+            terminal_id = str(getattr(tab.session, "terminal_id", "") or "").strip()
+            name = str(tab.name or "").strip()
+            if terminal_id and name:
+                names[terminal_id] = name
+        return names
 
     def active_view(self) -> TerminalTextEdit:
         return self.output
@@ -579,9 +651,22 @@ class IntegratedTerminalPanel(QFrame):
         tab = self._tabs[index]
         name, accepted = QInputDialog.getText(self, "Rename terminal", "Name", text=tab.name)
         name = name.strip()
-        if accepted and name:
-            tab.name = name
-            self._tab_bar.setTabText(index, name)
+        if not accepted or not name:
+            return
+        taken = {
+            other.name.casefold()
+            for other in self._tabs
+            if other is not tab and not other.closed and other.name.strip()
+        }
+        if name.casefold() in taken:
+            QMessageBox.warning(
+                self,
+                "Rename terminal",
+                f'A terminal named "{name}" already exists.',
+            )
+            return
+        tab.name = name
+        self._tab_bar.setTabText(index, name)
 
     def apply_appearance(self) -> None:
         p = palette()
@@ -654,7 +739,10 @@ class IntegratedTerminalPanel(QFrame):
             index = self._tabs.index(tab)
             exit_code = int(result.get("exit_code") or 0)
             self._tab_bar.setTabToolTip(index, f"Terminal exited with code {exit_code}")
-        self.terminal_finished.emit(result)
+        payload = dict(result or {})
+        if tab.name.strip():
+            payload["display_name"] = tab.name.strip()
+        self.terminal_finished.emit(payload)
 
     def _default_tab_name(self, shell: str) -> str:
         titles = {tab.name for tab in self._tabs}

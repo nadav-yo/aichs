@@ -28,6 +28,45 @@ def test_user_text_renders_inline_code_without_full_markdown():
     assert "**bold**" in rendered
 
 
+def test_user_text_styles_terminal_refs_like_mentions():
+    rendered = _linkify_user_text("what are reqs here? #term[e2647cef:6:6]")
+
+    assert "term:6" in rendered
+    assert "#term[e2647cef:6:6]" in rendered  # kept as tooltip/title
+    assert "<span style=" in rendered
+    assert "what are reqs here?" in rendered
+
+
+def test_user_text_uses_terminal_tab_name_in_chip():
+    rendered = _linkify_user_text(
+        "what are reqs here? #term[e2647cef:6:6]",
+        terminal_names={"e2647cef": "pwsh"},
+    )
+
+    assert "pwsh:6" in rendered
+    assert "term:6" not in rendered
+    assert "#term[e2647cef:6:6]" in rendered
+
+
+def test_user_bubble_shows_compact_terminal_ref_chip(qapp):
+    bubble = MessageBubble("what are reqs here? #term[e2647cef:6:6]", is_user=True)
+
+    assert "term:6" in bubble.label.text()
+    assert bubble._copy_text == "what are reqs here? #term[e2647cef:6:6]"
+    assert bubble.label.minimumWidth() >= 160
+
+
+def test_user_bubble_shows_named_terminal_ref_chip(qapp):
+    bubble = MessageBubble(
+        "check #term[e2647cef:6:8]",
+        is_user=True,
+        terminal_names={"e2647cef": "pwsh"},
+    )
+
+    assert "pwsh:6-8" in bubble.label.text()
+    assert bubble._copy_text == "check #term[e2647cef:6:8]"
+
+
 def test_user_inline_code_takes_precedence_over_file_mentions():
     rendered = _linkify_user_text("Check `@docs/custom-models.md` and @docs/configuration.md.")
 
@@ -521,10 +560,13 @@ def test_format_timestamp_is_locale_stable_and_relative(monkeypatch):
 
 
 def test_assistant_meta_puts_usage_beside_timestamp(qapp):
+    from datetime import date
+
+    today = date.today().isoformat()
     bubble = MessageBubble(
         "hello",
         is_user=False,
-        timestamp="2026-08-05T14:07:00",
+        timestamp=f"{today}T14:07:00",
         usage={"input_tokens": 12, "output_tokens": 4, "cached_input_tokens": 2},
     )
     try:

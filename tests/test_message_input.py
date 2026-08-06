@@ -115,7 +115,7 @@ def test_paste_workspace_file_url_inserts_file_ref(qapp, tmp_path):
     assert composer.take_pasted_file_refs() == ["src/main.py"]
 
 
-def test_message_input_grows_after_two_lines(qapp):
+def test_message_input_grows_with_document_height(qapp):
     composer = ComposerWidget()
     composer.resize(420, composer.sizeHint().height())
     composer.show()
@@ -133,9 +133,24 @@ def test_message_input_grows_after_two_lines(qapp):
     composer.input.clear()
     qapp.processEvents()
 
-    assert two_line_height == base_height
-    assert three_line_height > base_height
+    assert two_line_height > base_height
+    assert three_line_height > two_line_height
     assert composer.input.height() == base_height
+
+
+def test_composer_grows_for_soft_wrapped_terminal_ref(qapp):
+    composer = ComposerWidget()
+    composer.input.setFixedWidth(220)
+    composer.show()
+    qapp.processEvents()
+    base_height = composer.input.height()
+
+    composer.input.setPlainText("what do we say about #term[bcc2ca51:8:8] ?")
+    composer.input._update_height()
+    qapp.processEvents()
+
+    assert composer.input.height() > base_height
+    assert "#term[bcc2ca51:8:8]" in composer.input.toPlainText()
 
 
 def test_paste_terminal_ref_prefers_hidden_reference(qapp):

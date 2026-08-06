@@ -4,6 +4,7 @@ import json
 
 from services.updates import (
     UpdateAvailability,
+    _version_from_pyproject,
     check_for_update,
     dismiss_version,
     fetch_latest_version,
@@ -28,7 +29,9 @@ def test_parse_and_compare_versions():
 
 def test_installed_version_falls_back_to_pyproject():
     version = installed_version(package="aichs-package-that-does-not-exist")
-    assert version == "0.5.1"
+    expected = _version_from_pyproject()
+    assert version == expected
+    assert version != ""
 
 
 def test_fetch_latest_version_reads_pypi_json(monkeypatch):

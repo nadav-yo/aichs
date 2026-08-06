@@ -214,6 +214,8 @@ def resolve_api_key(spec: str) -> str:
                 shell=True,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
                 creationflags=no_window_creationflags(),
                 startupinfo=no_window_startupinfo(),

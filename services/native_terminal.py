@@ -20,7 +20,7 @@ from PyQt6.QtCore import QObject, QProcess, QProcessEnvironment, pyqtSignal
 
 from aichs_native import binary_path
 from config import MAX_STORED_TERMINAL_OUTPUT_CHARS
-from services.terminal_refs import retain_terminal_output_tail
+from services.terminal_refs import retain_terminal_output_tail, selection_capture_key
 from services.tools import _shell_env, _strip_ansi
 
 
@@ -56,6 +56,7 @@ class NativeTerminalSession(QObject):
     """One interactive shell backed by the native terminal helper."""
 
     output = pyqtSignal(str)
+    status = pyqtSignal(str)
     frame = pyqtSignal(object)
     started = pyqtSignal()
     finished = pyqtSignal(object)
@@ -76,6 +77,9 @@ class NativeTerminalSession(QObject):
         self._finished = False
         self._columns = 120
         self._lines = 30
+        self._selection_captures: dict[str, str] = {}
+        self._display_offset = 0
+        self._scroll_supported = True
 
     @staticmethod
     def available() -> bool:
@@ -120,7 +124,19 @@ class NativeTerminalSession(QObject):
             }
         )
 
+    def scroll(self, delta: int) -> None:
+        amount = int(delta)
+        if amount == 0 or not self._scroll_supported:
+            return
+        self._send({"type": "scroll", "delta": amount})
+
+    def scroll_to_bottom(self) -> None:
+        if not self._scroll_supported or self._display_offset <= 0:
+            return
+        self._send({"type": "scroll", "to_bottom": True})
+
     def write(self, text: str) -> None:
+        self.scroll_to_bottom()
         self._send({"type": "input", "data": _encode(str(text or ""))})
 
     def resize(self, columns: int, lines: int) -> None:
@@ -143,9 +159,18 @@ class NativeTerminalSession(QObject):
     def output_text(self) -> str:
         return self._output_text.rstrip()
 
+    def remember_selection(self, start: int, end: int, text: str) -> None:
+        """Snapshot screen lines for a `#term[id:start:end]` created from the UI."""
+        body = "\n".join(line.rstrip() for line in str(text or "").splitlines())
+        if not body.strip():
+            return
+        start = max(1, int(start))
+        end = max(start, int(end))
+        self._selection_captures[selection_capture_key(start, end)] = body
+
     def result(self, exit_code: int | None = None) -> dict:
         output = self.output_text()
-        return {
+        payload = {
             "terminal_id": self.terminal_id,
             "command": self.label,
             "cwd": self.cwd,
@@ -156,6 +181,9 @@ class NativeTerminalSession(QObject):
             "truncated": self._truncated,
             "output": output,
         }
+        if self._selection_captures:
+            payload["selection_captures"] = dict(self._selection_captures)
+        return payload
 
     def _send(self, command: dict) -> None:
         process = self._process
@@ -193,11 +221,22 @@ class NativeTerminalSession(QObject):
             self._append_output(_strip_ansi(text))
             self.output.emit(text)
         elif kind == "frame" and isinstance(event.get("frame"), dict):
-            self.frame.emit(event["frame"])
+            frame = event["frame"]
+            self._display_offset = max(0, int(frame.get("display_offset") or 0))
+            self.frame.emit(frame)
         elif kind == "exit":
             self._finish(int(event.get("code") or 0))
         elif kind == "error":
-            self._emit_error(str(event.get("message") or "native terminal failed"))
+            message = str(event.get("message") or "native terminal failed")
+            if self._is_unsupported_scroll_error(message):
+                self._scroll_supported = False
+                return
+            self._emit_error(message)
+
+    @staticmethod
+    def _is_unsupported_scroll_error(message: str) -> bool:
+        text = str(message or "").casefold()
+        return "unknown variant" in text and "scroll" in text
 
     def _append_output(self, text: str) -> None:
         self._line_count += text.count("\n")
@@ -211,6 +250,7 @@ class NativeTerminalSession(QObject):
     def _emit_error(self, message: str) -> None:
         text = f"[terminal error] {message}\n"
         self._append_output(text)
+        self.status.emit(text.rstrip("\n"))
         self.output.emit(text)
         self._finish(1)
 

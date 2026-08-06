@@ -2,6 +2,15 @@
 
 ## Next
 
+- Modernize integrated terminal experience using a native Rust terminal helper
+- Update workspace UI styling and interactive terminal panel design
+- Snapshot selected terminal screen lines so `#term[...]` refs match what you highlighted
+- Decode subprocess tool output as UTF-8 on Windows to avoid cp1252 reader crashes
+- Add native terminal scrollback (wheel / PageUp / PageDown) and show helper errors in the pane
+- Keep long `#term[...]` refs visible in the composer and style them in user bubbles
+- Show terminal refs as compact `{tab}:{line}` chips in user bubbles (e.g. `pwsh:6`; `term:N` for `!cmd`)
+- Reject duplicate integrated terminal tab names on rename
+
 ## 0.5.2
 
 - Restore frameless chrome dragging; center Chat Focus / Review / Editor Focus

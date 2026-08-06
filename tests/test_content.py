@@ -500,6 +500,28 @@ def test_terminal_refs_ignore_missing_and_out_of_range_requests():
     assert "no stored terminal output lines" in expand_terminal_refs("show #term[output123:9:10]", messages)
 
 
+def test_terminal_refs_use_selection_captures_when_screen_diverges_from_transcript():
+    messages = [
+        {
+            "role": "assistant",
+            "synthetic": "terminal_result",
+            "terminal": {
+                "terminal_id": "screen01",
+                "command": "pwsh",
+                "output": "C:\\repo> dir\nfile-a\nfile-b\nC:\\repo>",
+                "selection_captures": {"1:1": "README.md"},
+            },
+        },
+        {"role": "user", "content": "open #term[screen01:1:1]"},
+    ]
+
+    expanded = expand_terminal_refs("open #term[screen01:1:1]", messages)
+
+    assert "README.md" in expanded
+    assert "C:\\repo>" not in expanded
+    assert "file-a" not in expanded
+
+
 def test_terminal_summary_running_and_truncated():
     summary = build_terminal_summary({
         "name": "server",

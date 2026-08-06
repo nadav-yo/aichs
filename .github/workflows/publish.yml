@@ -122,6 +122,7 @@ jobs:
           assert any(name.endswith("aichs_native/THIRD_PARTY_NOTICES.md") for name in names)
           assert any(name.endswith(f"aichs_native/bin/rg{suffix}") for name in names)
           assert any(name.endswith(f"aichs_native/bin/aichs-indexer{suffix}") for name in names)
+          assert any(name.endswith(f"aichs_native/bin/aichs-terminal{suffix}") for name in names)
 
       - name: Upload platform wheel
         uses: actions/upload-artifact@v4
