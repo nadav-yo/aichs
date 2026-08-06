@@ -5,7 +5,12 @@ from PyQt6.QtGui import QGuiApplication, QKeyEvent, QTextCursor
 
 import ui.widgets.terminal_panel as terminal_panel
 from services.terminal_refs import TERMINAL_REF_MIME
-from ui.widgets.terminal_panel import IntegratedTerminalPanel, TerminalTextEdit, _terminal_input_from_mime
+from ui.widgets.terminal_panel import (
+    IntegratedTerminalPanel,
+    TerminalTextEdit,
+    _quote_terminal_path,
+    _terminal_input_from_mime,
+)
 
 
 def _press(widget, key, text="", modifiers=Qt.KeyboardModifier.NoModifier):
@@ -174,11 +179,28 @@ def test_terminal_text_edit_pastes_clipboard_text_to_terminal(qapp):
     assert sent == ["echo pasted"]
 
 
-def test_terminal_input_mime_accepts_and_quotes_dropped_files(qapp):
+def test_terminal_input_mime_accepts_and_quotes_dropped_files(qapp, tmp_path):
+    path = tmp_path / "my folder" / "file.txt"
+    path.parent.mkdir()
+    path.write_text("x", encoding="utf-8")
+    local = QUrl.fromLocalFile(str(path)).toLocalFile()
     mime = QMimeData()
-    mime.setUrls([QUrl.fromLocalFile("C:/my folder/file.txt")])
+    mime.setUrls([QUrl.fromLocalFile(str(path))])
 
-    assert _terminal_input_from_mime(mime) == '"C:/my folder/file.txt"'
+    assert _terminal_input_from_mime(mime) == _quote_terminal_path(local)
+    assert " " in local
+    assert _terminal_input_from_mime(mime).startswith(("'", '"'))
+
+
+def test_quote_terminal_path_uses_platform_shell_quoting():
+    spaced = "C:/my folder/file.txt" if sys.platform == "win32" else "/tmp/my folder/file.txt"
+    quoted = _quote_terminal_path(spaced)
+
+    if sys.platform == "win32":
+        assert quoted == '"C:/my folder/file.txt"'
+    else:
+        assert quoted == "'/tmp/my folder/file.txt'"
+    assert _quote_terminal_path("/tmp/plain.txt") == "/tmp/plain.txt"
 
 
 def test_terminal_text_edit_copy_keeps_plain_text_and_composer_reference(qapp):
